@@ -1,0 +1,59 @@
+extend from "C" i32 printf(char *, _vaargs_);
+extend from "C" i32 write(i32, char *, i32);
+extend from "C" i32 read(i32, char *, i32);
+extend from "C" void *malloc(i32);
+extend from "C" void free(void *);
+
+alias string = char*;
+alias ptr<T> = T*;
+
+fun printwrapper() -> i32
+{
+    ret printf("Hello, %s! Number: %d\n", "CHance", 42);
+}
+
+fun main() -> i32
+{
+    // allocate 128 bytes for input
+    ptr<void> buf = malloc(128);
+
+    // prompt the user
+    write(1, "What's your name? > ", 20);
+
+    // read from stdin (fd = 0), max 127 chars
+    i32 len = read(0, buf as char *, 127);
+
+    printf("Read %d bytes\n", printwrapper());
+
+    // null-terminate the string
+    string str = buf as string;
+    if (len > 1)
+    {
+        str[len - 1] = 0; // replace newline with terminator
+    }
+    else
+    {
+        printf("No input read, using empty string\n");
+        str[0] = 0; // ensure valid empty string
+    }
+
+    // print greeting
+    printf("Hello, %s!\n", str);
+
+    printf("String length: %d\n", strlen(str));
+
+    printf("Freeing memory...\n");
+    free(buf);
+
+    ret 0;
+}
+
+fun strlen(string strg) -> i32
+{
+    i32 len = 0;
+    while (strg[len])
+    {
+        len++;
+    }
+    ret len;
+}

@@ -1,0 +1,1 @@
+/usr/bin/cc -O3 -DNDEBUG -Wl,--dependency-file=CMakeFiles/chancec.dir/link.d CMakeFiles/chancec.dir/src/main.c.o -o chancec  libchance_core.a

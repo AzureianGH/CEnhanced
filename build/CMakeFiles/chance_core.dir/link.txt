@@ -1,0 +1,2 @@
+/usr/bin/ar qc libchance_core.a CMakeFiles/chance_core.dir/src/lexer.c.o CMakeFiles/chance_core.dir/src/parser.c.o CMakeFiles/chance_core.dir/src/ast.c.o CMakeFiles/chance_core.dir/src/sema.c.o CMakeFiles/chance_core.dir/src/codegen_coff_x64.c.o CMakeFiles/chance_core.dir/src/crt_stub_coff_x64.c.o CMakeFiles/chance_core.dir/src/util.c.o
+/usr/bin/ranlib libchance_core.a

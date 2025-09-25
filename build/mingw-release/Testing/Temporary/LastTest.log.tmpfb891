@@ -1,0 +1,107 @@
+Start testing: Sep 23 05:44 Eastern Daylight Time
+----------------------------------------------------------
+1/12 Testing: ret0
+1/12 Test: ret0
+Command: "I:/CEnhanced/build/mingw-release/chancec.exe" "-o" "I:/CEnhanced/build/mingw-release/tests/ret0.exe" "I:/CEnhanced/tests/examples/ret0.ce"
+Directory: I:/CEnhanced/build/mingw-release/tests
+"ret0" start time: Sep 23 05:44 Eastern Daylight Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.13 sec
+----------------------------------------------------------
+Test Passed.
+"ret0" end time: Sep 23 05:44 Eastern Daylight Time
+"ret0" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/12 Testing: ret0_check
+2/12 Test: ret0_check
+Command: "E:/Program Files/CMake/bin/cmake.exe" "-P" "I:/CEnhanced/build/mingw-release/tests/ret0_check.cmake"
+Directory: I:/CEnhanced/build/mingw-release/tests
+"ret0_check" start time: Sep 23 05:44 Eastern Daylight Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.06 sec
+----------------------------------------------------------
+Test Passed.
+"ret0_check" end time: Sep 23 05:44 Eastern Daylight Time
+"ret0_check" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/12 Testing: ret42
+3/12 Test: ret42
+Command: "I:/CEnhanced/build/mingw-release/chancec.exe" "-o" "I:/CEnhanced/build/mingw-release/tests/ret42.exe" "I:/CEnhanced/tests/examples/ret42.ce"
+Directory: I:/CEnhanced/build/mingw-release/tests
+"ret42" start time: Sep 23 05:44 Eastern Daylight Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.12 sec
+----------------------------------------------------------
+Test Passed.
+"ret42" end time: Sep 23 05:44 Eastern Daylight Time
+"ret42" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/12 Testing: ret42_check
+4/12 Test: ret42_check
+Command: "E:/Program Files/CMake/bin/cmake.exe" "-P" "I:/CEnhanced/build/mingw-release/tests/ret42_check.cmake"
+Directory: I:/CEnhanced/build/mingw-release/tests
+"ret42_check" start time: Sep 23 05:44 Eastern Daylight Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.07 sec
+----------------------------------------------------------
+Test Passed.
+"ret42_check" end time: Sep 23 05:44 Eastern Daylight Time
+"ret42_check" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/12 Testing: ret_sum
+5/12 Test: ret_sum
+Command: "I:/CEnhanced/build/mingw-release/chancec.exe" "-o" "I:/CEnhanced/build/mingw-release/tests/ret_sum.exe" "I:/CEnhanced/tests/examples/ret_sum.ce"
+Directory: I:/CEnhanced/build/mingw-release/tests
+"ret_sum" start time: Sep 23 05:44 Eastern Daylight Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.13 sec
+----------------------------------------------------------
+Test Passed.
+"ret_sum" end time: Sep 23 05:44 Eastern Daylight Time
+"ret_sum" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/12 Testing: ret_sum_check
+6/12 Test: ret_sum_check
+Command: "E:/Program Files/CMake/bin/cmake.exe" "-P" "I:/CEnhanced/build/mingw-release/tests/ret_sum_check.cmake"
+Directory: I:/CEnhanced/build/mingw-release/tests
+"ret_sum_check" start time: Sep 23 05:44 Eastern Daylight Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.07 sec
+----------------------------------------------------------
+Test Passed.
+"ret_sum_check" end time: Sep 23 05:44 Eastern Daylight Time
+"ret_sum_check" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/12 Testing: call_printf
+7/12 Test: call_printf
+Command: "I:/CEnhanced/build/mingw-release/chancec.exe" "-o" "I:/CEnhanced/build/mingw-release/tests/call_printf.exe" "I:/CEnhanced/tests/examples/call_printf.ce"
+Directory: I:/CEnhanced/build/mingw-release/tests
+"call_printf" start time: Sep 23 05:44 Eastern Daylight Time
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.13 sec
+----------------------------------------------------------
+Test Passed.
+"call_printf" end time: Sep 23 05:44 Eastern Daylight Time
+"call_printf" time elapsed: 00:00:00
+----------------------------------------------------------
+
