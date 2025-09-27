@@ -1,9 +1,9 @@
 #ifndef CHANCE_AST_H
 #define CHANCE_AST_H
 
-#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef enum
 {
@@ -22,6 +22,26 @@ typedef enum
     TK_KW_FROM,
     TK_KW_I32,
     TK_KW_I64,
+    TK_KW_U32,
+    TK_KW_U64,
+    TK_KW_I16,
+    TK_KW_U16,
+    TK_KW_I8,
+    TK_KW_U8,
+    TK_KW_F32,
+    TK_KW_F64,
+    TK_KW_F128,
+    TK_KW_LONG,
+    TK_KW_ULONG,
+    TK_KW_INT,
+    TK_KW_UINT,
+    TK_KW_SHORT,
+    TK_KW_USHORT,
+    TK_KW_BYTE,
+    TK_KW_UBYTE,
+    TK_KW_FLOAT,
+    TK_KW_DOUBLE,
+    TK_KW_CONSTANT,
     TK_KW_VOID,
     TK_KW_CHAR,
     TK_KW_IF,
@@ -41,10 +61,13 @@ typedef enum
     TK_COMMA,      // ,
     TK_PLUS,       // +
     TK_PLUSPLUS,   // ++
+    TK_ANDAND,     // &&
     TK_STAR,       // *
     TK_MINUS,      // -
     TK_MINUSMINUS, // --
     TK_ASSIGN,     // =
+    TK_EQEQ,       // ==
+    TK_BANGEQ,     // !=
     TK_LT,         // <
     TK_GT,         // >
 } TokenKind;
@@ -61,8 +84,17 @@ typedef struct
 
 typedef enum
 {
+    TY_I8,
+    TY_U8,
+    TY_I16,
+    TY_U16,
     TY_I32,
+    TY_U32,
     TY_I64,
+    TY_U64,
+    TY_F32,
+    TY_F64,
+    TY_F128,
     TY_VOID,
     TY_CHAR,
     TY_PTR,
@@ -98,7 +130,17 @@ typedef enum
     ND_PREDEC,
     ND_POSTINC,
     ND_POSTDEC,
+    ND_LAND,
+    ND_EQ,
+    ND_NE,
 } NodeKind;
+
+typedef struct
+{
+    const char *src; // entire source buffer
+    int length;
+    const char *filename;
+} SourceBuffer;
 
 typedef struct Node
 {
@@ -106,6 +148,10 @@ typedef struct Node
     struct Node *lhs;
     struct Node *rhs;
     int64_t int_val; // for ND_INT
+    // Source location for diagnostics
+    int line;
+    int col;
+    const SourceBuffer *src;
     // Typed nodes
     Type *type; // inferred/declared type
     // For ND_FUNC
@@ -126,6 +172,7 @@ typedef struct Node
     // For ND_VAR_DECL
     const char *var_name;
     Type *var_type;
+    int var_is_const; // for ND_VAR_DECL
     // For ND_BLOCK
     struct Node **stmts;
     int stmt_count;
@@ -133,28 +180,24 @@ typedef struct Node
     const char *var_ref;
 } Node;
 
-typedef struct
-{
-    const char *src; // entire source buffer
-    int length;
-    const char *filename;
-} SourceBuffer;
-
 typedef struct Lexer Lexer;
 Lexer *lexer_create(SourceBuffer src);
 void lexer_destroy(Lexer *lx);
 Token lexer_next(Lexer *lx);
 Token lexer_peek(Lexer *lx);
-// Accessor for diagnostics: returns the source buffer associated with this lexer
+// Accessor for diagnostics: returns the source buffer associated with this
+// lexer
 const SourceBuffer *lexer_source(Lexer *lx);
 
 typedef struct Parser Parser;
 Parser *parser_create(SourceBuffer src);
 void parser_destroy(Parser *ps);
-// Parse a translation unit; currently expects one function 'main' with a return int expression
+// Parse a translation unit; currently expects one function 'main' with a return
+// int expression
 Node *parse_unit(Parser *ps);
-// Export parsed extern declarations (extend from "C" ...) into the given symbol table
-// Forward-declare SymTable so it can be referenced here before its full definition below
+// Export parsed extern declarations (extend from "C" ...) into the given symbol
+// table Forward-declare SymTable so it can be referenced here before its full
+// definition below
 typedef struct SymTable SymTable;
 void parser_export_externs(Parser *ps, SymTable *st);
 
@@ -196,9 +239,12 @@ char *xstrdup(const char *s);
 
 // Diagnostics (GCC-like): file:line:col: {error|warning|note}: message
 // If SourceBuffer is provided, we also print the source line and a caret.
-void diag_error_at(const SourceBuffer *src, int line, int col, const char *fmt, ...);
-void diag_warning_at(const SourceBuffer *src, int line, int col, const char *fmt, ...);
-void diag_note_at(const SourceBuffer *src, int line, int col, const char *fmt, ...);
+void diag_error_at(const SourceBuffer *src, int line, int col, const char *fmt,
+                   ...);
+void diag_warning_at(const SourceBuffer *src, int line, int col,
+                     const char *fmt, ...);
+void diag_note_at(const SourceBuffer *src, int line, int col, const char *fmt,
+                  ...);
 void diag_error(const char *fmt, ...);
 void diag_warning(const char *fmt, ...);
 void diag_note(const char *fmt, ...);

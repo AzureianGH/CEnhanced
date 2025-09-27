@@ -1,8 +1,8 @@
+#include "ast.h"
 #include <ctype.h>
-#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "ast.h"
+#include <string.h>
 
 struct Lexer
 {
@@ -15,7 +15,10 @@ struct Lexer
 };
 
 static int at_end(Lexer *lx) { return lx->idx >= lx->src.length; }
-static char peekc(Lexer *lx) { return at_end(lx) ? '\0' : lx->src.src[lx->idx]; }
+static char peekc(Lexer *lx)
+{
+    return at_end(lx) ? '\0' : lx->src.src[lx->idx];
+}
 static char getc2(Lexer *lx)
 {
     if (at_end(lx))
@@ -73,7 +76,8 @@ static void skip_ws_and_comments(Lexer *lx)
             getc2(lx);
             continue;
         }
-        if (c == '/' && lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '/')
+        if (c == '/' && lx->idx + 1 < lx->src.length &&
+            lx->src.src[lx->idx + 1] == '/')
         {
             while (!at_end(lx) && getc2(lx) != '\n')
                 ;
@@ -116,20 +120,61 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_STACK;
     else if (len == 3 && strncmp(p, "reg", 3) == 0)
         k = TK_KW_REG;
-    else if ((len == 6 && strncmp(p, "struct", 6) == 0) || (len == 5 && strncmp(p, "struc", 5) == 0))
+    else if ((len == 6 && strncmp(p, "struct", 6) == 0) ||
+             (len == 5 && strncmp(p, "struc", 5) == 0))
         k = TK_KW_STRUCT;
     else if (len == 6 && strncmp(p, "extend", 6) == 0)
         k = TK_KW_EXTEND;
     else if (len == 4 && strncmp(p, "from", 4) == 0)
         k = TK_KW_FROM;
+    else if (len == 2 && strncmp(p, "i8", 2) == 0)
+        k = TK_KW_I8;
+    else if (len == 2 && strncmp(p, "u8", 2) == 0)
+        k = TK_KW_U8;
+    else if (len == 3 && strncmp(p, "i16", 3) == 0)
+        k = TK_KW_I16;
+    else if (len == 3 && strncmp(p, "u16", 3) == 0)
+        k = TK_KW_U16;
     else if (len == 3 && strncmp(p, "i32", 3) == 0)
         k = TK_KW_I32;
+    else if (len == 3 && strncmp(p, "u32", 3) == 0)
+        k = TK_KW_U32;
     else if (len == 3 && strncmp(p, "i64", 3) == 0)
         k = TK_KW_I64;
+    else if (len == 3 && strncmp(p, "u64", 3) == 0)
+        k = TK_KW_U64;
+    else if (len == 3 && strncmp(p, "f32", 3) == 0)
+        k = TK_KW_F32;
+    else if (len == 3 && strncmp(p, "f64", 3) == 0)
+        k = TK_KW_F64;
+    else if (len == 4 && strncmp(p, "f128", 4) == 0)
+        k = TK_KW_F128;
     else if (len == 4 && strncmp(p, "void", 4) == 0)
         k = TK_KW_VOID;
     else if (len == 4 && strncmp(p, "char", 4) == 0)
         k = TK_KW_CHAR;
+    else if (len == 4 && strncmp(p, "long", 4) == 0)
+        k = TK_KW_LONG;
+    else if (len == 5 && strncmp(p, "ulong", 5) == 0)
+        k = TK_KW_ULONG;
+    else if (len == 3 && strncmp(p, "int", 3) == 0)
+        k = TK_KW_INT;
+    else if (len == 4 && strncmp(p, "uint", 4) == 0)
+        k = TK_KW_UINT;
+    else if (len == 5 && strncmp(p, "short", 5) == 0)
+        k = TK_KW_SHORT;
+    else if (len == 6 && strncmp(p, "ushort", 6) == 0)
+        k = TK_KW_USHORT;
+    else if (len == 4 && strncmp(p, "byte", 4) == 0)
+        k = TK_KW_BYTE;
+    else if (len == 5 && strncmp(p, "ubyte", 5) == 0)
+        k = TK_KW_UBYTE;
+    else if (len == 5 && strncmp(p, "float", 5) == 0)
+        k = TK_KW_FLOAT;
+    else if (len == 6 && strncmp(p, "double", 6) == 0)
+        k = TK_KW_DOUBLE;
+    else if (len == 8 && strncmp(p, "constant", 8) == 0)
+        k = TK_KW_CONSTANT;
     else if (len == 2 && strncmp(p, "if", 2) == 0)
         k = TK_KW_IF;
     else if (len == 4 && strncmp(p, "else", 4) == 0)
@@ -229,6 +274,19 @@ Token lexer_next(Lexer *lx)
         getc2(lx);
         return make_tok(lx, TK_PLUS, lx->src.src + lx->idx - 1, 1);
     }
+    if (c == '&')
+    {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '&')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_ANDAND, lx->src.src + lx->idx - 2, 2);
+        }
+        diag_error_at(&lx->src, lx->line, lx->col,
+                      "unexpected character '%c' (did you mean '&&'?)", c);
+        getc2(lx);
+        return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);
+    }
     if (c == '*')
     {
         getc2(lx);
@@ -256,6 +314,12 @@ Token lexer_next(Lexer *lx)
     }
     if (c == '=')
     {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '=')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_EQEQ, lx->src.src + lx->idx - 2, 2);
+        }
         getc2(lx);
         return make_tok(lx, TK_ASSIGN, lx->src.src + lx->idx - 1, 1);
     }
@@ -268,6 +332,19 @@ Token lexer_next(Lexer *lx)
     {
         getc2(lx);
         return make_tok(lx, TK_GT, lx->src.src + lx->idx - 1, 1);
+    }
+    if (c == '!')
+    {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '=')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_BANGEQ, lx->src.src + lx->idx - 2, 2);
+        }
+        diag_error_at(&lx->src, lx->line, lx->col,
+                      "unexpected character '%c' (did you mean '!='?)", c);
+        getc2(lx);
+        return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);
     }
     // unknown
     diag_error_at(&lx->src, lx->line, lx->col, "unexpected character '%c'", c);
@@ -285,7 +362,4 @@ Token lexer_peek(Lexer *lx)
     return lx->lookahead;
 }
 
-const SourceBuffer *lexer_source(Lexer *lx)
-{
-    return lx ? &lx->src : NULL;
-}
+const SourceBuffer *lexer_source(Lexer *lx) { return lx ? &lx->src : NULL; }

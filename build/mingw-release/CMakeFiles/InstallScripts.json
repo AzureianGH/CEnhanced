@@ -1,8 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"I:/CEnhanced/build/mingw-release/cmake_install.cmake",
-		"I:/CEnhanced/build/mingw-release/tests/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

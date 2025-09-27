@@ -1,8 +1,11 @@
+#include "test.h"
+
 extend from "C" i32 printf(char *, _vaargs_);
 extend from "C" i32 write(i32, char *, i32);
 extend from "C" i32 read(i32, char *, i32);
 extend from "C" void *malloc(i32);
 extend from "C" void free(void *);
+extend from "C" void exit(i32);
 
 alias string = char*;
 alias ptr<T> = T*;
@@ -42,8 +45,23 @@ fun main() -> i32
 
     printf("String length: %d\n", strlen(str));
 
+    string cmp_target = "CHance";
+
+    if (strcmp(str, cmp_target) == 0)
+    {
+        printf("You entered the secret name!\n");
+    }
+    else
+    {
+        printf("You did not enter the secret name.\n");
+    }
+
     printf("Freeing memory...\n");
     free(buf);
+
+    // Test overflow behavior
+    i16 of = test_overflow();
+    printf("Overflow test result (should be -25536): %d\n", of);
 
     ret 0;
 }
@@ -56,4 +74,31 @@ fun strlen(string strg) -> i32
         len++;
     }
     ret len;
+}
+
+fun strcmp(string a, string b) -> i32
+{
+    i32 i = 0;
+    while (a[i] && b[i])
+    {
+        if (a[i] != b[i])
+        {
+            ret a[i] - b[i];
+        }
+        i++;
+    }
+    ret a[i] - b[i];
+}
+
+fun abort() -> void
+{
+    exit(1);
+    ret;
+}
+
+fun test_overflow() -> i16
+{
+    i16 x = 30000;
+    i16 y = 10000;
+    ret x + y; // expect overflow to -25536
 }

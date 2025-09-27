@@ -1,8 +1,9 @@
+#include "ast.h"
+#include <stdarg.h>
 #include <stdint.h>
-#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include "ast.h"
+#include <string.h>
 
 // Minimal x64 COFF object generator that emits one .text section with a
 // 'main' function: mov eax, imm32; ret. We then link it using MinGW 'cc'.
@@ -48,7 +49,27 @@ static int64_t eval_expr(const Node *n)
     }
 }
 
-// Helper: build assembly file path from output path by replacing extension with .S (or appending)
+static void cg_error(const Node *n, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    if (n && n->src)
+    {
+        char buf[512];
+        vsnprintf(buf, sizeof(buf), fmt, ap);
+        diag_error_at(n->src, n->line > 0 ? n->line : 1, n->col > 0 ? n->col : 1,
+                      "%s", buf);
+    }
+    else
+    {
+        vfprintf(stderr, "error: ", ap);
+        fputc('\n', stderr);
+    }
+    va_end(ap);
+}
+
+// Helper: build assembly file path from output path by replacing extension with
+// .S (or appending)
 static void form_asm_path(char *dst, size_t dstsz, const char *out)
 {
     if (!out || !*out)
@@ -90,7 +111,8 @@ static void form_asm_path(char *dst, size_t dstsz, const char *out)
     }
 }
 
-// -------------------- Simple Intel GAS ASM backend (Windows x64) --------------------
+// -------------------- Simple Intel GAS ASM backend (Windows x64)
+// --------------------
 typedef struct
 {
     const Node *fn;
@@ -114,6 +136,82 @@ typedef struct
     int ret_id;     // unique return label id per function
 } AsmCtx;
 
+// Return storage width in bytes for a given primitive kind
+static int kind_width(int k)
+{
+    switch (k)
+    {
+    case TY_I8:
+    case TY_U8:
+        return 1;
+    case TY_I16:
+    case TY_U16:
+        return 2;
+    case TY_I32:
+    case TY_U32:
+    case TY_F32:
+        return 4;
+    case TY_F128:
+        return 16;
+    default:
+        return 8; // i64/u64/pointer/f64 default to 8
+    }
+}
+
+// Emit a store of an incoming argument register to a local stack slot according
+// to width and OS ABI
+static void asm_store_param_width(FILE *as, int is_linux, int pi, int off,
+                                  int k)
+{
+    int w = kind_width(k);
+    if (is_linux)
+    {
+        // Linux SysV: rdi, rsi, rdx, rcx, r8, r9
+        const char *r8s[] = {"dil", "sil", "dl", "cl", "r8b", "r9b"};
+        const char *r16s[] = {"di", "si", "dx", "cx", "r8w", "r9w"};
+        const char *r32s[] = {"edi", "esi", "edx", "ecx", "r8d", "r9d"};
+        const char *r64s[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+        if (pi >= 0 && pi < 6)
+        {
+            if (w == 1)
+                fprintf(as, "  mov byte ptr [rbp%+d], %s\n", off, r8s[pi]);
+            else if (w == 2)
+                fprintf(as, "  mov word ptr [rbp%+d], %s\n", off, r16s[pi]);
+            else if (w == 4)
+                fprintf(as, "  mov dword ptr [rbp%+d], %s\n", off, r32s[pi]);
+            else
+                fprintf(as, "  mov [rbp%+d], %s\n", off, r64s[pi]);
+        }
+        else
+        {
+            // TODO: stack-passed args
+        }
+    }
+    else
+    {
+        // Windows x64: rcx, rdx, r8, r9
+        const char *r8s[] = {"cl", "dl", "r8b", "r9b"};
+        const char *r16s[] = {"cx", "dx", "r8w", "r9w"};
+        const char *r32s[] = {"ecx", "edx", "r8d", "r9d"};
+        const char *r64s[] = {"rcx", "rdx", "r8", "r9"};
+        if (pi >= 0 && pi < 4)
+        {
+            if (w == 1)
+                fprintf(as, "  mov byte ptr [rbp%+d], %s\n", off, r8s[pi]);
+            else if (w == 2)
+                fprintf(as, "  mov word ptr [rbp%+d], %s\n", off, r16s[pi]);
+            else if (w == 4)
+                fprintf(as, "  mov dword ptr [rbp%+d], %s\n", off, r32s[pi]);
+            else
+                fprintf(as, "  mov [rbp%+d], %s\n", off, r64s[pi]);
+        }
+        else
+        {
+            // TODO: stack-passed args (>4)
+        }
+    }
+}
+
 static int asm_find_local(AsmCtx *ac, const char *name)
 {
     for (int i = 0; i < ac->local_cnt; i++)
@@ -135,7 +233,11 @@ static int asm_add_local(AsmCtx *ac, const char *name, Type *ty, int size)
     return -off;
 }
 // ---- String literal decoding (C-like escapes) ----
-static int is_hex(int c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+static int is_hex(int c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
+}
 static int hex_val(int c)
 {
     if (c >= '0' && c <= '9')
@@ -180,7 +282,8 @@ static int utf8_encode(uint32_t cp, unsigned char out[4])
 static unsigned char *decode_c_escapes(const char *s, int len, int *out_len)
 {
     // s is the raw characters inside the quotes (may contain backslashes)
-    unsigned char *buf = (unsigned char *)xmalloc((size_t)len); // cooked length <= raw length
+    unsigned char *buf =
+        (unsigned char *)xmalloc((size_t)len); // cooked length <= raw length
     int bi = 0;
     for (int i = 0; i < len;)
     {
@@ -256,9 +359,14 @@ static unsigned char *decode_c_escapes(const char *s, int len, int *out_len)
         case 'u':
         {
             // exactly 4 hex digits
-            if (i + 4 <= len && is_hex((unsigned char)s[i]) && is_hex((unsigned char)s[i + 1]) && is_hex((unsigned char)s[i + 2]) && is_hex((unsigned char)s[i + 3]))
+            if (i + 4 <= len && is_hex((unsigned char)s[i]) &&
+                is_hex((unsigned char)s[i + 1]) && is_hex((unsigned char)s[i + 2]) &&
+                is_hex((unsigned char)s[i + 3]))
             {
-                uint32_t v = (hex_val((unsigned char)s[i]) << 12) | (hex_val((unsigned char)s[i + 1]) << 8) | (hex_val((unsigned char)s[i + 2]) << 4) | hex_val((unsigned char)s[i + 3]);
+                uint32_t v = (hex_val((unsigned char)s[i]) << 12) |
+                             (hex_val((unsigned char)s[i + 1]) << 8) |
+                             (hex_val((unsigned char)s[i + 2]) << 4) |
+                             hex_val((unsigned char)s[i + 3]);
                 i += 4;
                 unsigned char tmp[4];
                 int n = utf8_encode(v, tmp);
@@ -336,7 +444,8 @@ static int asm_intern_string(AsmCtx *ac, const char *s, int len)
     unsigned char *cooked = decode_c_escapes(s, len, &cooked_len);
     for (int i = 0; i < ac->str_cnt; i++)
     {
-        if (ac->strs[i].len == cooked_len && memcmp(ac->strs[i].data, cooked, (size_t)cooked_len) == 0)
+        if (ac->strs[i].len == cooked_len &&
+            memcmp(ac->strs[i].data, cooked, (size_t)cooked_len) == 0)
         {
             free(cooked);
             return ac->strs[i].id;
@@ -361,7 +470,8 @@ static void asm_emit_str_section(AsmCtx *ac)
     if (ac->str_cnt == 0)
         return;
     // Section differs by OS
-    if (ac->fn && ac->fn->type && ac->fn->type->kind)
+    if (ac->fn && ac->fn->type &&
+        ac->fn->type->kind)
     { /* no-op to silence warnings */
     }
     // We'll choose based on a global-ish flag: emit_linux is set by prologue
@@ -432,14 +542,15 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
         int idx = asm_find_local(ac, lv->var_ref);
         if (idx < 0)
         {
-            diag_error("codegen: unknown local '%s'", lv->var_ref);
+            cg_error(lv, "codegen: unknown local '%s'", lv->var_ref);
             exit(1);
         }
         int off = ac->locals[idx].offset;
         fprintf(ac->as, "  lea rax, [rbp%+d]\n", off);
         return;
     }
-    if (lv->kind == ND_INDEX)
+    if (lv->kind ==
+        ND_INDEX)
     { // only pointer base + i32 index, byte addressing for char*
         // base address -> rax
         if (lv->lhs->kind == ND_VAR)
@@ -447,7 +558,7 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
             int idx = asm_find_local(ac, lv->lhs->var_ref);
             if (idx < 0)
             {
-                diag_error("codegen: unknown local in index");
+                cg_error(lv, "codegen: unknown local in index");
                 exit(1);
             }
             int off = ac->locals[idx].offset;
@@ -458,7 +569,7 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
             int idx = asm_find_local(ac, lv->lhs->lhs->var_ref);
             if (idx < 0)
             {
-                diag_error("codegen: unknown local in cast index");
+                cg_error(lv, "codegen: unknown local in cast index");
                 exit(1);
             }
             int off = ac->locals[idx].offset;
@@ -466,7 +577,7 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
         }
         else
         {
-            diag_error("codegen: unsupported index base");
+            cg_error(lv, "codegen: unsupported index base");
             exit(1);
         }
         // preserve base in rdx, compute index into rax, then add
@@ -475,7 +586,7 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
         fprintf(ac->as, "  add rax, rdx\n");
         return;
     }
-    diag_error("codegen: unsupported lvalue kind %d", lv->kind);
+    cg_error(lv, "codegen: unsupported lvalue kind %d", lv->kind);
     exit(1);
 }
 
@@ -487,17 +598,33 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
     case ND_INT:
         fprintf(ac->as, "  mov eax, %d\n", (int)(int32_t)e->int_val);
         break;
+    case ND_INDEX:
+    {
+        // Load byte from *(base + index)
+        asm_addr_for_lvalue_to_rax(ac, e);
+        fprintf(ac->as, "  movzx eax, byte ptr [rax]\n");
+        break;
+    }
     case ND_VAR:
     {
         int idx = asm_find_local(ac, e->var_ref);
         if (idx < 0)
         {
-            diag_error("codegen: unknown local '%s'", e->var_ref);
+            cg_error(e, "codegen: unknown local '%s'", e->var_ref);
             exit(1);
         }
         int off = ac->locals[idx].offset;
         Type *ty = ac->locals[idx].type;
-        if (ty && ty->kind == TY_I32)
+        int k = ty ? ty->kind : TY_I64;
+        if (k == TY_I8)
+            fprintf(ac->as, "  movsx eax, byte ptr [rbp%+d]\n", off);
+        else if (k == TY_U8)
+            fprintf(ac->as, "  movzx eax, byte ptr [rbp%+d]\n", off);
+        else if (k == TY_I16)
+            fprintf(ac->as, "  movsx eax, word ptr [rbp%+d]\n", off);
+        else if (k == TY_U16)
+            fprintf(ac->as, "  movzx eax, word ptr [rbp%+d]\n", off);
+        else if (k == TY_I32 || k == TY_U32)
             fprintf(ac->as, "  mov eax, dword ptr [rbp%+d]\n", off);
         else
             fprintf(ac->as, "  mov rax, [rbp%+d]\n", off);
@@ -519,11 +646,276 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
         asm_eval_expr_to_rax(ac, e->lhs);
         fprintf(ac->as, "  push rax\n");
         asm_eval_expr_to_rax(ac, e->rhs);
-        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  cmp rax, rcx\n  setg al\n  movzx eax, al\n");
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  cmp rax, rcx\n  setg al\n  "
+                        "movzx eax, al\n");
+        break;
+    case ND_EQ:
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  push rax\n");
+        asm_eval_expr_to_rax(ac, e->rhs);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  cmp rax, rcx\n  sete al\n  "
+                        "movzx eax, al\n");
+        break;
+    case ND_NE:
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  push rax\n");
+        asm_eval_expr_to_rax(ac, e->rhs);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  cmp rax, rcx\n  setne al\n  "
+                        "movzx eax, al\n");
         break;
     case ND_CAST:
         asm_eval_expr_to_rax(ac, e->lhs);
         break;
+    case ND_LAND:
+    {
+        int lid = ac->next_lbl++;
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  cmp eax, 0\n  je .Lland_false%d\n", lid);
+        asm_eval_expr_to_rax(ac, e->rhs);
+        fprintf(ac->as,
+                "  cmp eax, 0\n  je .Lland_false%d\n  mov eax, 1\n  jmp "
+                ".Lland_end%d\n.Lland_false%d:\n  xor eax, eax\n.Lland_end%d:\n",
+                lid, lid, lid, lid);
+        break;
+    }
+    case ND_PREINC:
+    {
+        if (!e->lhs || e->lhs->kind != ND_VAR)
+        {
+            cg_error(e, "codegen: ++ expects variable");
+            exit(1);
+        }
+        int idx = asm_find_local(ac, e->lhs->var_ref);
+        if (idx < 0)
+        {
+            cg_error(e, "codegen: unknown local in preinc");
+            exit(1);
+        }
+        int off = ac->locals[idx].offset;
+        Type *ty = ac->locals[idx].type;
+        int k = ty ? ty->kind : TY_I64;
+        if (k == TY_I8)
+        {
+            fprintf(ac->as,
+                    "  mov al, byte ptr [rbp%+d]\n  add al, 1\n  mov byte ptr "
+                    "[rbp%+d], al\n  movsx eax, al\n",
+                    off, off);
+        }
+        else if (k == TY_U8)
+        {
+            fprintf(ac->as,
+                    "  mov al, byte ptr [rbp%+d]\n  add al, 1\n  mov byte ptr "
+                    "[rbp%+d], al\n  movzx eax, al\n",
+                    off, off);
+        }
+        else if (k == TY_I16)
+        {
+            fprintf(ac->as,
+                    "  mov ax, word ptr [rbp%+d]\n  add ax, 1\n  mov word ptr "
+                    "[rbp%+d], ax\n  movsx eax, ax\n",
+                    off, off);
+        }
+        else if (k == TY_U16)
+        {
+            fprintf(ac->as,
+                    "  mov ax, word ptr [rbp%+d]\n  add ax, 1\n  mov word ptr "
+                    "[rbp%+d], ax\n  movzx eax, ax\n",
+                    off, off);
+        }
+        else if (k == TY_I32 || k == TY_U32)
+        {
+            fprintf(ac->as,
+                    "  mov eax, dword ptr [rbp%+d]\n  add eax, 1\n  mov dword ptr "
+                    "[rbp%+d], eax\n",
+                    off, off);
+        }
+        else
+        {
+            fprintf(ac->as,
+                    "  mov rax, [rbp%+d]\n  add rax, 1\n  mov [rbp%+d], rax\n", off,
+                    off);
+        }
+        break;
+    }
+    case ND_PREDEC:
+    {
+        if (!e->lhs || e->lhs->kind != ND_VAR)
+        {
+            cg_error(e, "codegen: -- expects variable");
+            exit(1);
+        }
+        int idx = asm_find_local(ac, e->lhs->var_ref);
+        if (idx < 0)
+        {
+            cg_error(e, "codegen: unknown local in predec");
+            exit(1);
+        }
+        int off = ac->locals[idx].offset;
+        Type *ty = ac->locals[idx].type;
+        int k = ty ? ty->kind : TY_I64;
+        if (k == TY_I8)
+        {
+            fprintf(ac->as,
+                    "  mov al, byte ptr [rbp%+d]\n  sub al, 1\n  mov byte ptr "
+                    "[rbp%+d], al\n  movsx eax, al\n",
+                    off, off);
+        }
+        else if (k == TY_U8)
+        {
+            fprintf(ac->as,
+                    "  mov al, byte ptr [rbp%+d]\n  sub al, 1\n  mov byte ptr "
+                    "[rbp%+d], al\n  movzx eax, al\n",
+                    off, off);
+        }
+        else if (k == TY_I16)
+        {
+            fprintf(ac->as,
+                    "  mov ax, word ptr [rbp%+d]\n  sub ax, 1\n  mov word ptr "
+                    "[rbp%+d], ax\n  movsx eax, ax\n",
+                    off, off);
+        }
+        else if (k == TY_U16)
+        {
+            fprintf(ac->as,
+                    "  mov ax, word ptr [rbp%+d]\n  sub ax, 1\n  mov word ptr "
+                    "[rbp%+d], ax\n  movzx eax, ax\n",
+                    off, off);
+        }
+        else if (k == TY_I32 || k == TY_U32)
+        {
+            fprintf(ac->as,
+                    "  mov eax, dword ptr [rbp%+d]\n  sub eax, 1\n  mov dword ptr "
+                    "[rbp%+d], eax\n",
+                    off, off);
+        }
+        else
+        {
+            fprintf(ac->as,
+                    "  mov rax, [rbp%+d]\n  sub rax, 1\n  mov [rbp%+d], rax\n", off,
+                    off);
+        }
+        break;
+    }
+    case ND_POSTINC:
+    {
+        if (!e->lhs || e->lhs->kind != ND_VAR)
+        {
+            cg_error(e, "codegen: ++ expects variable");
+            exit(1);
+        }
+        int idx = asm_find_local(ac, e->lhs->var_ref);
+        if (idx < 0)
+        {
+            cg_error(e, "codegen: unknown local in postinc");
+            exit(1);
+        }
+        int off = ac->locals[idx].offset;
+        Type *ty = ac->locals[idx].type;
+        int k = ty ? ty->kind : TY_I64;
+        if (k == TY_I8)
+        {
+            fprintf(ac->as,
+                    "  mov al, byte ptr [rbp%+d]\n  mov cl, al\n  add al, 1\n  mov "
+                    "byte ptr [rbp%+d], al\n  movsx eax, cl\n",
+                    off, off);
+        }
+        else if (k == TY_U8)
+        {
+            fprintf(ac->as,
+                    "  mov al, byte ptr [rbp%+d]\n  mov cl, al\n  add al, 1\n  mov "
+                    "byte ptr [rbp%+d], al\n  movzx eax, cl\n",
+                    off, off);
+        }
+        else if (k == TY_I16)
+        {
+            fprintf(ac->as,
+                    "  mov ax, word ptr [rbp%+d]\n  mov cx, ax\n  add ax, 1\n  mov "
+                    "word ptr [rbp%+d], ax\n  movsx eax, cx\n",
+                    off, off);
+        }
+        else if (k == TY_U16)
+        {
+            fprintf(ac->as,
+                    "  mov ax, word ptr [rbp%+d]\n  mov cx, ax\n  add ax, 1\n  mov "
+                    "word ptr [rbp%+d], ax\n  movzx eax, cx\n",
+                    off, off);
+        }
+        else if (k == TY_I32 || k == TY_U32)
+        {
+            fprintf(ac->as,
+                    "  mov ecx, dword ptr [rbp%+d]\n  mov eax, ecx\n  add ecx, 1\n  "
+                    "mov dword ptr [rbp%+d], ecx\n",
+                    off, off);
+        }
+        else
+        {
+            fprintf(ac->as,
+                    "  mov rcx, [rbp%+d]\n  mov rax, rcx\n  add rcx, 1\n  mov "
+                    "[rbp%+d], rcx\n",
+                    off, off);
+        }
+        break;
+    }
+    case ND_POSTDEC:
+    {
+        if (!e->lhs || e->lhs->kind != ND_VAR)
+        {
+            cg_error(e, "codegen: -- expects variable");
+            exit(1);
+        }
+        int idx = asm_find_local(ac, e->lhs->var_ref);
+        if (idx < 0)
+        {
+            cg_error(e, "codegen: unknown local in postdec");
+            exit(1);
+        }
+        int off = ac->locals[idx].offset;
+        Type *ty = ac->locals[idx].type;
+        int k = ty ? ty->kind : TY_I64;
+        if (k == TY_I8)
+        {
+            fprintf(ac->as,
+                    "  mov al, byte ptr [rbp%+d]\n  mov cl, al\n  sub al, 1\n  mov "
+                    "byte ptr [rbp%+d], al\n  movsx eax, cl\n",
+                    off, off);
+        }
+        else if (k == TY_U8)
+        {
+            fprintf(ac->as,
+                    "  mov al, byte ptr [rbp%+d]\n  mov cl, al\n  sub al, 1\n  mov "
+                    "byte ptr [rbp%+d], al\n  movzx eax, cl\n",
+                    off, off);
+        }
+        else if (k == TY_I16)
+        {
+            fprintf(ac->as,
+                    "  mov ax, word ptr [rbp%+d]\n  mov cx, ax\n  sub ax, 1\n  mov "
+                    "word ptr [rbp%+d], ax\n  movsx eax, cx\n",
+                    off, off);
+        }
+        else if (k == TY_U16)
+        {
+            fprintf(ac->as,
+                    "  mov ax, word ptr [rbp%+d]\n  mov cx, ax\n  sub ax, 1\n  mov "
+                    "word ptr [rbp%+d], ax\n  movzx eax, cx\n",
+                    off, off);
+        }
+        else if (k == TY_I32 || k == TY_U32)
+        {
+            fprintf(ac->as,
+                    "  mov ecx, dword ptr [rbp%+d]\n  mov eax, ecx\n  sub ecx, 1\n  "
+                    "mov dword ptr [rbp%+d], ecx\n",
+                    off, off);
+        }
+        else
+        {
+            fprintf(ac->as,
+                    "  mov rcx, [rbp%+d]\n  mov rax, rcx\n  sub rcx, 1\n  mov "
+                    "[rbp%+d], rcx\n",
+                    off, off);
+        }
+        break;
+    }
     case ND_STRING:
     {
         int id = asm_intern_string(ac, e->str_data, e->str_len);
@@ -596,7 +988,8 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
     }
     case ND_ASSIGN:
     {
-        // Evaluate assignment as an expression: perform the store and leave the assigned value in rax
+        // Evaluate assignment as an expression: perform the store and leave the
+        // assigned value in rax
         if (e->lhs->kind == ND_VAR)
         {
             int idx = asm_find_local(ac, e->lhs->var_ref);
@@ -607,14 +1000,19 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
             }
             int off = ac->locals[idx].offset;
             Type *ty = ac->locals[idx].type;
-            int size = (ty && ty->kind == TY_I32) ? 4 : 8;
+            int k = ty ? ty->kind : TY_I64;
             asm_eval_expr_to_rax(ac, e->rhs);
-            if (size == 4)
+            if (k == TY_I8 || k == TY_U8)
+                fprintf(ac->as, "  mov byte ptr [rbp%+d], al\n", off);
+            else if (k == TY_I16 || k == TY_U16)
+                fprintf(ac->as, "  mov word ptr [rbp%+d], ax\n", off);
+            else if (k == TY_I32 || k == TY_U32)
                 fprintf(ac->as, "  mov dword ptr [rbp%+d], eax\n", off);
             else
                 fprintf(ac->as, "  mov [rbp%+d], rax\n", off);
         }
-        else if (e->lhs->kind == ND_INDEX || (e->lhs->kind == ND_CAST && e->lhs->lhs->kind == ND_INDEX))
+        else if (e->lhs->kind == ND_INDEX ||
+                 (e->lhs->kind == ND_CAST && e->lhs->lhs->kind == ND_INDEX))
         {
             const Node *ix = (e->lhs->kind == ND_INDEX) ? e->lhs : e->lhs->lhs;
             asm_addr_for_lvalue_to_rax(ac, ix);
@@ -629,8 +1027,9 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
         }
         break;
     }
+
     default:
-        diag_error("codegen: unsupported expr kind %d", e->kind);
+        cg_error(e, "codegen: unsupported expr kind %d", e->kind);
         exit(1);
     }
 }
@@ -642,12 +1041,16 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
     {
     case ND_VAR_DECL:
     {
-        int size = (s->var_type && s->var_type->kind == TY_I32) ? 4 : 8;
+        int size = (s->var_type ? kind_width(s->var_type->kind) : 8);
         int off = asm_add_local(ac, s->var_name, s->var_type, size);
         if (s->rhs)
         {
             asm_eval_expr_to_rax(ac, s->rhs);
-            if (size == 4)
+            if (size == 1)
+                fprintf(ac->as, "  mov byte ptr [rbp%+d], al\n", off);
+            else if (size == 2)
+                fprintf(ac->as, "  mov word ptr [rbp%+d], ax\n", off);
+            else if (size == 4)
                 fprintf(ac->as, "  mov dword ptr [rbp%+d], eax\n", off);
             else
                 fprintf(ac->as, "  mov [rbp%+d], rax\n", off);
@@ -664,22 +1067,28 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
                 int idx = asm_find_local(ac, as->lhs->var_ref);
                 if (idx < 0)
                 {
-                    diag_error("codegen: unknown local in assign");
+                    cg_error(s, "codegen: unknown local in assign");
                     exit(1);
                 }
                 int off = ac->locals[idx].offset;
                 Type *ty = ac->locals[idx].type;
-                int size = (ty && ty->kind == TY_I32) ? 4 : 8;
+                int k = ty ? ty->kind : TY_I64;
                 asm_eval_expr_to_rax(ac, as->rhs);
-                if (size == 4)
+                if (k == TY_I8 || k == TY_U8)
+                    fprintf(ac->as, "  mov byte ptr [rbp%+d], al\n", off);
+                else if (k == TY_I16 || k == TY_U16)
+                    fprintf(ac->as, "  mov word ptr [rbp%+d], ax\n", off);
+                else if (k == TY_I32 || k == TY_U32)
                     fprintf(ac->as, "  mov dword ptr [rbp%+d], eax\n", off);
                 else
                     fprintf(ac->as, "  mov [rbp%+d], rax\n", off);
             }
-            else if (as->lhs->kind == ND_INDEX || (as->lhs->kind == ND_CAST && as->lhs->lhs->kind == ND_INDEX))
+            else if (as->lhs->kind == ND_INDEX ||
+                     (as->lhs->kind == ND_CAST && as->lhs->lhs->kind == ND_INDEX))
             {
                 const Node *ix = (as->lhs->kind == ND_INDEX) ? as->lhs : as->lhs->lhs;
-                // Compute address of lvalue and preserve it in rdx (since RHS eval clobbers rax)
+                // Compute address of lvalue and preserve it in rdx (since RHS eval
+                // clobbers rax)
                 asm_addr_for_lvalue_to_rax(ac, ix);
                 fprintf(ac->as, "  mov rdx, rax\n");
                 asm_eval_expr_to_rax(ac, as->rhs);
@@ -687,7 +1096,7 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
             }
             else
             {
-                diag_error("codegen: unsupported assign expr");
+                cg_error(s, "codegen: unsupported assign expr");
                 exit(1);
             }
         }
@@ -704,22 +1113,28 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
             int idx = asm_find_local(ac, s->lhs->var_ref);
             if (idx < 0)
             {
-                diag_error("codegen: unknown local in assign");
+                cg_error(s, "codegen: unknown local in assign");
                 exit(1);
             }
             int off = ac->locals[idx].offset;
             Type *ty = ac->locals[idx].type;
-            int size = (ty && ty->kind == TY_I32) ? 4 : 8;
+            int k = ty ? ty->kind : TY_I64;
             asm_eval_expr_to_rax(ac, s->rhs);
-            if (size == 4)
+            if (k == TY_I8 || k == TY_U8)
+                fprintf(ac->as, "  mov byte ptr [rbp%+d], al\n", off);
+            else if (k == TY_I16 || k == TY_U16)
+                fprintf(ac->as, "  mov word ptr [rbp%+d], ax\n", off);
+            else if (k == TY_I32 || k == TY_U32)
                 fprintf(ac->as, "  mov dword ptr [rbp%+d], eax\n", off);
             else
                 fprintf(ac->as, "  mov [rbp%+d], rax\n", off);
         }
-        else if (s->lhs->kind == ND_INDEX || (s->lhs->kind == ND_CAST && s->lhs->lhs->kind == ND_INDEX))
+        else if (s->lhs->kind == ND_INDEX ||
+                 (s->lhs->kind == ND_CAST && s->lhs->lhs->kind == ND_INDEX))
         {
             const Node *ix = (s->lhs->kind == ND_INDEX) ? s->lhs : s->lhs->lhs;
-            // Compute address of lvalue and preserve it in rdx (since RHS eval clobbers rax)
+            // Compute address of lvalue and preserve it in rdx (since RHS eval
+            // clobbers rax)
             asm_addr_for_lvalue_to_rax(ac, ix);
             fprintf(ac->as, "  mov rdx, rax\n");
             // store byte of rhs to [rdx]
@@ -728,9 +1143,20 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
         }
         else
         {
-            diag_error("codegen: unsupported assign");
+            cg_error(s, "codegen: unsupported assign");
             exit(1);
         }
+        break;
+    }
+    case ND_WHILE:
+    {
+        int lid = ac->next_lbl++;
+        fprintf(ac->as, ".Lwhile%d:\n", lid);
+        asm_eval_expr_to_rax(ac, s->lhs);
+        fprintf(ac->as, "  cmp eax, 0\n  je .Lendw%d\n", lid);
+        if (s->rhs)
+            asm_emit_stmt(ac, s->rhs);
+        fprintf(ac->as, "  jmp .Lwhile%d\n.Lendw%d:\n", lid, lid);
         break;
     }
     case ND_IF:
@@ -750,18 +1176,20 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
             asm_emit_stmt(ac, s->stmts[i]);
         break;
     case ND_RET:
-        asm_eval_expr_to_rax(ac, s->lhs);
+        if (s->lhs)
+            asm_eval_expr_to_rax(ac, s->lhs);
         fprintf(ac->as, "  jmp .Lret%d\n", ac->ret_id);
         break;
     default:
-        diag_error("codegen: unsupported stmt kind %d", s->kind);
+        cg_error(s, "codegen: unsupported stmt kind %d", s->kind);
         exit(1);
     }
 }
 
 int __chance_emit_linux = 0;
 
-static int codegen_asm_backend_link(const Node *unit, const CodegenOptions *opts)
+static int codegen_asm_backend_link(const Node *unit,
+                                    const CodegenOptions *opts)
 {
     if (!unit || unit->kind != ND_FUNC)
     {
@@ -791,10 +1219,12 @@ static int codegen_asm_backend_link(const Node *unit, const CodegenOptions *opts
     const char *fn_name = unit->name ? unit->name : "main";
     int is_linux = (opts && opts->os == OS_LINUX);
     __chance_emit_linux = is_linux;
-    fprintf(as, ".intel_syntax noprefix\n.section .text\n.globl %s\n%s:\n", fn_name, fn_name);
+    fprintf(as, ".intel_syntax noprefix\n.section .text\n.globl %s\n%s:\n",
+            fn_name, fn_name);
     if (is_linux)
     {
-        // System V: 16-byte alignment before call; we'll align per locals, no shadow space requirement
+        // System V: 16-byte alignment before call; we'll align per locals, no
+        // shadow space requirement
         fprintf(as, "  push rbp\n  mov rbp, rsp\n");
     }
     else
@@ -803,7 +1233,9 @@ static int codegen_asm_backend_link(const Node *unit, const CodegenOptions *opts
         fprintf(as, "  push rbp\n  mov rbp, rsp\n");
     }
     // Reserve 32-byte shadow space + locals (rounded up to 16)
-    // We'll grow ac.stack_size as we see locals, then patch after emit? Simpler: pre-scan for decls sizes would be ideal, but we can conservatively sub 96 and not reuse; but better: emit after locals known: trick: record position
+    // We'll grow ac.stack_size as we see locals, then patch after emit? Simpler:
+    // pre-scan for decls sizes would be ideal, but we can conservatively sub 96
+    // and not reuse; but better: emit after locals known: trick: record position
     long stack_adj_pos = ftell(as);
     if (is_linux)
         fprintf(as, "  sub rsp, %8d\n", 16); // placeholder; will patch
@@ -815,46 +1247,21 @@ static int codegen_asm_backend_link(const Node *unit, const CodegenOptions *opts
     // Assign stack slots for parameters first so they have stable offsets
     for (int pi = 0; pi < pc; ++pi)
     {
-        int size = (unit->param_types && unit->param_types[pi] && unit->param_types[pi]->kind == TY_I32) ? 4 : 8;
-        int off = asm_add_local(&ac, unit->param_names ? unit->param_names[pi] : "arg", unit->param_types ? unit->param_types[pi] : NULL, size);
+        int k = (unit->param_types && unit->param_types[pi])
+                    ? unit->param_types[pi]->kind
+                    : TY_I64;
+        int size = kind_width(k);
+        int off =
+            asm_add_local(&ac, unit->param_names ? unit->param_names[pi] : "arg",
+                          unit->param_types ? unit->param_types[pi] : NULL, size);
         (void)off;
     }
     // Now store incoming registers into those stack slots (in declared order)
     for (int pi = 0; pi < pc && pi < 64; ++pi)
     {
         int off = ac.locals[pi].offset;
-        if (is_linux)
-        {
-            if (pi == 0)
-                fprintf(as, "  mov [rbp%+d], rdi\n", off);
-            else if (pi == 1)
-                fprintf(as, "  mov [rbp%+d], rsi\n", off);
-            else if (pi == 2)
-                fprintf(as, "  mov [rbp%+d], rdx\n", off);
-            else if (pi == 3)
-                fprintf(as, "  mov [rbp%+d], rcx\n", off);
-            else if (pi == 4)
-                fprintf(as, "  mov [rbp%+d], r8\n", off);
-            else if (pi == 5)
-                fprintf(as, "  mov [rbp%+d], r9\n", off);
-            else
-            { /* TODO: stack args beyond 6 */
-            }
-        }
-        else
-        {
-            if (pi == 0)
-                fprintf(as, "  mov [rbp%+d], rcx\n", off);
-            else if (pi == 1)
-                fprintf(as, "  mov [rbp%+d], rdx\n", off);
-            else if (pi == 2)
-                fprintf(as, "  mov [rbp%+d], r8\n", off);
-            else if (pi == 3)
-                fprintf(as, "  mov [rbp%+d], r9\n", off);
-            else
-            { /* TODO: stack args beyond 4 */
-            }
-        }
+        int k = ac.locals[pi].type ? ac.locals[pi].type->kind : TY_I64;
+        asm_store_param_width(as, is_linux, pi, off, k);
     }
     // Emit body
     if (unit->body->kind == ND_BLOCK)
@@ -872,7 +1279,8 @@ static int codegen_asm_backend_link(const Node *unit, const CodegenOptions *opts
     int total_sub;
     if (is_linux)
     {
-        // On entry after push rbp, rsp%16==8. We want (sub amount) so that before a call we have alignment.
+        // On entry after push rbp, rsp%16==8. We want (sub amount) so that before a
+        // call we have alignment.
         total_sub = locals_rounded + 8; // compensate push rbp
     }
     else
@@ -899,8 +1307,10 @@ static int codegen_asm_backend_link(const Node *unit, const CodegenOptions *opts
     return 0;
 }
 
-// Emit all functions in a unit into one .S so that calls resolve within the same translation unit
-static int codegen_asm_backend_link_all(const Node *u, const CodegenOptions *opts)
+// Emit all functions in a unit into one .S so that calls resolve within the
+// same translation unit
+static int codegen_asm_backend_link_all(const Node *u,
+                                        const CodegenOptions *opts)
 {
     if (!u || u->kind != ND_UNIT)
     {
@@ -934,54 +1344,31 @@ static int codegen_asm_backend_link_all(const Node *u, const CodegenOptions *opt
         ac.fn = fn;
         ac.local_cnt = 0;
         ac.stack_size = 0;
-        ac.ret_id = global_ret_seq_all++; // reset per function with unique ret label
+        ac.ret_id =
+            global_ret_seq_all++; // reset per function with unique ret label
         const char *fn_name = fn->name ? fn->name : "fn";
-        fprintf(as, ".globl %s\n%s:\n  push rbp\n  mov rbp, rsp\n", fn_name, fn_name);
+        fprintf(as, ".globl %s\n%s:\n  push rbp\n  mov rbp, rsp\n", fn_name,
+                fn_name);
         long stack_adj_pos = ftell(as);
         fprintf(as, "  sub rsp, %8d\n", is_linux ? 16 : 32);
         // Save parameters to stack locals
         int pc = fn->param_count;
         for (int pi = 0; pi < pc; ++pi)
         {
-            int size = (fn->param_types && fn->param_types[pi] && fn->param_types[pi]->kind == TY_I32) ? 4 : 8;
-            int off = asm_add_local(&ac, fn->param_names ? fn->param_names[pi] : "arg", fn->param_types ? fn->param_types[pi] : NULL, size);
+            int k = (fn->param_types && fn->param_types[pi])
+                        ? fn->param_types[pi]->kind
+                        : TY_I64;
+            int size = kind_width(k);
+            int off =
+                asm_add_local(&ac, fn->param_names ? fn->param_names[pi] : "arg",
+                              fn->param_types ? fn->param_types[pi] : NULL, size);
             (void)off;
         }
         for (int pi = 0; pi < pc && pi < 64; ++pi)
         {
             int off = ac.locals[pi].offset;
-            if (is_linux)
-            {
-                if (pi == 0)
-                    fprintf(as, "  mov [rbp%+d], rdi\n", off);
-                else if (pi == 1)
-                    fprintf(as, "  mov [rbp%+d], rsi\n", off);
-                else if (pi == 2)
-                    fprintf(as, "  mov [rbp%+d], rdx\n", off);
-                else if (pi == 3)
-                    fprintf(as, "  mov [rbp%+d], rcx\n", off);
-                else if (pi == 4)
-                    fprintf(as, "  mov [rbp%+d], r8\n", off);
-                else if (pi == 5)
-                    fprintf(as, "  mov [rbp%+d], r9\n", off);
-                else
-                {
-                }
-            }
-            else
-            {
-                if (pi == 0)
-                    fprintf(as, "  mov [rbp%+d], rcx\n", off);
-                else if (pi == 1)
-                    fprintf(as, "  mov [rbp%+d], rdx\n", off);
-                else if (pi == 2)
-                    fprintf(as, "  mov [rbp%+d], r8\n", off);
-                else if (pi == 3)
-                    fprintf(as, "  mov [rbp%+d], r9\n", off);
-                else
-                {
-                }
-            }
+            int k = ac.locals[pi].type ? ac.locals[pi].type->kind : TY_I64;
+            asm_store_param_width(as, is_linux, pi, off, k);
         }
         if (fn->body->kind == ND_BLOCK)
         {
@@ -1016,13 +1403,12 @@ static int codegen_asm_backend_link_all(const Node *u, const CodegenOptions *opt
 // Emit COFF x64 object and link via cc to produce an .exe
 int codegen_pe_x64_write_exe_const(int32_t retval, const CodegenOptions *opts)
 {
-    // PE with two sections: .text and .idata importing ExitProcess, call ExitProcess(retval)
-    // Build .text
-    // B9 imm32                    mov ecx, imm32
+    // PE with two sections: .text and .idata importing ExitProcess, call
+    // ExitProcess(retval) Build .text B9 imm32                    mov ecx, imm32
     // 48 8B 05 xx xx xx xx        mov rax, [rip+disp32]   ; &IAT.ExitProcess
     // FF D0                       call rax
     // EB FE                       jmp $                   ; should not return
-    uint8_t text[15];
+    uint8_t text[16];
     size_t off = 0;
     text[off++] = 0xB9;
     w32(text, off, (uint32_t)retval);
@@ -1102,7 +1488,8 @@ int codegen_pe_x64_write_exe_const(int32_t retval, const CodegenOptions *opts)
     // IAT initially same as ILT
     w64(idata, iat_off + 0, (uint64_t)hint_rva_real);
     // Import Descriptor
-    // struct { DWORD OriginalFirstThunk; DWORD TimeDateStamp; DWORD ForwarderChain; DWORD Name; DWORD FirstThunk; }
+    // struct { DWORD OriginalFirstThunk; DWORD TimeDateStamp; DWORD
+    // ForwarderChain; DWORD Name; DWORD FirstThunk; }
     w32(idata, desc_off + 0, ilt_rva_real);
     w32(idata, desc_off + 12, dll_rva_real);
     w32(idata, desc_off + 16, iat_rva_real);
@@ -1187,7 +1574,8 @@ int codegen_pe_x64_write_exe_const(int32_t retval, const CodegenOptions *opts)
     w32(pe, sh2 + 36, 0x40000040); // initialized data, read
 
     // Compute disp32 for RIP-relative load of IAT entry
-    // next_instr RVA = text_va + (offset up to after disp32) = text_va + (2+4 + 3 + 4) = text_va + 13
+    // next_instr RVA = text_va + (offset up to after disp32) = text_va + (2+4 + 3
+    // + 4) = text_va + 13
     uint32_t next_rva = text_va + (uint32_t)(2 + 4 + 3 + 4);
     uint64_t next_va = image_base + next_rva;
     uint64_t iat_va = image_base + iat_rva_real;
@@ -1221,16 +1609,17 @@ int codegen_pe_x64_write_exe_const(int32_t retval, const CodegenOptions *opts)
         if (df)
         {
             // Provide a minimal, assemble-able listing for the entry sequence
-            fprintf(df,
-                    ".intel_syntax noprefix\n"
-                    ".section .text\n"
-                    ".globl main\n"
-                    "main:\n"
-                    "  mov ecx, %d\n"
-                    "  ; IAT setup omitted in -S listing\n"
-                    "  ; call ExitProcess via import thunk at runtime\n"
-                    "  ; (this .S is informational; link path still uses generated PE)\n",
-                    retval);
+            fprintf(
+                df,
+                ".intel_syntax noprefix\n"
+                ".section .text\n"
+                ".globl main\n"
+                "main:\n"
+                "  mov ecx, %d\n"
+                "  ; IAT setup omitted in -S listing\n"
+                "  ; call ExitProcess via import thunk at runtime\n"
+                "  ; (this .S is informational; link path still uses generated PE)\n",
+                retval);
             fclose(df);
         }
     }
@@ -1238,7 +1627,8 @@ int codegen_pe_x64_write_exe_const(int32_t retval, const CodegenOptions *opts)
 }
 
 // Emit COFF x64 object and link via cc to produce an .exe
-static int emit_function_as_asm_and_link(const Node *fn, const CodegenOptions *opts)
+static int emit_function_as_asm_and_link(const Node *fn,
+                                         const CodegenOptions *opts)
 {
     return codegen_asm_backend_link(fn, opts);
 }
@@ -1254,15 +1644,20 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
     {
         // old path
 
-        // If expression is a printf call, emit a COFF object that calls external printf.
+        // If expression is a printf call, emit a COFF object that calls external
+        // printf.
         int64_t val = 0;
         const Node *expr = (unit->body->kind == ND_RET) ? unit->body->lhs : NULL;
-        int is_simple_call = expr && (expr->kind == ND_CALL && expr->arg_count >= 1 && expr->args[0]->kind == ND_STRING) && (unit->body->kind == ND_RET);
+        int is_simple_call = expr &&
+                             (expr->kind == ND_CALL && expr->arg_count >= 1 &&
+                              expr->args[0]->kind == ND_STRING) &&
+                             (unit->body->kind == ND_RET);
         if (is_simple_call)
         {
             if (opts && opts->freestanding)
             {
-                fprintf(stderr, "error: codegen: external calls with libc are not available in freestanding mode\n");
+                fprintf(stderr, "error: codegen: external calls with libc are not "
+                                "available in freestanding mode\n");
                 return 1;
             }
         }
@@ -1272,7 +1667,8 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
             return codegen_asm_backend_link(unit, opts);
         }
         // Otherwise, produce a COFF object with a constant return and link
-        // For freestanding: still link object, but without CRT and with main as entry
+        // For freestanding: still link object, but without CRT and with main as
+        // entry
 
         // Code: mov eax, imm32; ret
         uint8_t code[6];
@@ -1303,8 +1699,10 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
         size_t call_disp_pos = 0;
         if (is_simple_call)
         {
-            // Assemble x64 Windows calling convention sequence: RCX=format, RDX=arg1; align shadow space
-            // sub rsp, 40; lea rcx, [rip+disp32]; (either lea rdx, [rip+disp32] or mov edx, imm32); xor eax,eax; call rel32; add rsp,40; ret
+            // Assemble x64 Windows calling convention sequence: RCX=format, RDX=arg1;
+            // align shadow space sub rsp, 40; lea rcx, [rip+disp32]; (either lea rdx,
+            // [rip+disp32] or mov edx, imm32); xor eax,eax; call rel32; add rsp,40;
+            // ret
             size_t o = 0;
             call_code[o++] = 0x48;
             call_code[o++] = 0x83;
@@ -1342,7 +1740,8 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
                 }
                 else
                 {
-                    fprintf(stderr, "error: codegen: only int or string literal supported as second argument for now\n");
+                    fprintf(stderr, "error: codegen: only int or string literal "
+                                    "supported as second argument for now\n");
                     return 1;
                 }
             }
@@ -1367,12 +1766,17 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
                 rdata_size += (uint32_t)str2_len + 1;
         }
         uint32_t text_size = is_simple_call ? call_size : sizeof(code);
-        uint32_t text_reloc_size = is_simple_call ? ((2 + (has_str2 ? 1 : 0)) * 10) : 0; // reloc for lea1, call, and optional lea2
+        uint32_t text_reloc_size =
+            is_simple_call ? ((2 + (has_str2 ? 1 : 0)) * 10)
+                           : 0; // reloc for lea1, call, and optional lea2
         uint32_t text_raw_off = text_off;
         reloc_off = is_simple_call ? (text_raw_off + text_size) : 0;
         rdata_off = is_simple_call ? (reloc_off + text_reloc_size) : 0;
-        uint32_t symtab_off = is_simple_call ? (rdata_off + rdata_size) : (text_raw_off + text_size);
-        uint32_t num_symbols = is_simple_call ? (has_str2 ? 4 : 3) : 1; // main, extern func, str0[, str1]
+        uint32_t symtab_off =
+            is_simple_call ? (rdata_off + rdata_size) : (text_raw_off + text_size);
+        uint32_t num_symbols = is_simple_call
+                                   ? (has_str2 ? 4 : 3)
+                                   : 1; // main, extern func, str0[, str1]
         uint32_t sym_size = 18 * num_symbols;
         uint32_t strtab_off = symtab_off + sym_size;
         uint32_t strtab_size = 4;
@@ -1441,7 +1845,8 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
                 memcpy(buf + str1_off, str2, (size_t)str2_len);
                 buf[str1_off + str2_len] = 0;
             }
-            // Relocations: lea rcx,[rip+disp32] -> str0, optional lea rdx -> str1, call rel32 -> extern func
+            // Relocations: lea rcx,[rip+disp32] -> str0, optional lea rdx -> str1,
+            // call rel32 -> extern func
             uint8_t *rel = buf + reloc_off;
             // lea rcx -> str0 uses symbol index 2 (main=0, extern=1, str0=2)
             w32(rel, 0, (uint32_t)(lea1_disp_pos));
@@ -1539,7 +1944,9 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
         char cmd[1024];
         if (opts && opts->freestanding)
         {
-            snprintf(cmd, sizeof(cmd), "cc -o \"%s\" \"%s\" -nostdlib -Wl,-e,main -lkernel32", out, objpath);
+            snprintf(cmd, sizeof(cmd),
+                     "cc -o \"%s\" \"%s\" -nostdlib -Wl,-e,main -lkernel32", out,
+                     objpath);
         }
         else
         {
@@ -1565,7 +1972,9 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
                     const char *callee = expr->call_name ? expr->call_name : "unknown";
                     if (syn == ASM_INTEL)
                     {
-                        fprintf(df, ".intel_syntax noprefix\n.section .text\n.globl main\nmain:\n");
+                        fprintf(
+                            df,
+                            ".intel_syntax noprefix\n.section .text\n.globl main\nmain:\n");
                         fprintf(df, "  sub rsp, 40\n  lea rcx, [rel .Lstr0]\n");
                         if (has_int_arg)
                         {
@@ -1575,7 +1984,8 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
                         {
                             fprintf(df, "  lea rdx, [rel .Lstr1]\n");
                         }
-                        fprintf(df, "  xor eax, eax\n  call %s\n  add rsp, 40\n  ret\n", callee);
+                        fprintf(df, "  xor eax, eax\n  call %s\n  add rsp, 40\n  ret\n",
+                                callee);
                         fprintf(df, ".section .rdata,\"dr\"\n");
                     }
                     else if (syn == ASM_ATT)
@@ -1591,12 +2001,18 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
                         {
                             fprintf(df, "  leaq .Lstr1(%%rip), %%rdx\n");
                         }
-                        fprintf(df, "  xorl %%eax, %%eax\n  call %s@PLT\n  addq $40, %%rsp\n  ret\n", callee);
+                        fprintf(df,
+                                "  xorl %%eax, %%eax\n  call %s@PLT\n  addq $40, %%rsp\n  "
+                                "ret\n",
+                                callee);
                         fprintf(df, ".section .rdata,\"dr\"\n");
                     }
                     else
                     { // NASM
-                        fprintf(df, "default rel\nsection .text\nextern %s\nglobal main\nmain:\n", callee);
+                        fprintf(
+                            df,
+                            "default rel\nsection .text\nextern %s\nglobal main\nmain:\n",
+                            callee);
                         fprintf(df, "  sub rsp, 40\n  lea rcx, [rel .Lstr0]\n");
                         if (has_int_arg)
                         {
@@ -1606,7 +2022,8 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
                         {
                             fprintf(df, "  lea rdx, [rel .Lstr1]\n");
                         }
-                        fprintf(df, "  xor eax, eax\n  call %s\n  add rsp, 40\n  ret\n", callee);
+                        fprintf(df, "  xor eax, eax\n  call %s\n  add rsp, 40\n  ret\n",
+                                callee);
                         fprintf(df, "section .rdata align=1\n");
                     }
                     // Strings
@@ -1701,15 +2118,23 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
                     // Constant return path
                     if (syn == ASM_INTEL)
                     {
-                        fprintf(df, ".intel_syntax noprefix\n.section .text\n.globl main\nmain:\n  mov eax, %d\n  ret\n", (int)(int32_t)val);
+                        fprintf(df,
+                                ".intel_syntax noprefix\n.section .text\n.globl "
+                                "main\nmain:\n  mov eax, %d\n  ret\n",
+                                (int)(int32_t)val);
                     }
                     else if (syn == ASM_ATT)
                     {
-                        fprintf(df, ".section .text\n.globl main\nmain:\n  movl $%d, %%eax\n  ret\n", (int)(int32_t)val);
+                        fprintf(df,
+                                ".section .text\n.globl main\nmain:\n  movl $%d, %%eax\n  "
+                                "ret\n",
+                                (int)(int32_t)val);
                     }
                     else
                     { // NASM
-                        fprintf(df, "section .text\nglobal main\nmain:\n  mov eax, %d\n  ret\n", (int)(int32_t)val);
+                        fprintf(df,
+                                "section .text\nglobal main\nmain:\n  mov eax, %d\n  ret\n",
+                                (int)(int32_t)val);
                     }
                 }
                 fclose(df);
@@ -1720,7 +2145,8 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
     }
     if (unit->kind == ND_UNIT)
     {
-        // Emit all functions in the translation unit so helper functions are defined
+        // Emit all functions in the translation unit so helper functions are
+        // defined
         return codegen_asm_backend_link_all(unit, opts);
     }
     fprintf(stderr, "codegen: unsupported unit kind %d\n", unit->kind);

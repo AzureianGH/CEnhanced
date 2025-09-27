@@ -15,6 +15,7 @@ add_library(chance_core
     src/parser.c
     src/ast.c
     src/sema.c
+    src/includes.c
     src/codegen_coff_x64.c
     src/crt_stub_coff_x64.c
     src/util.c
