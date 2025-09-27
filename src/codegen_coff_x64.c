@@ -111,6 +111,44 @@ static void form_asm_path(char *dst, size_t dstsz, const char *out)
     }
 }
 
+// Helper: derive object file path from provided output or default
+static void form_obj_path(char *dst, size_t dstsz, const char *out, int is_linux)
+{
+    const char *fallback = is_linux ? "a.o" : "a.obj";
+    if (!out || !*out)
+    {
+        snprintf(dst, dstsz, "%s", fallback);
+        return;
+    }
+    const char *slash1 = strrchr(out, '/');
+    const char *slash2 = strrchr(out, '\\');
+    const char *baseStart = out;
+    if (slash1 && slash2)
+        baseStart = (slash1 > slash2) ? slash1 + 1 : slash2 + 1;
+    else if (slash1)
+        baseStart = slash1 + 1;
+    else if (slash2)
+        baseStart = slash2 + 1;
+    const char *dot = strrchr(baseStart, '.');
+    if (dot)
+    {
+        size_t prefixLen = (size_t)(dot - out);
+        if (prefixLen >= dstsz)
+            prefixLen = dstsz - 1;
+        memcpy(dst, out, prefixLen);
+        dst[prefixLen] = '\0';
+    }
+    else
+    {
+        size_t olen = strlen(out);
+        if (olen >= dstsz)
+            olen = dstsz - 1;
+        memcpy(dst, out, olen);
+        dst[olen] = '\0';
+    }
+    snprintf(dst + strlen(dst), dstsz - strlen(dst), "%s", is_linux ? ".o" : ".obj");
+}
+
 // -------------------- Simple Intel GAS ASM backend (Windows x64)
 // --------------------
 typedef struct
@@ -1398,20 +1436,43 @@ static int codegen_asm_backend_link(const Node *unit,
     fseek(as, stack_adj_pos, SEEK_SET);
     fprintf(as, "  sub rsp, %8d\n", total_sub);
     fclose(as);
-    // Assemble and link unless only assembly was requested (-S)
+    // Assemble only or assemble+link
     if (opts && opts->emit_asm)
     {
+        return 0; // user requested -S only
+    }
+    if (opts && opts->no_link)
+    {
+        char objpath[512];
+        if (opts->obj_output_path && *opts->obj_output_path)
+        {
+            snprintf(objpath, sizeof(objpath), "%s", opts->obj_output_path);
+        }
+        else
+        {
+            form_obj_path(objpath, sizeof(objpath), out, is_linux);
+        }
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "cc -c -o \"%s\" \"%s\"", objpath, asmpath);
+        int rc = system(cmd);
+        if (rc != 0)
+        {
+            fprintf(stderr, "assemble failed (rc=%d): %s\n", rc, cmd);
+            return 1;
+        }
         return 0;
     }
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "cc -o \"%s\" \"%s\"", out, asmpath);
-    int rc = system(cmd);
-    if (rc != 0)
     {
-        fprintf(stderr, "assemble/link failed (rc=%d): %s\n", rc, cmd);
-        return 1;
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "cc -o \"%s\" \"%s\"", out, asmpath);
+        int rc = system(cmd);
+        if (rc != 0)
+        {
+            fprintf(stderr, "assemble/link failed (rc=%d): %s\n", rc, cmd);
+            return 1;
+        }
+        return 0;
     }
-    return 0;
 }
 
 // Emit all functions in a unit into one .S so that calls resolve within the
@@ -1496,15 +1557,38 @@ static int codegen_asm_backend_link_all(const Node *u,
     fclose(as);
     if (opts && opts->emit_asm)
         return 0;
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "cc -o \"%s\" \"%s\"", out, asmpath);
-    int rc = system(cmd);
-    if (rc != 0)
+    if (opts && opts->no_link)
     {
-        fprintf(stderr, "assemble/link failed (rc=%d): %s\n", rc, cmd);
-        return 1;
+        char objpath[512];
+        if (opts->obj_output_path && *opts->obj_output_path)
+        {
+            snprintf(objpath, sizeof(objpath), "%s", opts->obj_output_path);
+        }
+        else
+        {
+            form_obj_path(objpath, sizeof(objpath), out, is_linux);
+        }
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "cc -c -o \"%s\" \"%s\"", objpath, asmpath);
+        int rc = system(cmd);
+        if (rc != 0)
+        {
+            fprintf(stderr, "assemble failed (rc=%d): %s\n", rc, cmd);
+            return 1;
+        }
+        return 0;
     }
-    return 0;
+    {
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd), "cc -o \"%s\" \"%s\"", out, asmpath);
+        int rc = system(cmd);
+        if (rc != 0)
+        {
+            fprintf(stderr, "assemble/link failed (rc=%d): %s\n", rc, cmd);
+            return 1;
+        }
+        return 0;
+    }
 }
 
 // Emit COFF x64 object and link via cc to produce an .exe

@@ -228,8 +228,10 @@ typedef struct
     bool freestanding;
     bool m32;
     bool emit_asm;           // for -S
+    bool no_link;            // don't link; assemble to object only
     AsmSyntax asm_syntax;    // intel (GAS noprefix), att (GAS AT&T), nasm
     const char *output_path; // .exe path
+    const char *obj_output_path; // optional: explicit object output path (if null, use output_path)
     // Target OS/ABI
     TargetOS os;
 } CodegenOptions;

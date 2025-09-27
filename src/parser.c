@@ -817,8 +817,57 @@ static Node *parse_function(Parser *ps)
 
 static void parse_extend_decl(Parser *ps)
 {
-    // extend from "C" i32 printf(char*, _vaargs_);
+    // Two forms:
+    // 1) extend from "C" i32 printf(char*, _vaargs_);
+    // 2) extend fun name(params) -> ret;   // default ABI "C"
     expect(ps, TK_KW_EXTEND, "extend");
+    Token next = lexer_peek(ps->lx);
+    if (next.kind == TK_KW_FUN)
+    {
+        // Parse: fun name(params) -> ret;
+        lexer_next(ps->lx); // consume 'fun'
+        Token name = expect(ps, TK_IDENT, "identifier");
+        expect(ps, TK_LPAREN, "(");
+        // Skip parameter list; we don't need full types for extern symbol table
+        for (;;)
+        {
+            Token t = lexer_next(ps->lx);
+            if (t.kind == TK_RPAREN)
+                break;
+            if (t.kind == TK_EOF)
+            {
+                diag_error_at(lexer_source(ps->lx), 0, 0,
+                              "unexpected end of file in extern parameter list");
+                exit(1);
+            }
+        }
+        expect(ps, TK_ARROW, "->");
+        Type *ret_ty = parse_type_spec(ps);
+        expect(ps, TK_SEMI, ";");
+        // Record extern symbol with default ABI "C"
+        Symbol s = (Symbol){0};
+        s.kind = SYM_FUNC;
+        char *nm = (char *)xmalloc((size_t)name.length + 1);
+        memcpy(nm, name.lexeme, (size_t)name.length);
+        nm[name.length] = '\0';
+        s.name = nm;
+        s.is_extern = 1;
+        s.abi = xstrdup("C");
+    // Default to i32 if return type omitted (should not happen here),
+    // using a stable static object instead of a temporary.
+    static Type ti32_ext = {.kind = TY_I32};
+    s.sig.ret = ret_ty ? ret_ty : &ti32_ext;
+        s.sig.params = NULL;
+        s.sig.param_count = 0;
+        s.sig.is_varargs = 0;
+        if (ps->ext_count == ps->ext_cap)
+        {
+            ps->ext_cap = ps->ext_cap ? ps->ext_cap * 2 : 8;
+            ps->externs = (Symbol *)realloc(ps->externs, ps->ext_cap * sizeof(Symbol));
+        }
+        ps->externs[ps->ext_count++] = s;
+        return;
+    }
     expect(ps, TK_KW_FROM, "from");
     Token abi = lexer_next(ps->lx);
     if (!(abi.kind == TK_STRING || abi.kind == TK_IDENT))

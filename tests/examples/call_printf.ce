@@ -6,6 +6,7 @@ extend from "C" i32 read(i32, char *, i32);
 extend from "C" void *malloc(i32);
 extend from "C" void free(void *);
 extend from "C" void exit(i32);
+extend from "C" i32 test();
 
 extend fun test_chance() -> i32;
 
@@ -64,6 +65,10 @@ fun main() -> i32
     // Test overflow behavior
     i16 of = test_overflow();
     printf("Overflow test result (should be -25536): %d\n", of);
+
+    printf("Calling test_chance(): %d\n", test_chance());
+
+    printf("Calling extended C function test(): %d\n", test());
 
     ret 0;
 }
