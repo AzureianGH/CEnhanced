@@ -325,11 +325,23 @@ Token lexer_next(Lexer *lx)
     }
     if (c == '<')
     {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '=')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_LTE, lx->src.src + lx->idx - 2, 2);
+        }
         getc2(lx);
         return make_tok(lx, TK_LT, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '>')
     {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '=')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_GTE, lx->src.src + lx->idx - 2, 2);
+        }
         getc2(lx);
         return make_tok(lx, TK_GT, lx->src.src + lx->idx - 1, 1);
     }

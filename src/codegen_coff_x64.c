@@ -643,26 +643,133 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
         fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  sub rax, rcx\n");
         break;
     case ND_GT_EXPR:
+    {
         asm_eval_expr_to_rax(ac, e->lhs);
         fprintf(ac->as, "  push rax\n");
         asm_eval_expr_to_rax(ac, e->rhs);
-        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  cmp rax, rcx\n  setg al\n  "
-                        "movzx eax, al\n");
+        int lkind = e->lhs && e->lhs->type ? e->lhs->type->kind : TY_I64;
+        int rkind = e->rhs && e->rhs->type ? e->rhs->type->kind : TY_I64;
+        int lw = kind_width(lkind);
+        int rw = kind_width(rkind);
+        int use32 = (lw <= 4 && rw <= 4);
+        int unsigned_compare = (lkind == TY_U8 || lkind == TY_U16 || lkind == TY_U32 || lkind == TY_U64 ||
+                                 rkind == TY_U8 || rkind == TY_U16 || rkind == TY_U32 || rkind == TY_U64);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n");
+        if (use32)
+            fprintf(ac->as, "  cmp eax, ecx\n");
+        else
+            fprintf(ac->as, "  cmp rax, rcx\n");
+        if (unsigned_compare)
+            fprintf(ac->as, "  seta al\n  movzx eax, al\n");
+        else
+            fprintf(ac->as, "  setg al\n  movzx eax, al\n");
         break;
+    }
+    case ND_LT:
+    {
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  push rax\n");
+        asm_eval_expr_to_rax(ac, e->rhs);
+        int lkind = e->lhs && e->lhs->type ? e->lhs->type->kind : TY_I64;
+        int rkind = e->rhs && e->rhs->type ? e->rhs->type->kind : TY_I64;
+        int lw = kind_width(lkind);
+        int rw = kind_width(rkind);
+        int use32 = (lw <= 4 && rw <= 4);
+        int unsigned_compare = (lkind == TY_U8 || lkind == TY_U16 || lkind == TY_U32 || lkind == TY_U64 ||
+                                 rkind == TY_U8 || rkind == TY_U16 || rkind == TY_U32 || rkind == TY_U64);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n");
+        if (use32)
+            fprintf(ac->as, "  cmp eax, ecx\n");
+        else
+            fprintf(ac->as, "  cmp rax, rcx\n");
+        if (unsigned_compare)
+            fprintf(ac->as, "  setb al\n  movzx eax, al\n");
+        else
+            fprintf(ac->as, "  setl al\n  movzx eax, al\n");
+        break;
+    }
+    case ND_LE:
+    {
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  push rax\n");
+        asm_eval_expr_to_rax(ac, e->rhs);
+        int lkind = e->lhs && e->lhs->type ? e->lhs->type->kind : TY_I64;
+        int rkind = e->rhs && e->rhs->type ? e->rhs->type->kind : TY_I64;
+        int lw = kind_width(lkind);
+        int rw = kind_width(rkind);
+        int use32 = (lw <= 4 && rw <= 4);
+        int unsigned_compare = (lkind == TY_U8 || lkind == TY_U16 || lkind == TY_U32 || lkind == TY_U64 ||
+                                 rkind == TY_U8 || rkind == TY_U16 || rkind == TY_U32 || rkind == TY_U64);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n");
+        if (use32)
+            fprintf(ac->as, "  cmp eax, ecx\n");
+        else
+            fprintf(ac->as, "  cmp rax, rcx\n");
+        if (unsigned_compare)
+            fprintf(ac->as, "  setbe al\n  movzx eax, al\n");
+        else
+            fprintf(ac->as, "  setle al\n  movzx eax, al\n");
+        break;
+    }
+    case ND_GE:
+    {
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  push rax\n");
+        asm_eval_expr_to_rax(ac, e->rhs);
+        int lkind = e->lhs && e->lhs->type ? e->lhs->type->kind : TY_I64;
+        int rkind = e->rhs && e->rhs->type ? e->rhs->type->kind : TY_I64;
+        int lw = kind_width(lkind);
+        int rw = kind_width(rkind);
+        int use32 = (lw <= 4 && rw <= 4);
+        int unsigned_compare = (lkind == TY_U8 || lkind == TY_U16 || lkind == TY_U32 || lkind == TY_U64 ||
+                                 rkind == TY_U8 || rkind == TY_U16 || rkind == TY_U32 || rkind == TY_U64);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n");
+        if (use32)
+            fprintf(ac->as, "  cmp eax, ecx\n");
+        else
+            fprintf(ac->as, "  cmp rax, rcx\n");
+        if (unsigned_compare)
+            fprintf(ac->as, "  setae al\n  movzx eax, al\n");
+        else
+            fprintf(ac->as, "  setge al\n  movzx eax, al\n");
+        break;
+    }
     case ND_EQ:
+    {
         asm_eval_expr_to_rax(ac, e->lhs);
         fprintf(ac->as, "  push rax\n");
         asm_eval_expr_to_rax(ac, e->rhs);
-        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  cmp rax, rcx\n  sete al\n  "
-                        "movzx eax, al\n");
+        int lkind = e->lhs && e->lhs->type ? e->lhs->type->kind : TY_I64;
+        int rkind = e->rhs && e->rhs->type ? e->rhs->type->kind : TY_I64;
+        int lw = kind_width(lkind);
+        int rw = kind_width(rkind);
+        int use32 = (lw <= 4 && rw <= 4);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n");
+        if (use32)
+            fprintf(ac->as, "  cmp eax, ecx\n");
+        else
+            fprintf(ac->as, "  cmp rax, rcx\n");
+        fprintf(ac->as, "  sete al\n  movzx eax, al\n");
         break;
+    }
     case ND_NE:
+    {
         asm_eval_expr_to_rax(ac, e->lhs);
         fprintf(ac->as, "  push rax\n");
         asm_eval_expr_to_rax(ac, e->rhs);
-        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  cmp rax, rcx\n  setne al\n  "
-                        "movzx eax, al\n");
+        int lkind = e->lhs && e->lhs->type ? e->lhs->type->kind : TY_I64;
+        int rkind = e->rhs && e->rhs->type ? e->rhs->type->kind : TY_I64;
+        int lw = kind_width(lkind);
+        int rw = kind_width(rkind);
+        int use32 = (lw <= 4 && rw <= 4);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n");
+        if (use32)
+            fprintf(ac->as, "  cmp eax, ecx\n");
+        else
+            fprintf(ac->as, "  cmp rax, rcx\n");
+        fprintf(ac->as, "  setne al\n  movzx eax, al\n");
         break;
+    }
     case ND_CAST:
         asm_eval_expr_to_rax(ac, e->lhs);
         break;

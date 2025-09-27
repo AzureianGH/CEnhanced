@@ -70,6 +70,8 @@ typedef enum
     TK_BANGEQ,     // !=
     TK_LT,         // <
     TK_GT,         // >
+    TK_LTE,        // <=
+    TK_GTE,        // >=
 } TokenKind;
 
 typedef struct
@@ -121,6 +123,9 @@ typedef enum
     ND_INDEX,
     ND_CAST,
     ND_GT_EXPR,
+    ND_LT,
+    ND_LE,
+    ND_GE,
     ND_SUB,
     ND_WHILE,
     ND_EXPR_STMT,

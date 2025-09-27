@@ -1,0 +1,4 @@
+fun test_chance() -> i32
+{
+    ret 67;
+}

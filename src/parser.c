@@ -506,18 +506,22 @@ static Node *parse_add(Parser *ps)
 static Node *parse_rel(Parser *ps)
 {
     Node *lhs = parse_add(ps);
-    Token p = lexer_peek(ps->lx);
-    if (p.kind == TK_GT)
-    {
-        Token op = lexer_next(ps->lx);
-        Node *rhs = parse_add(ps);
-        Node *gt = new_node(ND_GT_EXPR);
-        gt->lhs = lhs;
-        gt->rhs = rhs;
-        gt->line = op.line;
-        gt->col = op.col;
-        gt->src = lexer_source(ps->lx);
-        return gt;
+    for(;;){
+        Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_GT || p.kind == TK_LT || p.kind == TK_LTE || p.kind == TK_GTE)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_add(ps);
+            Node *n = NULL;
+            if(op.kind==TK_GT) n = new_node(ND_GT_EXPR);
+            else if(op.kind==TK_LT) n = new_node(ND_LT);
+            else if(op.kind==TK_LTE) n = new_node(ND_LE);
+            else n = new_node(ND_GE);
+            n->lhs = lhs; n->rhs = rhs; n->line=op.line; n->col=op.col; n->src=lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
+        break;
     }
     return lhs;
 }

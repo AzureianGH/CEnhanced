@@ -208,6 +208,12 @@ static const char *nodekind_name(NodeKind k)
         return "ND_CAST";
     case ND_GT_EXPR:
         return "ND_GT_EXPR";
+    case ND_LT:
+        return "ND_LT";
+    case ND_LE:
+        return "ND_LE";
+    case ND_GE:
+        return "ND_GE";
     case ND_SUB:
         return "ND_SUB";
     case ND_WHILE:
@@ -282,13 +288,13 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = e->lhs->type;
         return;
     }
-    if (e->kind == ND_GT_EXPR)
+    if (e->kind == ND_GT_EXPR || e->kind == ND_LT || e->kind == ND_LE || e->kind == ND_GE)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
         if (!(type_is_int(e->lhs->type) && type_is_int(e->rhs->type)))
         {
-            diag_error_at(e->src, e->line, e->col, "'>' requires integer operands");
+            diag_error_at(e->src, e->line, e->col, "relational operator requires integer operands");
             exit(1);
         }
         e->type = &ty_i32;

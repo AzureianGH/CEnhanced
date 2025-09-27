@@ -7,6 +7,8 @@ extend from "C" void *malloc(i32);
 extend from "C" void free(void *);
 extend from "C" void exit(i32);
 
+extend fun test_chance() -> i32;
+
 alias string = char*;
 alias ptr<T> = T*;
 
