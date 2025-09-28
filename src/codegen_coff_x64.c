@@ -196,6 +196,39 @@ static int kind_width(int k)
     }
 }
 
+// Truncate/sign- or zero-extend arithmetic result in RAX to match a type kind
+static void asm_trunc_to_kind(FILE *as, int k)
+{
+    switch (k)
+    {
+    case TY_I8:
+        // sign-extend from 8-bit
+        fprintf(as, "  movsx eax, al\n");
+        break;
+    case TY_U8:
+        // zero-extend from 8-bit
+        fprintf(as, "  movzx eax, al\n");
+        break;
+    case TY_I16:
+        // sign-extend from 16-bit
+        fprintf(as, "  movsx eax, ax\n");
+        break;
+    case TY_U16:
+        // zero-extend from 16-bit
+        fprintf(as, "  movzx eax, ax\n");
+        break;
+    case TY_I32:
+    case TY_U32:
+        // ensure upper 32 bits are clean (implicitly true if we used 32-bit ops),
+        // but be explicit to avoid surprises when preceding used 64-bit ops
+        fprintf(as, "  mov eax, eax\n");
+        break;
+    default:
+        // 64-bit and others: no truncation needed
+        break;
+    }
+}
+
 // Emit a store of an incoming argument register to a local stack slot according
 // to width and OS ABI
 static void asm_store_param_width(FILE *as, int is_linux, int pi, int off,
@@ -589,7 +622,10 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
     }
     if (lv->kind ==
         ND_INDEX)
-    { // only pointer base + i32 index, byte addressing for char*
+    {
+        // Compute address of element: base + index * elem_size
+        // Determine base pointer type to get element size
+        Type *baseTy = NULL;
         // base address -> rax
         if (lv->lhs->kind == ND_VAR)
         {
@@ -600,6 +636,7 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
                 exit(1);
             }
             int off = ac->locals[idx].offset;
+            baseTy = ac->locals[idx].type;
             fprintf(ac->as, "  mov rax, [rbp%+d]\n", off);
         }
         else if (lv->lhs->kind == ND_CAST && lv->lhs->lhs->kind == ND_VAR)
@@ -611,6 +648,8 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
                 exit(1);
             }
             int off = ac->locals[idx].offset;
+            // Prefer the cast type if available
+            baseTy = lv->lhs->type ? lv->lhs->type : ac->locals[idx].type;
             fprintf(ac->as, "  mov rax, [rbp%+d]\n", off);
         }
         else
@@ -618,10 +657,29 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
             cg_error(lv, "codegen: unsupported index base");
             exit(1);
         }
-        // preserve base in rdx, compute index into rax, then add
+        // preserve base in rdx, compute index into rax, then add with scaling
         fprintf(ac->as, "  mov rdx, rax\n");
         asm_eval_expr_to_rax(ac, lv->rhs);
-        fprintf(ac->as, "  add rax, rdx\n");
+        int elem_sz = 1;
+        if (baseTy && baseTy->kind == TY_PTR && baseTy->pointee)
+        {
+            elem_sz = kind_width(baseTy->pointee->kind);
+            if (elem_sz <= 0)
+                elem_sz = 1;
+        }
+        if (elem_sz == 1)
+        {
+            fprintf(ac->as, "  add rax, rdx\n");
+        }
+        else if (elem_sz == 2 || elem_sz == 4 || elem_sz == 8)
+        {
+            int scale = (elem_sz == 2) ? 1 : (elem_sz == 4) ? 2 : 3; // 2^1,2^2,2^3
+            fprintf(ac->as, "  lea rax, [rdx + rax*%d]\n", 1 << scale);
+        }
+        else
+        {
+            fprintf(ac->as, "  imul rax, %d\n  add rax, rdx\n", elem_sz);
+        }
         return;
     }
     cg_error(lv, "codegen: unsupported lvalue kind %d", lv->kind);
@@ -638,9 +696,45 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
         break;
     case ND_INDEX:
     {
-        // Load byte from *(base + index)
+        // Load from *(base + index) with correct element width
         asm_addr_for_lvalue_to_rax(ac, e);
-        fprintf(ac->as, "  movzx eax, byte ptr [rax]\n");
+        // Derive element type
+        int k = TY_U8; // default to byte
+        if (e->lhs)
+        {
+            const Node *b = e->lhs;
+            Type *bt = NULL;
+            if (b->kind == ND_VAR)
+            {
+                int idx = asm_find_local(ac, b->var_ref);
+                if (idx >= 0)
+                    bt = ac->locals[idx].type;
+            }
+            else if (b->kind == ND_CAST)
+            {
+                bt = b->type;
+                if (!bt && b->lhs && b->lhs->kind == ND_VAR)
+                {
+                    int idx = asm_find_local(ac, b->lhs->var_ref);
+                    if (idx >= 0)
+                        bt = ac->locals[idx].type;
+                }
+            }
+            if (bt && bt->kind == TY_PTR && bt->pointee)
+                k = bt->pointee->kind;
+        }
+        if (k == TY_I8)
+            fprintf(ac->as, "  movsx eax, byte ptr [rax]\n");
+        else if (k == TY_U8)
+            fprintf(ac->as, "  movzx eax, byte ptr [rax]\n");
+        else if (k == TY_I16)
+            fprintf(ac->as, "  movsx eax, word ptr [rax]\n");
+        else if (k == TY_U16)
+            fprintf(ac->as, "  movzx eax, word ptr [rax]\n");
+        else if (k == TY_I32 || k == TY_U32)
+            fprintf(ac->as, "  mov eax, dword ptr [rax]\n");
+        else /* 64-bit or other */
+            fprintf(ac->as, "  mov rax, [rax]\n");
         break;
     }
     case ND_VAR:
@@ -673,13 +767,72 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
         fprintf(ac->as, "  push rax\n");
         asm_eval_expr_to_rax(ac, e->rhs);
         fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  add rax, rcx\n");
+        // Keep result width consistent with expression type (no implicit promotion)
+        if (e->type && e->type->kind)
+            asm_trunc_to_kind(ac->as, e->type->kind);
+        else if (e->lhs && e->lhs->type)
+            asm_trunc_to_kind(ac->as, e->lhs->type->kind);
         break;
     case ND_SUB:
         asm_eval_expr_to_rax(ac, e->lhs);
         fprintf(ac->as, "  push rax\n");
         asm_eval_expr_to_rax(ac, e->rhs);
         fprintf(ac->as, "  mov rcx, rax\n  pop rax\n  sub rax, rcx\n");
+        if (e->type && e->type->kind)
+            asm_trunc_to_kind(ac->as, e->type->kind);
+        else if (e->lhs && e->lhs->type)
+            asm_trunc_to_kind(ac->as, e->lhs->type->kind);
         break;
+    case ND_MUL:
+    {
+        // rax = lhs * rhs; handle width via operand size
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  push rax\n");
+        asm_eval_expr_to_rax(ac, e->rhs);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n");
+        int k = e->lhs && e->lhs->type ? e->lhs->type->kind : TY_I64;
+        int w = kind_width(k);
+        if (w <= 4)
+            fprintf(ac->as, "  imul eax, ecx\n");
+        else
+            fprintf(ac->as, "  imul rax, rcx\n");
+        if (e->type && e->type->kind)
+            asm_trunc_to_kind(ac->as, e->type->kind);
+        else if (e->lhs && e->lhs->type)
+            asm_trunc_to_kind(ac->as, e->lhs->type->kind);
+        break;
+    }
+    case ND_DIV:
+    {
+        // rax = lhs / rhs; use idiv/div based on signedness, width 32/64.
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  push rax\n");
+        asm_eval_expr_to_rax(ac, e->rhs);
+        fprintf(ac->as, "  mov rcx, rax\n  pop rax\n");
+        int k = e->lhs && e->lhs->type ? e->lhs->type->kind : TY_I64;
+        int is_unsigned = (k == TY_U8 || k == TY_U16 || k == TY_U32 || k == TY_U64);
+        int w = kind_width(k);
+        if (w <= 4)
+        {
+            if (is_unsigned)
+                fprintf(ac->as, "  xor edx, edx\n  div ecx\n");
+            else
+                fprintf(ac->as, "  cdq\n  idiv ecx\n");
+        }
+        else
+        {
+            if (is_unsigned)
+                fprintf(ac->as, "  xor rdx, rdx\n  div rcx\n");
+            else
+                fprintf(ac->as, "  cqo\n  idiv rcx\n");
+        }
+        // quotient already in rax
+        if (e->type && e->type->kind)
+            asm_trunc_to_kind(ac->as, e->type->kind);
+        else if (e->lhs && e->lhs->type)
+            asm_trunc_to_kind(ac->as, e->lhs->type->kind);
+        break;
+    }
     case ND_GT_EXPR:
     {
         asm_eval_expr_to_rax(ac, e->lhs);
@@ -810,6 +963,8 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
     }
     case ND_CAST:
         asm_eval_expr_to_rax(ac, e->lhs);
+        if (e->type)
+            asm_trunc_to_kind(ac->as, e->type->kind);
         break;
     case ND_LAND:
     {
@@ -821,6 +976,24 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
                 "  cmp eax, 0\n  je .Lland_false%d\n  mov eax, 1\n  jmp "
                 ".Lland_end%d\n.Lland_false%d:\n  xor eax, eax\n.Lland_end%d:\n",
                 lid, lid, lid, lid);
+        break;
+    }
+    case ND_COND:
+    {
+        // e->lhs ? e->rhs : e->body
+        int lid = ac->next_lbl++;
+        int lend = ac->next_lbl++;
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  cmp eax, 0\n  je .Lcond_else%d\n", lid);
+        // then branch
+        asm_eval_expr_to_rax(ac, e->rhs);
+        fprintf(ac->as, "  jmp .Lcond_end%d\n.Lcond_else%d:\n", lend, lid);
+        // else branch
+        asm_eval_expr_to_rax(ac, e->body);
+        fprintf(ac->as, ".Lcond_end%d:\n", lend);
+        // Result already in rax; optional truncation to known type
+        if (e->type)
+            asm_trunc_to_kind(ac->as, e->type->kind);
         break;
     }
     case ND_PREINC:
@@ -1163,7 +1336,36 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
             asm_addr_for_lvalue_to_rax(ac, ix);
             fprintf(ac->as, "  mov rdx, rax\n");
             asm_eval_expr_to_rax(ac, e->rhs);
-            fprintf(ac->as, "  mov byte ptr [rdx], al\n");
+            // Determine element type for width-correct store
+            int k = TY_U8;
+            const Node *b = ix->lhs;
+            Type *bt = NULL;
+            if (b->kind == ND_VAR)
+            {
+                int idx = asm_find_local(ac, b->var_ref);
+                if (idx >= 0)
+                    bt = ac->locals[idx].type;
+            }
+            else if (b->kind == ND_CAST)
+            {
+                bt = b->type;
+                if (!bt && b->lhs && b->lhs->kind == ND_VAR)
+                {
+                    int idx = asm_find_local(ac, b->lhs->var_ref);
+                    if (idx >= 0)
+                        bt = ac->locals[idx].type;
+                }
+            }
+            if (bt && bt->kind == TY_PTR && bt->pointee)
+                k = bt->pointee->kind;
+            if (k == TY_I8 || k == TY_U8)
+                fprintf(ac->as, "  mov byte ptr [rdx], al\n");
+            else if (k == TY_I16 || k == TY_U16)
+                fprintf(ac->as, "  mov word ptr [rdx], ax\n");
+            else if (k == TY_I32 || k == TY_U32)
+                fprintf(ac->as, "  mov dword ptr [rdx], eax\n");
+            else
+                fprintf(ac->as, "  mov [rdx], rax\n");
         }
         else
         {
@@ -1237,7 +1439,36 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
                 asm_addr_for_lvalue_to_rax(ac, ix);
                 fprintf(ac->as, "  mov rdx, rax\n");
                 asm_eval_expr_to_rax(ac, as->rhs);
-                fprintf(ac->as, "  mov byte ptr [rdx], al\n");
+                // Width-correct store based on pointer element type
+                int k = TY_U8;
+                const Node *b = ix->lhs;
+                Type *bt = NULL;
+                if (b->kind == ND_VAR)
+                {
+                    int idx = asm_find_local(ac, b->var_ref);
+                    if (idx >= 0)
+                        bt = ac->locals[idx].type;
+                }
+                else if (b->kind == ND_CAST)
+                {
+                    bt = b->type;
+                    if (!bt && b->lhs && b->lhs->kind == ND_VAR)
+                    {
+                        int idx = asm_find_local(ac, b->lhs->var_ref);
+                        if (idx >= 0)
+                            bt = ac->locals[idx].type;
+                    }
+                }
+                if (bt && bt->kind == TY_PTR && bt->pointee)
+                    k = bt->pointee->kind;
+                if (k == TY_I8 || k == TY_U8)
+                    fprintf(ac->as, "  mov byte ptr [rdx], al\n");
+                else if (k == TY_I16 || k == TY_U16)
+                    fprintf(ac->as, "  mov word ptr [rdx], ax\n");
+                else if (k == TY_I32 || k == TY_U32)
+                    fprintf(ac->as, "  mov dword ptr [rdx], eax\n");
+                else
+                    fprintf(ac->as, "  mov [rdx], rax\n");
             }
             else
             {
@@ -1284,7 +1515,36 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
             fprintf(ac->as, "  mov rdx, rax\n");
             // store byte of rhs to [rdx]
             asm_eval_expr_to_rax(ac, s->rhs);
-            fprintf(ac->as, "  mov byte ptr [rdx], al\n");
+            // Width-correct store based on pointer element type
+            int k = TY_U8;
+            const Node *b = ix->lhs;
+            Type *bt = NULL;
+            if (b->kind == ND_VAR)
+            {
+                int idx = asm_find_local(ac, b->var_ref);
+                if (idx >= 0)
+                    bt = ac->locals[idx].type;
+            }
+            else if (b->kind == ND_CAST)
+            {
+                bt = b->type;
+                if (!bt && b->lhs && b->lhs->kind == ND_VAR)
+                {
+                    int idx = asm_find_local(ac, b->lhs->var_ref);
+                    if (idx >= 0)
+                        bt = ac->locals[idx].type;
+                }
+            }
+            if (bt && bt->kind == TY_PTR && bt->pointee)
+                k = bt->pointee->kind;
+            if (k == TY_I8 || k == TY_U8)
+                fprintf(ac->as, "  mov byte ptr [rdx], al\n");
+            else if (k == TY_I16 || k == TY_U16)
+                fprintf(ac->as, "  mov word ptr [rdx], ax\n");
+            else if (k == TY_I32 || k == TY_U32)
+                fprintf(ac->as, "  mov dword ptr [rdx], eax\n");
+            else
+                fprintf(ac->as, "  mov [rdx], rax\n");
         }
         else
         {
@@ -1322,7 +1582,12 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
         break;
     case ND_RET:
         if (s->lhs)
+        {
             asm_eval_expr_to_rax(ac, s->lhs);
+            // Conform return value to declared function return type
+            if (ac->fn && ac->fn->ret_type)
+                asm_trunc_to_kind(ac->as, ac->fn->ret_type->kind);
+        }
         fprintf(ac->as, "  jmp .Lret%d\n", ac->ret_id);
         break;
     default:
@@ -1845,7 +2110,10 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
                              (unit->body->kind == ND_RET);
         if (is_simple_call)
         {
-            if (opts && opts->freestanding)
+            // In freestanding mode we cannot link against libc when producing
+            // an executable, but compile-only (-c/--no-link) should still be
+            // permitted so users can link against their own runtime later.
+            if (opts && opts->freestanding && !(opts->no_link))
             {
                 fprintf(stderr, "error: codegen: external calls with libc are not "
                                 "available in freestanding mode\n");
@@ -2108,17 +2376,26 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
         // String table: 4-byte length incl. itself
         w32(buf, strtab_off, 4);
 
-        // Write .obj adjacent to output
+        // Write .obj: prefer an explicitly requested object output path (used
+        // for -c/--no-link and multi-file flows). Otherwise, place it adjacent
+        // to the output filename.
         char objpath[512];
         const char *out = (opts && opts->output_path) ? opts->output_path : "a.exe";
-        size_t n = strlen(out);
-        if (n >= 4 && (out[n - 4] == '.' || out[n - 4] == '\0'))
+        if (opts && opts->obj_output_path && *(opts->obj_output_path))
         {
-            snprintf(objpath, sizeof(objpath), "%.*s.obj", (int)(n - 4), out);
+            snprintf(objpath, sizeof(objpath), "%s", opts->obj_output_path);
         }
         else
         {
-            snprintf(objpath, sizeof(objpath), "%s.obj", out);
+            size_t n = strlen(out);
+            if (n >= 4 && (out[n - 4] == '.' || out[n - 4] == '\0'))
+            {
+                snprintf(objpath, sizeof(objpath), "%.*s.obj", (int)(n - 4), out);
+            }
+            else
+            {
+                snprintf(objpath, sizeof(objpath), "%s.obj", out);
+            }
         }
         FILE *fo = fopen(objpath, "wb");
         if (!fo)
@@ -2131,13 +2408,22 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
         fclose(fo);
         free(buf);
 
+        // If user requested compile-only (-c/--no-link), stop after writing the
+        // object file.
+        if (opts && opts->no_link)
+        {
+            return 0;
+        }
+
         // Link using cc
         char cmd[1024];
         if (opts && opts->freestanding)
         {
+            // Freestanding: no CRT, no default libs; set entry to main
+            // Add -ffreestanding and -nostartfiles for good measure
             snprintf(cmd, sizeof(cmd),
-                     "cc -o \"%s\" \"%s\" -nostdlib -Wl,-e,main -lkernel32", out,
-                     objpath);
+                     "cc -o \"%s\" \"%s\" -ffreestanding -nostdlib -nostartfiles -Wl,-e,main",
+                     out, objpath);
         }
         else
         {

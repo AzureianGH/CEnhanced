@@ -29,6 +29,7 @@ typedef enum
     TK_KW_I8,
     TK_KW_U8,
     TK_KW_F32,
+    TK_KW_FOR,
     TK_KW_F64,
     TK_KW_F128,
     TK_KW_LONG,
@@ -63,6 +64,7 @@ typedef enum
     TK_PLUSPLUS,   // ++
     TK_ANDAND,     // &&
     TK_STAR,       // *
+    TK_SLASH,      // /
     TK_MINUS,      // -
     TK_MINUSMINUS, // --
     TK_ASSIGN,     // =
@@ -72,6 +74,8 @@ typedef enum
     TK_GT,         // >
     TK_LTE,        // <=
     TK_GTE,        // >=
+    TK_QUESTION,   // ?
+    TK_COLON,      // :
 } TokenKind;
 
 typedef struct
@@ -112,6 +116,8 @@ typedef enum
 {
     ND_INT,
     ND_ADD,
+    ND_MUL,
+    ND_DIV,
     ND_RET,
     ND_FUNC,
     ND_STRING,
@@ -138,6 +144,7 @@ typedef enum
     ND_LAND,
     ND_EQ,
     ND_NE,
+    ND_COND, // ternary conditional expr: lhs ? rhs : body
 } NodeKind;
 
 typedef struct

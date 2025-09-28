@@ -53,6 +53,7 @@ static Node *parse_expr(Parser *ps);
 static Node *parse_stmt(Parser *ps);
 static Node *parse_block(Parser *ps);
 static Node *parse_while(Parser *ps);
+static Node *parse_for(Parser *ps);
 static void parse_alias_decl(Parser *ps);
 static Node *parse_unary(Parser *ps);
 static Node *parse_rel(Parser *ps);
@@ -269,9 +270,8 @@ static Type *parse_type_spec(Parser *ps)
                       "expected type specifier");
         exit(1);
     }
-    // pointer suffixes '*'
+    // pointer suffixes '*': allocate a fresh pointer chain per type
     Token p = lexer_peek(ps->lx);
-    static Type ptrs[8]; // allow up to 8 levels
     int depth = 0;
     while (p.kind == TK_STAR)
     {
@@ -279,14 +279,9 @@ static Type *parse_type_spec(Parser *ps)
         depth++;
         p = lexer_peek(ps->lx);
     }
-    Type *ty = base;
-    for (int i = 0; i < depth; i++)
-    {
-        ptrs[i].kind = TY_PTR;
-        ptrs[i].pointee = ty;
-        ty = &ptrs[i];
-    }
-    return ty;
+    if (depth == 0)
+        return base;
+    return make_ptr_chain_dyn(base, depth);
 }
 
 static Node *parse_primary(Parser *ps)
@@ -435,6 +430,28 @@ static Node *parse_postfix(Parser *ps)
 static Node *parse_unary(Parser *ps)
 {
     Token p = lexer_peek(ps->lx);
+    if (p.kind == TK_PLUS)
+    {
+        // unary plus: no-op
+        lexer_next(ps->lx);
+        return parse_unary(ps);
+    }
+    if (p.kind == TK_MINUS)
+    {
+        // unary minus: lower to 0 - expr
+        lexer_next(ps->lx);
+        Node *rv = parse_unary(ps);
+        Node *zero = new_node(ND_INT);
+        zero->int_val = 0;
+        zero->src = lexer_source(ps->lx);
+        Node *n = new_node(ND_SUB);
+        n->lhs = zero;
+        n->rhs = rv;
+        n->line = p.line;
+        n->col = p.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     if (p.kind == TK_PLUSPLUS)
     {
         lexer_next(ps->lx);
@@ -462,8 +479,39 @@ static Node *parse_unary(Parser *ps)
 
 static Node *parse_mul(Parser *ps)
 {
-    // currently no * multiplication; just forward unary
-    return parse_unary(ps);
+    Node *lhs = parse_unary(ps);
+    for (;;)
+    {
+        Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_STAR)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_unary(ps);
+            Node *mul = new_node(ND_MUL);
+            mul->lhs = lhs;
+            mul->rhs = rhs;
+            mul->line = op.line;
+            mul->col = op.col;
+            mul->src = lexer_source(ps->lx);
+            lhs = mul;
+            continue;
+        }
+        if (p.kind == TK_SLASH)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_unary(ps);
+            Node *div = new_node(ND_DIV);
+            div->lhs = lhs;
+            div->rhs = rhs;
+            div->line = op.line;
+            div->col = op.col;
+            div->src = lexer_source(ps->lx);
+            lhs = div;
+            continue;
+        }
+        break;
+    }
+    return lhs;
 }
 
 static Node *parse_add(Parser *ps)
@@ -587,9 +635,30 @@ static Node *parse_and(Parser *ps)
     return lhs;
 }
 
+// conditional (ternary) has lower precedence than && and ==, higher than assignment
+static Node *parse_cond(Parser *ps)
+{
+    Node *cond = parse_and(ps);
+    Token q = lexer_peek(ps->lx);
+    if (q.kind != TK_QUESTION)
+        return cond;
+    lexer_next(ps->lx); // consume '?'
+    Node *then_e = parse_expr(ps);
+    expect(ps, TK_COLON, ":");
+    Node *else_e = parse_cond(ps); // right-associative
+    Node *n = new_node(ND_COND);
+    n->lhs = cond;   // condition
+    n->rhs = then_e; // then
+    n->body = else_e; // reuse body for else branch
+    n->line = q.line;
+    n->col = q.col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
 static Node *parse_assign(Parser *ps)
 {
-    Node *lhs = parse_and(ps);
+    Node *lhs = parse_cond(ps);
     Token p = lexer_peek(ps->lx);
     if (p.kind == TK_ASSIGN)
     {
@@ -605,6 +674,8 @@ static Node *parse_assign(Parser *ps)
     }
     return lhs;
 }
+
+
 
 static Node *parse_expr(Parser *ps) { return parse_assign(ps); }
 
@@ -641,6 +712,14 @@ static Node *parse_stmt(Parser *ps)
     if (t.kind == TK_KW_WHILE)
     {
         return parse_while(ps);
+    }
+    if (t.kind == TK_KW_FOR)
+    {
+        return parse_for(ps);
+    }
+    if (t.kind == TK_KW_FOR)
+    {
+        return parse_for(ps);
     }
     if (t.kind == TK_KW_RET)
     {
@@ -754,6 +833,133 @@ static Node *parse_while(Parser *ps)
     w->src = lexer_source(ps->lx);
     return w;
 }
+
+static Node *parse_for(Parser *ps)
+{
+    // for (init; cond; post) stmt
+    expect(ps, TK_KW_FOR, "for");
+    expect(ps, TK_LPAREN, "(");
+    // init: either empty ';' or a full statement (decl or expr;)
+    Token next = lexer_peek(ps->lx);
+    Node *init = NULL;
+    if (next.kind != TK_SEMI)
+    {
+        // Reuse parse_stmt for a single statement ending with ';'
+        // But we must allow only a simple statement here; parse a declaration or expression-statement
+        if (next.kind == TK_KW_CONSTANT || is_type_start(ps, next))
+        {
+            // var decl statement
+            int is_const = 0;
+            if (next.kind == TK_KW_CONSTANT)
+            {
+                lexer_next(ps->lx);
+                is_const = 1;
+            }
+            Type *ty = parse_type_spec(ps);
+            Token name = expect(ps, TK_IDENT, "identifier");
+            Node *decl = new_node(ND_VAR_DECL);
+            char *nm = (char *)xmalloc((size_t)name.length + 1);
+            memcpy(nm, name.lexeme, (size_t)name.length);
+            nm[name.length] = '\0';
+            decl->var_name = nm;
+            decl->var_type = ty;
+            decl->var_is_const = is_const;
+            decl->line = name.line;
+            decl->col = name.col;
+            decl->src = lexer_source(ps->lx);
+            Token p2 = lexer_peek(ps->lx);
+            if (p2.kind == TK_ASSIGN)
+            {
+                lexer_next(ps->lx);
+                decl->rhs = parse_expr(ps);
+            }
+            expect(ps, TK_SEMI, ";");
+            init = decl;
+        }
+        else
+        {
+            Node *e = parse_expr(ps);
+            expect(ps, TK_SEMI, ";");
+            Node *es = new_node(ND_EXPR_STMT);
+            es->lhs = e;
+            es->line = e->line;
+            es->col = e->col;
+            es->src = lexer_source(ps->lx);
+            init = es;
+        }
+    }
+    else
+    {
+        // consume ';' for empty init
+        lexer_next(ps->lx);
+    }
+    // condition (optional)
+    Node *cond = NULL;
+    next = lexer_peek(ps->lx);
+    if (next.kind != TK_SEMI)
+    {
+        cond = parse_expr(ps);
+    }
+    expect(ps, TK_SEMI, ";");
+    // post (optional)
+    Node *post = NULL;
+    next = lexer_peek(ps->lx);
+    if (next.kind != TK_RPAREN)
+    {
+        Node *e = parse_expr(ps);
+        Node *es = new_node(ND_EXPR_STMT);
+        es->lhs = e;
+        es->line = e->line;
+        es->col = e->col;
+        es->src = lexer_source(ps->lx);
+        post = es;
+    }
+    expect(ps, TK_RPAREN, ")");
+    Node *body = parse_stmt(ps);
+    // Build while loop: while (cond_or_true) { body; post; }
+    Node *while_body = NULL;
+    if (post)
+    {
+        Node **stmts = (Node **)xcalloc(2, sizeof(Node *));
+        stmts[0] = body;
+        stmts[1] = post;
+        Node *blk = new_node(ND_BLOCK);
+        blk->stmts = stmts;
+        blk->stmt_count = 2;
+        blk->src = lexer_source(ps->lx);
+        while_body = blk;
+    }
+    else
+    {
+        while_body = body;
+    }
+    // if no condition, use integer literal 1
+    if (!cond)
+    {
+        Node *one = new_node(ND_INT);
+        one->int_val = 1;
+        one->src = lexer_source(ps->lx);
+        cond = one;
+    }
+    Node *wh = new_node(ND_WHILE);
+    wh->lhs = cond;
+    wh->rhs = while_body;
+    wh->src = lexer_source(ps->lx);
+    // If there was an init, create an outer block { init; while(...) }
+    if (init)
+    {
+        Node **stmts = (Node **)xcalloc(2, sizeof(Node *));
+        stmts[0] = init;
+        stmts[1] = wh;
+        Node *blk = new_node(ND_BLOCK);
+        blk->stmts = stmts;
+        blk->stmt_count = 2;
+        blk->src = lexer_source(ps->lx);
+        return blk;
+    }
+    return wh;
+}
+
 
 static Node *parse_function(Parser *ps)
 {

@@ -288,13 +288,39 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = e->lhs->type;
         return;
     }
+    if (e->kind == ND_MUL || e->kind == ND_DIV)
+    {
+        check_expr(sc, e->lhs);
+        check_expr(sc, e->rhs);
+        if (!type_equal(e->lhs->type, e->rhs->type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "'%s' requires both operands to have the same type",
+                          e->kind == ND_MUL ? "*" : "/");
+            exit(1);
+        }
+        if (!type_is_int(e->lhs->type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "integer type required for '%s'",
+                          e->kind == ND_MUL ? "*" : "/");
+            exit(1);
+        }
+        e->type = e->lhs->type;
+        return;
+    }
     if (e->kind == ND_GT_EXPR || e->kind == ND_LT || e->kind == ND_LE || e->kind == ND_GE)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!(type_is_int(e->lhs->type) && type_is_int(e->rhs->type)))
+        // Allow integer-vs-integer or pointer-vs-pointer relational comparisons.
+        int lhs_is_int = type_is_int(e->lhs->type);
+        int rhs_is_int = type_is_int(e->rhs->type);
+        int lhs_is_ptr = (e->lhs->type && e->lhs->type->kind == TY_PTR);
+        int rhs_is_ptr = (e->rhs->type && e->rhs->type->kind == TY_PTR);
+        if (!((lhs_is_int && rhs_is_int) || (lhs_is_ptr && rhs_is_ptr)))
         {
-            diag_error_at(e->src, e->line, e->col, "relational operator requires integer operands");
+            diag_error_at(e->src, e->line, e->col, "relational operator requires integer or pointer operands of the same category");
             exit(1);
         }
         e->type = &ty_i32;
@@ -316,10 +342,15 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!(type_is_int(e->lhs->type) && type_is_int(e->rhs->type)))
+        // Allow integer==integer or pointer==pointer comparisons.
+        int lhs_is_int = type_is_int(e->lhs->type);
+        int rhs_is_int = type_is_int(e->rhs->type);
+        int lhs_is_ptr = (e->lhs->type && e->lhs->type->kind == TY_PTR);
+        int rhs_is_ptr = (e->rhs->type && e->rhs->type->kind == TY_PTR);
+        if (!((lhs_is_int && rhs_is_int) || (lhs_is_ptr && rhs_is_ptr)))
         {
             diag_error_at(e->src, e->line, e->col,
-                          "equality requires integer operands");
+                          "equality requires both operands to be integers or pointers");
             exit(1);
         }
         e->type = &ty_i32;
@@ -458,6 +489,33 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = sym->sig.ret;
         return;
     }
+    if (e->kind == ND_COND)
+    {
+        // lhs ? rhs : body
+        if (!e->lhs || !e->rhs || !e->body)
+        {
+            diag_error_at(e->src, e->line, e->col, "malformed ternary expression");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        check_expr(sc, e->rhs);
+        check_expr(sc, e->body);
+        // Condition: allow integers or pointers (non-zero truthy)
+        int cond_ok = type_is_int(e->lhs->type) || (e->lhs->type && e->lhs->type->kind == TY_PTR);
+        if (!cond_ok)
+        {
+            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col, "ternary condition must be integer or pointer");
+            exit(1);
+        }
+        // Branch types must match exactly for now
+        if (!type_equal(e->rhs->type, e->body->type))
+        {
+            diag_error_at(e->src, e->line, e->col, "ternary branches must have the same type");
+            exit(1);
+        }
+        e->type = e->rhs->type;
+        return;
+    }
     diag_error_at(e->src, e->line, e->col, "unsupported expression: %s",
                   nodekind_name(e->kind));
     exit(1);
@@ -582,10 +640,15 @@ static int sema_check_function(SemaContext *sc, Node *fn)
             Node *e = ret->lhs;
             check_expr(sc, e);
             ret->type = e->type;
-            if (!type_is_int(ret->type))
+            // Enforce that the returned expression type matches the function's
+            // declared return type (including pointers). If a cast was used,
+            // 'e->type' should already be the cast target.
+            Type *decl = fn->ret_type ? fn->ret_type : &ty_i32;
+            if (!type_equal(ret->type, decl))
             {
                 diag_error_at(ret->src, ret->line, ret->col,
-                              "return type must be integer");
+                              "return type mismatch: returning %d but function returns %d",
+                              ret->type ? ret->type->kind : -1, decl ? decl->kind : -1);
                 return 1;
             }
         }

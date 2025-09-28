@@ -1,12 +1,12 @@
 #include "test.h"
 
 extend from "C" i32 printf(char *, _vaargs_);
-extend from "C" i32 write(i32, char *, i32);
-extend from "C" i32 read(i32, char *, i32);
-extend from "C" void *malloc(i32);
+extend from "C" i32 write(int, char *, int);
+extend from "C" i32 read(i32, char *, int);
+extend from "C" void *malloc(int);
 extend from "C" void free(void *);
-extend from "C" void exit(i32);
-extend from "C" i32 test();
+extend from "C" void exit(int);
+extend from "C" int test();
 
 extend fun test_chance() -> i32;
 
@@ -70,7 +70,18 @@ fun main() -> i32
 
     printf("Calling extended C function test(): %d\n", test());
 
-    ret 0;
+    printf("Multiplication test: 6 * 7 = %d\n", 6 * 7); // expect 42
+
+    printf("Multiplication overflow test (200 * 200 = 64): %d\n", test_mul_overflow()); // expect 64
+
+    printf("Test hex output: %d in hex is %x\n", 0xFF, 0xff); // expect ff
+
+    for (i32 i = 1; i < 1000; i = i * 2)
+    {
+        printf("For loop iteration %d\n", i);
+    }
+
+    ret 0b1 * 0x2 - 0o2; // return 0
 }
 
 fun strlen(string strg) -> i32
@@ -108,4 +119,11 @@ fun test_overflow() -> i16
     i16 x = 30000;
     i16 y = 10000;
     ret x + y; // expect overflow to -25536
+}
+
+fun test_mul_overflow() -> u8
+{
+    u8 a = 200;
+    u8 b = 200;
+    ret a * b; // expect overflow to 64 (200*200=40000 -> 40000 % 256 = 64)
 }

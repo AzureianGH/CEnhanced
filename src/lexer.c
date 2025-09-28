@@ -90,6 +90,51 @@ static void skip_ws_and_comments(Lexer *lx)
 static Token lex_number(Lexer *lx)
 {
     int start = lx->idx;
+    // Check for base prefixes: 0x, 0b, 0o, 0d
+    if (peekc(lx) == '0' && lx->idx + 1 < lx->src.length)
+    {
+        char p2 = lx->src.src[lx->idx + 1];
+        int base = 0;
+        if (p2 == 'x' || p2 == 'X')
+            base = 16;
+        else if (p2 == 'b' || p2 == 'B')
+            base = 2;
+        else if (p2 == 'o' || p2 == 'O')
+            base = 8;
+        else if (p2 == 'd' || p2 == 'D')
+            base = 10;
+        if (base != 0)
+        {
+            // consume '0' and prefix char
+            getc2(lx);
+            getc2(lx);
+            long long v = 0;
+            int any = 0;
+            for (;;)
+            {
+                char c = peekc(lx);
+                int digit = -1;
+                if (c >= '0' && c <= '9')
+                    digit = c - '0';
+                else if (c >= 'a' && c <= 'f')
+                    digit = 10 + (c - 'a');
+                else if (c >= 'A' && c <= 'F')
+                    digit = 10 + (c - 'A');
+                else
+                    break;
+                if (digit >= base)
+                    break;
+                getc2(lx);
+                v = v * base + digit;
+                any = 1;
+            }
+            int len = lx->idx - start;
+            Token t = make_tok(lx, TK_INT, lx->src.src + start, len);
+            t.int_val = any ? v : 0;
+            return t;
+        }
+    }
+    // Default: decimal without prefix
     while (isdigit((unsigned char)peekc(lx)))
         getc2(lx);
     int len = lx->idx - start;
@@ -133,6 +178,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_U8;
     else if (len == 3 && strncmp(p, "i16", 3) == 0)
         k = TK_KW_I16;
+    else if (len == 3 && strncmp(p, "for", 3) == 0)
+        k = TK_KW_FOR;
     else if (len == 3 && strncmp(p, "u16", 3) == 0)
         k = TK_KW_U16;
     else if (len == 3 && strncmp(p, "i32", 3) == 0)
@@ -181,6 +228,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_ELSE;
     else if (len == 5 && strncmp(p, "while", 5) == 0)
         k = TK_KW_WHILE;
+    else if (len == 3 && strncmp(p, "for", 3) == 0)
+        k = TK_KW_FOR;
     else if (len == 5 && strncmp(p, "alias", 5) == 0)
         k = TK_KW_ALIAS;
     else if (len == 2 && strncmp(p, "as", 2) == 0)
@@ -263,6 +312,16 @@ Token lexer_next(Lexer *lx)
         getc2(lx);
         return make_tok(lx, TK_COMMA, lx->src.src + lx->idx - 1, 1);
     }
+    if (c == '?')
+    {
+        getc2(lx);
+        return make_tok(lx, TK_QUESTION, lx->src.src + lx->idx - 1, 1);
+    }
+    if (c == ':')
+    {
+        getc2(lx);
+        return make_tok(lx, TK_COLON, lx->src.src + lx->idx - 1, 1);
+    }
     if (c == '+')
     {
         if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '+')
@@ -291,6 +350,12 @@ Token lexer_next(Lexer *lx)
     {
         getc2(lx);
         return make_tok(lx, TK_STAR, lx->src.src + lx->idx - 1, 1);
+    }
+    if (c == '/')
+    {
+        // we've already handled '//' comments above; single '/' is division
+        getc2(lx);
+        return make_tok(lx, TK_SLASH, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '-')
     {

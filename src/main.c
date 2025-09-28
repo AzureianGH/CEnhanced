@@ -197,7 +197,7 @@ int main(int argc, char **argv)
         }
         if (strcmp(argv[i], "--version") == 0)
         {
-            printf("chancec: CHance Compiler version 0.1.0\n");
+            printf("chancec: CHance Compiler version 0.2.0\n");
             printf("chancec: CE language standard: H25\n");
             printf("chancec: License: MIT\n");
             printf("chancec: Compiled on %s %s\n", __DATE__, __TIME__);
