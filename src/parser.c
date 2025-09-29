@@ -16,11 +16,13 @@ struct Parser
         char *name;
         int name_len;
         int is_generic;
+        int is_expr;
         char *param;
         int param_len;
         TypeKind base_kind;
         int ptr_depth;
         int gen_ptr_depth;
+        Node *expr_template;
     } *aliases;
     int alias_count;
     int alias_cap;
@@ -32,6 +34,7 @@ struct Parser
     int ec_count; int ec_cap;
     struct EnumType { char *name; int name_len; } *enum_types;
     int et_count; int et_cap;
+    int generic_depth;
 };
 
 static Node *new_node(NodeKind k)
@@ -79,6 +82,150 @@ static int alias_find(Parser *ps, const char *name, int len)
             return i;
     }
     return -1;
+}
+
+static struct Alias *alias_add_entry(Parser *ps, Token name)
+{
+    if (ps->alias_count == ps->alias_cap)
+    {
+        ps->alias_cap = ps->alias_cap ? ps->alias_cap * 2 : 8;
+        ps->aliases = (struct Alias *)realloc(ps->aliases,
+                                              ps->alias_cap * sizeof(*ps->aliases));
+    }
+    struct Alias *A = &ps->aliases[ps->alias_count++];
+    memset(A, 0, sizeof(*A));
+    A->name = (char *)xmalloc((size_t)name.length + 1);
+    memcpy(A->name, name.lexeme, (size_t)name.length);
+    A->name[name.length] = '\0';
+    A->name_len = name.length;
+    return A;
+}
+
+static int alias_param_matches(const struct Alias *A, const Node *n)
+{
+    if (!A || !A->is_generic || !n)
+        return 0;
+    if (n->kind != ND_VAR || !n->var_ref)
+        return 0;
+    if (A->param_len <= 0 || !A->param)
+        return 0;
+    if ((int)strlen(n->var_ref) != A->param_len)
+        return 0;
+    return strncmp(n->var_ref, A->param, (size_t)A->param_len) == 0;
+}
+
+static Node *clone_alias_expr(const struct Alias *A, const Node *tmpl, Node *arg,
+                              const SourceBuffer *src, int line, int col)
+{
+    if (!tmpl)
+        return NULL;
+    if (alias_param_matches(A, tmpl))
+        return arg;
+
+    Node *n = new_node(tmpl->kind);
+    n->line = line;
+    n->col = col;
+    n->src = src;
+    n->int_val = tmpl->int_val;
+    n->str_data = tmpl->str_data;
+    n->str_len = tmpl->str_len;
+    n->type = tmpl->kind == ND_CAST ? tmpl->type : NULL;
+    n->is_pointer_deref = tmpl->is_pointer_deref;
+
+    switch (tmpl->kind)
+    {
+    case ND_INT:
+    case ND_NULL:
+    case ND_STRING:
+        break;
+    case ND_VAR:
+        if (tmpl->var_ref)
+            n->var_ref = xstrdup(tmpl->var_ref);
+        break;
+    case ND_ADDR:
+    case ND_CAST:
+    case ND_MEMBER:
+    case ND_INDEX:
+    case ND_PREINC:
+    case ND_PREDEC:
+    case ND_POSTINC:
+    case ND_POSTDEC:
+        n->lhs = clone_alias_expr(A, tmpl->lhs, arg, src, line, col);
+        if (tmpl->kind == ND_MEMBER && tmpl->field_name)
+            n->field_name = xstrdup(tmpl->field_name);
+        if (tmpl->kind == ND_INDEX)
+            n->rhs = clone_alias_expr(A, tmpl->rhs, arg, src, line, col);
+        if (tmpl->kind == ND_CAST)
+            n->type = tmpl->type;
+        break;
+    case ND_ADD:
+    case ND_SUB:
+    case ND_MUL:
+    case ND_DIV:
+    case ND_EQ:
+    case ND_NE:
+    case ND_GT_EXPR:
+    case ND_LT:
+    case ND_LE:
+    case ND_GE:
+    case ND_LAND:
+    case ND_ASSIGN:
+        n->lhs = clone_alias_expr(A, tmpl->lhs, arg, src, line, col);
+        n->rhs = clone_alias_expr(A, tmpl->rhs, arg, src, line, col);
+        break;
+    case ND_COND:
+        n->lhs = clone_alias_expr(A, tmpl->lhs, arg, src, line, col);
+        n->rhs = clone_alias_expr(A, tmpl->rhs, arg, src, line, col);
+        n->body = clone_alias_expr(A, tmpl->body, arg, src, line, col);
+        break;
+    case ND_CALL:
+        if (tmpl->call_name)
+            n->call_name = xstrdup(tmpl->call_name);
+        if (tmpl->arg_count > 0)
+        {
+            n->arg_count = tmpl->arg_count;
+            n->args = (Node **)xcalloc((size_t)n->arg_count, sizeof(Node *));
+            for (int i = 0; i < n->arg_count; i++)
+                n->args[i] = clone_alias_expr(A, tmpl->args[i], arg, src, line, col);
+        }
+        break;
+    default:
+        diag_error("unsupported node kind %d in expression alias", tmpl->kind);
+        exit(1);
+    }
+    return n;
+}
+
+static Node *instantiate_expr_alias(Parser *ps, const struct Alias *A, Node *arg,
+                                    Token name_tok)
+{
+    if (!A || !A->is_expr)
+        return NULL;
+    if (A->is_generic && !arg)
+    {
+        diag_error_at(lexer_source(ps->lx), name_tok.line, name_tok.col,
+                      "alias '%.*s' requires a template argument", name_tok.length,
+                      name_tok.lexeme);
+        exit(1);
+    }
+    if (!A->is_generic && arg)
+    {
+        diag_error_at(lexer_source(ps->lx), name_tok.line, name_tok.col,
+                      "alias '%.*s' does not take template arguments",
+                      name_tok.length, name_tok.lexeme);
+        exit(1);
+    }
+    const SourceBuffer *src = lexer_source(ps->lx);
+    Node *result = clone_alias_expr(A, A->expr_template, arg, src, name_tok.line,
+                                    name_tok.col);
+    if (!result)
+    {
+        diag_error_at(src, name_tok.line, name_tok.col,
+                      "alias '%.*s' expansion failed", name_tok.length,
+                      name_tok.lexeme);
+        exit(1);
+    }
+    return result;
 }
 
 static int named_type_find(Parser *ps, const char *name, int len)
@@ -240,8 +387,16 @@ static int is_type_start(Parser *ps, Token t)
     default:
         break;
     }
-    if (t.kind == TK_IDENT && (alias_find(ps, t.lexeme, t.length) >= 0 || named_type_find(ps, t.lexeme, t.length) >= 0))
-        return 1;
+    if (t.kind == TK_IDENT)
+    {
+        int ai = alias_find(ps, t.lexeme, t.length);
+        if (ai >= 0 && ps->aliases[ai].is_expr)
+            return 0;
+        if (ai >= 0)
+            return 1;
+        if (named_type_find(ps, t.lexeme, t.length) >= 0)
+            return 1;
+    }
     return 0;
 }
 
@@ -324,6 +479,13 @@ static Type *parse_type_spec(Parser *ps)
         }
         if (ai >= 0) {
         struct Alias *A = &ps->aliases[ai];
+        if (A->is_expr)
+        {
+            diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                          "alias '%.*s' is an expression alias, not a type",
+                          b.length, b.lexeme);
+            exit(1);
+        }
         if (A->is_generic)
         {
             Token lt = lexer_next(ps->lx);
@@ -451,6 +613,15 @@ static Node *parse_primary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (t.kind == TK_KW_NULL || t.kind == TK_KW_NULLPTR)
+    {
+        Node *n = new_node(ND_NULL);
+        n->int_val = 0;
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     if (t.kind == TK_IDENT)
     {
         // enum constant?
@@ -515,6 +686,12 @@ static Node *parse_primary(Parser *ps)
         v->col = t.col;
         v->src = lexer_source(ps->lx);
         return v;
+    }
+    if (t.kind == TK_LPAREN)
+    {
+        Node *inner = parse_expr(ps);
+        expect(ps, TK_RPAREN, ")");
+        return inner;
     }
     diag_error_at(lexer_source(ps->lx), t.line, t.col,
                   "expected expression; got token kind=%d", t.kind);
@@ -677,6 +854,17 @@ static Node *parse_unary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (p.kind == TK_AMP)
+    {
+        lexer_next(ps->lx);
+        Node *lv = parse_unary(ps);
+        Node *n = new_node(ND_ADDR);
+        n->lhs = lv;
+        n->line = p.line;
+        n->col = p.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     return parse_postfix(ps);
 }
 
@@ -759,6 +947,8 @@ static Node *parse_rel(Parser *ps)
     Node *lhs = parse_add(ps);
     for(;;){
         Token p = lexer_peek(ps->lx);
+        if (ps->generic_depth > 0 && p.kind == TK_GT)
+            break;
         if (p.kind == TK_GT || p.kind == TK_LT || p.kind == TK_LTE || p.kind == TK_GTE)
         {
             Token op = lexer_next(ps->lx);
@@ -1518,69 +1708,71 @@ static void parse_alias_decl(Parser *ps)
     expect(ps, TK_KW_ALIAS, "alias");
     Token name = expect(ps, TK_IDENT, "identifier");
     int is_generic = 0;
-    int gen_ptr_depth = 0;
-    TypeKind base_kind = TY_VOID;
-    int ptr_depth = 0;
-    Token maybe_lt = lexer_peek(ps->lx);
-    if (maybe_lt.kind == TK_LT)
+    Token param = {0};
+    Token peek = lexer_peek(ps->lx);
+    if (peek.kind == TK_LT)
     {
-        // alias Name<T> = T*...;
         is_generic = 1;
         lexer_next(ps->lx);
-        Token param = expect(ps, TK_IDENT, "type parameter name");
+        param = expect(ps, TK_IDENT, "type parameter name");
         expect(ps, TK_GT, ">");
-        expect(ps, TK_ASSIGN, "=");
-        Token t = lexer_next(ps->lx);
-        if (!(t.kind == TK_IDENT && t.length == param.length &&
-              strncmp(t.lexeme, param.lexeme, t.length) == 0))
+    }
+    expect(ps, TK_ASSIGN, "=");
+
+    if (is_generic)
+    {
+        Token ahead = lexer_peek(ps->lx);
+        if (ahead.kind == TK_IDENT && ahead.length == param.length &&
+            strncmp(ahead.lexeme, param.lexeme, ahead.length) == 0)
         {
-            diag_error_at(lexer_source(ps->lx), t.line, t.col,
-                          "only simple generic pattern 'T*' is supported");
-            exit(1);
+            lexer_next(ps->lx); // consume parameter identifier
+            int n = 0;
+            Token s = lexer_peek(ps->lx);
+            while (s.kind == TK_STAR)
+            {
+                lexer_next(ps->lx);
+                n++;
+                s = lexer_peek(ps->lx);
+            }
+            if (n <= 0)
+            {
+                diag_error_at(lexer_source(ps->lx), ahead.line, ahead.col,
+                              "generic alias RHS must be '%.*s*'", param.length,
+                              param.lexeme);
+                exit(1);
+            }
+            expect(ps, TK_SEMI, ";");
+            struct Alias *A = alias_add_entry(ps, name);
+            A->is_generic = 1;
+            A->is_expr = 0;
+            A->param = (char *)xmalloc((size_t)param.length + 1);
+            memcpy(A->param, param.lexeme, (size_t)param.length);
+            A->param[param.length] = '\0';
+            A->param_len = param.length;
+            A->gen_ptr_depth = n;
+            A->base_kind = TY_VOID;
+            A->ptr_depth = 0;
+            return;
         }
-        int n = 0;
-        Token s = lexer_peek(ps->lx);
-        while (s.kind == TK_STAR)
-        {
-            lexer_next(ps->lx);
-            n++;
-            s = lexer_peek(ps->lx);
-        }
-        if (n <= 0)
-        {
-            diag_error_at(lexer_source(ps->lx), t.line, t.col,
-                          "generic alias RHS must be '%.*s*'", param.length,
-                          param.lexeme);
-            exit(1);
-        }
-        gen_ptr_depth = n;
+
+        ps->generic_depth++;
+        Node *expr = parse_expr(ps);
+        ps->generic_depth--;
         expect(ps, TK_SEMI, ";");
-        if (ps->alias_count == ps->alias_cap)
-        {
-            ps->alias_cap = ps->alias_cap ? ps->alias_cap * 2 : 8;
-            ps->aliases = (struct Alias *)realloc(
-                ps->aliases, ps->alias_cap * sizeof(*ps->aliases));
-        }
-        ps->aliases[ps->alias_count].name =
-            (char *)xmalloc((size_t)name.length + 1);
-        memcpy(ps->aliases[ps->alias_count].name, name.lexeme, (size_t)name.length);
-        ps->aliases[ps->alias_count].name[name.length] = '\0';
-        ps->aliases[ps->alias_count].name_len = name.length;
-        ps->aliases[ps->alias_count].is_generic = 1;
-        ps->aliases[ps->alias_count].param =
-            (char *)xmalloc((size_t)param.length + 1);
-        memcpy(ps->aliases[ps->alias_count].param, param.lexeme,
-               (size_t)param.length);
-        ps->aliases[ps->alias_count].param[param.length] = '\0';
-        ps->aliases[ps->alias_count].param_len = param.length;
-        ps->aliases[ps->alias_count].gen_ptr_depth = gen_ptr_depth;
-        ps->aliases[ps->alias_count].base_kind = TY_VOID;
-        ps->aliases[ps->alias_count].ptr_depth = 0;
-        ps->alias_count++;
+        struct Alias *A = alias_add_entry(ps, name);
+        A->is_generic = 1;
+        A->is_expr = 1;
+        A->expr_template = expr;
+        A->param = (char *)xmalloc((size_t)param.length + 1);
+        memcpy(A->param, param.lexeme, (size_t)param.length);
+        A->param[param.length] = '\0';
+        A->param_len = param.length;
+        A->base_kind = TY_VOID;
+        A->ptr_depth = 0;
+        A->gen_ptr_depth = 0;
         return;
     }
-    // non-generic: alias Name = <builtin> '*'* ;
-    expect(ps, TK_ASSIGN, "=");
+
     Token b = lexer_next(ps->lx);
     if (!(b.kind == TK_KW_I8 || b.kind == TK_KW_U8 || b.kind == TK_KW_I16 ||
           b.kind == TK_KW_U16 || b.kind == TK_KW_I32 || b.kind == TK_KW_U32 ||
@@ -1592,6 +1784,7 @@ static void parse_alias_decl(Parser *ps)
                       "alias base must be a built-in type for now");
         exit(1);
     }
+    TypeKind base_kind = TY_VOID;
     if (b.kind == TK_KW_I8)
         base_kind = TY_I8;
     else if (b.kind == TK_KW_U8)
@@ -1618,33 +1811,23 @@ static void parse_alias_decl(Parser *ps)
         base_kind = TY_VOID;
     else
         base_kind = TY_CHAR;
-    int n = 0;
+
+    int ptr_depth = 0;
     Token s = lexer_peek(ps->lx);
     while (s.kind == TK_STAR)
     {
         lexer_next(ps->lx);
-        n++;
+        ptr_depth++;
         s = lexer_peek(ps->lx);
     }
-    ptr_depth = n;
     expect(ps, TK_SEMI, ";");
-    if (ps->alias_count == ps->alias_cap)
-    {
-        ps->alias_cap = ps->alias_cap ? ps->alias_cap * 2 : 8;
-        ps->aliases = (struct Alias *)realloc(ps->aliases,
-                                              ps->alias_cap * sizeof(*ps->aliases));
-    }
-    ps->aliases[ps->alias_count].name = (char *)xmalloc((size_t)name.length + 1);
-    memcpy(ps->aliases[ps->alias_count].name, name.lexeme, (size_t)name.length);
-    ps->aliases[ps->alias_count].name[name.length] = '\0';
-    ps->aliases[ps->alias_count].name_len = name.length;
-    ps->aliases[ps->alias_count].is_generic = 0;
-    ps->aliases[ps->alias_count].param = NULL;
-    ps->aliases[ps->alias_count].param_len = 0;
-    ps->aliases[ps->alias_count].base_kind = base_kind;
-    ps->aliases[ps->alias_count].ptr_depth = ptr_depth;
-    ps->aliases[ps->alias_count].gen_ptr_depth = 0;
-    ps->alias_count++;
+
+    struct Alias *A = alias_add_entry(ps, name);
+    A->is_generic = 0;
+    A->is_expr = 0;
+    A->base_kind = base_kind;
+    A->ptr_depth = ptr_depth;
+    A->gen_ptr_depth = 0;
 }
 
 static void parse_enum_decl(Parser *ps)

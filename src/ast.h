@@ -51,6 +51,8 @@ typedef enum
     TK_KW_ENUM,
     TK_KW_ALIAS,
     TK_KW_AS,
+    TK_KW_NULL,
+    TK_KW_NULLPTR,
     // punctuation
     TK_ARROW,      // ->
     TK_LPAREN,     // (
@@ -64,6 +66,7 @@ typedef enum
     TK_PLUS,       // +
     TK_PLUSPLUS,   // ++
     TK_ANDAND,     // &&
+    TK_AMP,        // &
     TK_STAR,       // *
     TK_SLASH,      // /
     TK_MINUS,      // -
@@ -128,6 +131,7 @@ typedef struct Type
 typedef enum
 {
     ND_INT,
+    ND_NULL,
     ND_ADD,
     ND_MUL,
     ND_DIV,
@@ -159,6 +163,7 @@ typedef enum
     ND_NE,
     ND_COND, // ternary conditional expr: lhs ? rhs : body
     ND_MEMBER, // struct/enum member access
+    ND_ADDR,   // unary address-of
     ND_INIT_LIST, // brace initializer
 } NodeKind;
 

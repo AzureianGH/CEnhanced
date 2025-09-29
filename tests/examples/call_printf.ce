@@ -12,6 +12,7 @@ extend fun test_chance() -> i32;
 
 alias string = char*;
 alias ptr<T> = T*;
+alias addr<T> = &T;
 
 fun printwrapper() -> i32
 {
@@ -113,9 +114,7 @@ fun main() -> i32
         .testVar = 333 
     };
 
-
-    
-    ret vari.testVar + another.smallValue as i32; // return 456 (333 + 123)
+    ret ((vari.testVar) + (another.smallValue as i32)); // return 456 (333 + 123)
 }
 
 fun construct_thing() -> SmallTest
