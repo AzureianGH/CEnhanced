@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 
 struct SymTable
 {
@@ -110,7 +111,271 @@ static int type_equal(Type *a, Type *b)
         return 0;
     if (a->kind == TY_PTR)
         return type_equal(a->pointee, b->pointee);
+    if (a->kind == TY_STRUCT)
+    {
+        if (a->struct_name && b->struct_name)
+            return strcmp(a->struct_name, b->struct_name) == 0;
+        return a == b;
+    }
     return 1;
+}
+
+static int struct_find_field(Type *st, const char *name)
+{
+    if (!st || st->kind != TY_STRUCT || !name)
+        return -1;
+    for (int i = 0; i < st->strct.field_count; i++)
+    {
+        if (st->strct.field_names &&
+            st->strct.field_names[i] &&
+            strcmp(st->strct.field_names[i], name) == 0)
+            return i;
+    }
+    return -1;
+}
+
+static void check_expr(SemaContext *sc, Node *e);
+
+static int type_is_signed_int(Type *t)
+{
+    if (!t)
+        return 0;
+    switch (t->kind)
+    {
+    case TY_I8:
+    case TY_I16:
+    case TY_I32:
+    case TY_I64:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int type_is_unsigned_int(Type *t)
+{
+    if (!t)
+        return 0;
+    switch (t->kind)
+    {
+    case TY_U8:
+    case TY_U16:
+    case TY_U32:
+    case TY_U64:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int64_t type_int_min(Type *t)
+{
+    if (!t)
+        return 0;
+    switch (t->kind)
+    {
+    case TY_I8:
+        return INT8_MIN;
+    case TY_I16:
+        return INT16_MIN;
+    case TY_I32:
+        return INT32_MIN;
+    case TY_I64:
+        return INT64_MIN;
+    default:
+        return 0;
+    }
+}
+
+static int64_t type_int_max(Type *t)
+{
+    if (!t)
+        return 0;
+    switch (t->kind)
+    {
+    case TY_I8:
+        return INT8_MAX;
+    case TY_I16:
+        return INT16_MAX;
+    case TY_I32:
+        return INT32_MAX;
+    case TY_I64:
+        return INT64_MAX;
+    case TY_U8:
+        return UINT8_MAX;
+    case TY_U16:
+        return UINT16_MAX;
+    case TY_U32:
+        return UINT32_MAX;
+    case TY_U64:
+        return INT64_MAX;
+    default:
+        return 0;
+    }
+}
+
+static int literal_fits_type(Type *target, const Node *rhs)
+{
+    if (!target || !rhs)
+        return 0;
+    if (rhs->kind != ND_INT)
+        return 0;
+    if (!type_is_int(target))
+        return 0;
+    int64_t v = rhs->int_val;
+    if (type_is_unsigned_int(target))
+    {
+        if (v < 0)
+            return 0;
+        return (uint64_t)v <= (uint64_t)type_int_max(target);
+    }
+    if (type_is_signed_int(target))
+        return v >= type_int_min(target) && v <= type_int_max(target);
+    return 0;
+}
+
+static int can_assign(Type *target, Node *rhs)
+{
+    if (!target || !rhs)
+        return 0;
+    if (rhs->type && type_equal(target, rhs->type))
+        return 1;
+    if (literal_fits_type(target, rhs))
+    {
+        rhs->type = target;
+        return 1;
+    }
+    return 0;
+}
+
+static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target)
+{
+    if (!init || !target)
+        return;
+    if (init->kind != ND_INIT_LIST)
+    {
+        check_expr(sc, init);
+        if (target && !can_assign(target, init))
+        {
+            diag_error_at(init->src, init->line, init->col,
+                          "initializer expression type mismatch");
+            exit(1);
+        }
+        init->type = target;
+        return;
+    }
+    if (target->kind == TY_STRUCT)
+    {
+        int count = init->init.count;
+        int field_count = target->strct.field_count;
+        int *indices = NULL;
+        if (count > 0)
+            indices = (int *)xcalloc((size_t)count, sizeof(int));
+        unsigned char *used = (field_count > 0) ? (unsigned char *)xcalloc((size_t)field_count, sizeof(unsigned char)) : NULL;
+        int next_field = 0;
+        if (init->init.is_zero)
+        {
+            init->init.field_indices = NULL;
+            init->type = target;
+            if (indices)
+                free(indices);
+            if (used)
+                free(used);
+            return;
+        }
+        for (int i = 0; i < count; i++)
+        {
+            const char *desig = init->init.designators ? init->init.designators[i] : NULL;
+            int field_index = -1;
+            if (desig)
+            {
+                field_index = struct_find_field(target, desig);
+                if (field_index < 0)
+                {
+                    diag_error_at(init->src, init->line, init->col,
+                                  "unknown field '%s' in initializer", desig);
+                    if (indices)
+                        free(indices);
+                    if (used)
+                        free(used);
+                    exit(1);
+                }
+            }
+            else
+            {
+                if (next_field >= field_count)
+                {
+                    diag_error_at(init->src, init->line, init->col,
+                                  "too many initializer elements for struct");
+                    if (indices)
+                        free(indices);
+                    if (used)
+                        free(used);
+                    exit(1);
+                }
+                field_index = next_field++;
+            }
+            if (used && used[field_index])
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "duplicate initializer for field '%s'",
+                              target->strct.field_names[field_index]);
+                if (indices)
+                    free(indices);
+                free(used);
+                exit(1);
+            }
+            if (used)
+                used[field_index] = 1;
+            Node *elem = (init->init.elems && i < init->init.count) ? init->init.elems[i] : NULL;
+            if (!elem)
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "missing initializer expression");
+                if (indices)
+                    free(indices);
+                if (used)
+                    free(used);
+                exit(1);
+            }
+            Type *ft = (field_index >= 0 && field_index < field_count)
+                           ? target->strct.field_types[field_index]
+                           : NULL;
+            if (elem->kind == ND_INIT_LIST)
+            {
+                check_initializer_for_type(sc, elem, ft);
+            }
+            else
+            {
+                check_expr(sc, elem);
+                if (ft && !can_assign(ft, elem))
+                {
+                    diag_error_at(elem->src, elem->line, elem->col,
+                                  "initializer type mismatch for field '%s'",
+                                  target->strct.field_names[field_index]);
+                    if (indices)
+                        free(indices);
+                    if (used)
+                        free(used);
+                    exit(1);
+                }
+            }
+            if (indices)
+                indices[i] = field_index;
+        }
+        init->init.field_indices = indices;
+        init->type = target;
+        if (used)
+            free(used);
+        return;
+    }
+    if (!init->init.is_zero)
+    {
+        diag_error_at(init->src, init->line, init->col,
+                      "brace initializer not supported for this type");
+        exit(1);
+    }
+    init->type = target;
 }
 
 static void scope_push(SemaContext *sc)
@@ -262,6 +527,61 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = t;
         return;
     }
+    if (e->kind == ND_MEMBER)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col, "member access missing base expression");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        Type *base = e->lhs->type;
+        if (e->is_pointer_deref)
+        {
+            if (!base || base->kind != TY_PTR || !base->pointee)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "'->' requires pointer to struct");
+                exit(1);
+            }
+            base = base->pointee;
+        }
+        else
+        {
+            if (!base || base->kind != TY_STRUCT)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "'.' requires struct value");
+                exit(1);
+            }
+        }
+        if (!base || base->kind != TY_STRUCT)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "member access requires struct type");
+            exit(1);
+        }
+        int idx = struct_find_field(base, e->field_name);
+        if (idx < 0)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "unknown field '%s' on struct '%s'",
+                          e->field_name ? e->field_name : "<anon>",
+                          base->struct_name ? base->struct_name : "<anon>");
+            exit(1);
+        }
+    e->field_index = idx;
+    e->field_offset = base->strct.field_offsets ? base->strct.field_offsets[idx] : 0;
+    e->type = base->strct.field_types ? base->strct.field_types[idx] : NULL;
+        if (!e->type)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "incomplete type for field '%s'",
+                          base->strct.field_names[idx]);
+            exit(1);
+        }
+        return;
+    }
     if (e->kind == ND_ADD)
     {
         check_expr(sc, e->lhs);
@@ -392,58 +712,67 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_ASSIGN)
     {
-        // Strict typing: lhs must be lvalue; rhs type must exactly match lhs type
-        // unless explicit cast wraps the lhs or rhs
         if (!e->lhs)
         {
             diag_error_at(e->src, e->line, e->col,
                           "assignment missing left-hand side");
             exit(1);
         }
-        if (e->lhs->kind != ND_VAR && e->lhs->kind != ND_INDEX &&
-            !(e->lhs->kind == ND_CAST &&
-              (e->lhs->lhs &&
-               (e->lhs->lhs->kind == ND_VAR || e->lhs->lhs->kind == ND_INDEX))))
+        check_expr(sc, e->lhs);
+        Node *lhs_expr = e->lhs;
+        Node *lhs_base = lhs_expr;
+        if (lhs_base->kind == ND_CAST && lhs_base->lhs)
+            lhs_base = lhs_base->lhs;
+        if (lhs_base->kind != ND_VAR && lhs_base->kind != ND_INDEX && lhs_base->kind != ND_MEMBER)
         {
             diag_error_at(e->src, e->line, e->col,
                           "lvalue required as left operand of assignment");
             exit(1);
         }
-        check_expr(sc, e->rhs);
-        // Type of assignment expression is type of LHS; approximate with rhs type
-        // when lhs unknown
-        if (e->lhs->kind == ND_VAR)
+        if (lhs_base->kind == ND_VAR)
         {
-            Type *lt = scope_get_type(sc, e->lhs->var_ref);
-            if (!lt)
+            if (scope_is_const(sc, lhs_base->var_ref))
             {
-                diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
-                              "unknown variable '%s' on left-hand side of assignment",
-                              e->lhs->var_ref);
-                exit(1);
-            }
-            if (scope_is_const(sc, e->lhs->var_ref))
-            {
-                diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
+                diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
                               "cannot assign to constant variable '%s'",
-                              e->lhs->var_ref);
+                              lhs_base->var_ref);
                 exit(1);
             }
-            e->type = lt;
-            if (!type_equal(lt, e->rhs->type) && !(e->rhs->kind == ND_CAST))
+        }
+        check_expr(sc, e->rhs);
+        Type *lhs_type = lhs_expr->type;
+        if (!lhs_type)
+        {
+            if (lhs_base->kind == ND_VAR)
+                lhs_type = scope_get_type(sc, lhs_base->var_ref);
+            else if (lhs_base->kind == ND_MEMBER)
+                lhs_type = lhs_base->type;
+            else if (lhs_base->kind == ND_INDEX && lhs_base->lhs && lhs_base->lhs->type && lhs_base->lhs->type->kind == TY_PTR)
+                lhs_type = lhs_base->lhs->type->pointee;
+        }
+        if (lhs_base->kind == ND_VAR)
+        {
+            if (!lhs_type)
+            {
+                diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
+                              "unknown variable '%s' on left-hand side of assignment",
+                              lhs_base->var_ref);
+                exit(1);
+            }
+        }
+        if (lhs_type)
+        {
+            if (!can_assign(lhs_type, e->rhs))
             {
                 diag_error_at(e->src, e->line, e->col,
                               "cannot assign '%d' to '%d' without cast",
-                              e->rhs->type ? e->rhs->type->kind : -1, lt->kind);
+                              e->rhs->type ? e->rhs->type->kind : -1,
+                              lhs_type ? lhs_type->kind : -1);
                 exit(1);
             }
+            e->rhs->type = lhs_type;
         }
-        else
-        {
-            // Indexed lvalue: require matching element type; approximated as i8 for
-            // now
-            e->type = e->rhs->type ? e->rhs->type : &ty_i32;
-        }
+        e->type = lhs_type ? lhs_type : (e->rhs->type ? e->rhs->type : &ty_i32);
         return;
     }
     if (e->kind == ND_PREINC || e->kind == ND_PREDEC || e->kind == ND_POSTINC ||
@@ -561,7 +890,26 @@ static int sema_check_function(SemaContext *sc, Node *fn)
                 }
                 scope_add(sc, s->var_name, s->var_type, s->var_is_const);
                 if (s->rhs)
-                    check_expr(sc, s->rhs);
+                {
+                    if (s->rhs->kind == ND_INIT_LIST)
+                    {
+                        check_initializer_for_type(sc, s->rhs, s->var_type);
+                    }
+                    else
+                    {
+                        check_expr(sc, s->rhs);
+                        if (s->var_type && !can_assign(s->var_type, s->rhs))
+                        {
+                            diag_error_at(s->rhs->src, s->rhs->line, s->rhs->col,
+                                          "cannot initialize '%s' with incompatible type",
+                                          s->var_name);
+                            scope_pop(sc);
+                            return 1;
+                        }
+                        if (s->var_type)
+                            s->rhs->type = s->var_type;
+                    }
+                }
             }
             else if (s->kind == ND_EXPR_STMT)
             {

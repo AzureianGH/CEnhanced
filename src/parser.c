@@ -24,6 +24,14 @@ struct Parser
     } *aliases;
     int alias_count;
     int alias_cap;
+    // named types: structs and typedef-like entries
+    struct NamedType { char *name; int name_len; Type *type; } *named_types;
+    int nt_count; int nt_cap;
+    // enum constants: name->value
+    struct EnumConst { char *name; int name_len; int value; } *enum_consts;
+    int ec_count; int ec_cap;
+    struct EnumType { char *name; int name_len; } *enum_types;
+    int et_count; int et_cap;
 };
 
 static Node *new_node(NodeKind k)
@@ -60,6 +68,8 @@ static Node *parse_rel(Parser *ps);
 static Node *parse_and(Parser *ps);
 static Node *parse_eq(Parser *ps);
 
+static Node *parse_initializer(Parser *ps);
+
 static int alias_find(Parser *ps, const char *name, int len)
 {
     for (int i = 0; i < ps->alias_count; i++)
@@ -69,6 +79,84 @@ static int alias_find(Parser *ps, const char *name, int len)
             return i;
     }
     return -1;
+}
+
+static int named_type_find(Parser *ps, const char *name, int len)
+{
+    for (int i = 0; i < ps->nt_count; i++)
+    {
+        if (ps->named_types[i].name_len == len && strncmp(ps->named_types[i].name, name, len) == 0)
+            return i;
+    }
+    return -1;
+}
+static Type *named_type_get(Parser *ps, const char *name, int len)
+{
+    int i = named_type_find(ps, name, len);
+    return i >= 0 ? ps->named_types[i].type : NULL;
+}
+static void named_type_add(Parser *ps, const char *name, int len, Type *ty)
+{
+    if (ps->nt_count == ps->nt_cap)
+    {
+        ps->nt_cap = ps->nt_cap ? ps->nt_cap * 2 : 8;
+        ps->named_types = (struct NamedType*)realloc(ps->named_types, ps->nt_cap * sizeof(*ps->named_types));
+    }
+    ps->named_types[ps->nt_count].name = (char*)xmalloc((size_t)len + 1);
+    memcpy(ps->named_types[ps->nt_count].name, name, (size_t)len);
+    ps->named_types[ps->nt_count].name[len] = '\0';
+    ps->named_types[ps->nt_count].name_len = len;
+    ps->named_types[ps->nt_count].type = ty;
+    ps->nt_count++;
+}
+static int enum_const_find(Parser *ps, const char *name, int len)
+{
+    for (int i = 0; i < ps->ec_count; i++)
+        if (ps->enum_consts[i].name_len == len && strncmp(ps->enum_consts[i].name, name, len) == 0)
+            return i;
+    return -1;
+}
+static int enum_const_get(Parser *ps, const char *name, int len, int *out)
+{
+    int i = enum_const_find(ps, name, len);
+    if (i >= 0) { *out = ps->enum_consts[i].value; return 1; }
+    return 0;
+}
+static void enum_const_add(Parser *ps, const char *name, int len, int value)
+{
+    if (ps->ec_count == ps->ec_cap)
+    {
+        ps->ec_cap = ps->ec_cap ? ps->ec_cap * 2 : 8;
+        ps->enum_consts = (struct EnumConst*)realloc(ps->enum_consts, ps->ec_cap * sizeof(*ps->enum_consts));
+    }
+    ps->enum_consts[ps->ec_count].name = (char*)xmalloc((size_t)len + 1);
+    memcpy(ps->enum_consts[ps->ec_count].name, name, (size_t)len);
+    ps->enum_consts[ps->ec_count].name[len] = '\0';
+    ps->enum_consts[ps->ec_count].name_len = len;
+    ps->enum_consts[ps->ec_count].value = value;
+    ps->ec_count++;
+}
+static int enum_type_find(Parser *ps, const char *name, int len)
+{
+    for (int i = 0; i < ps->et_count; i++)
+        if (ps->enum_types[i].name_len == len && strncmp(ps->enum_types[i].name, name, len) == 0)
+            return i;
+    return -1;
+}
+static void enum_type_add(Parser *ps, const char *name, int len)
+{
+    if (enum_type_find(ps, name, len) >= 0)
+        return;
+    if (ps->et_count == ps->et_cap)
+    {
+        ps->et_cap = ps->et_cap ? ps->et_cap * 2 : 4;
+        ps->enum_types = (struct EnumType *)realloc(ps->enum_types, ps->et_cap * sizeof(*ps->enum_types));
+    }
+    ps->enum_types[ps->et_count].name = (char *)xmalloc((size_t)len + 1);
+    memcpy(ps->enum_types[ps->et_count].name, name, (size_t)len);
+    ps->enum_types[ps->et_count].name[len] = '\0';
+    ps->enum_types[ps->et_count].name_len = len;
+    ps->et_count++;
 }
 
 static Type *make_ptr_chain_dyn(Type *base, int depth)
@@ -82,6 +170,40 @@ static Type *make_ptr_chain_dyn(Type *base, int depth)
         t = p;
     }
     return t;
+}
+
+static int type_sizeof_simple(Type *ty)
+{
+    if (!ty)
+        return 8;
+    switch (ty->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+        return 1;
+    case TY_I16:
+    case TY_U16:
+        return 2;
+    case TY_I32:
+    case TY_U32:
+    case TY_F32:
+        return 4;
+    case TY_I64:
+    case TY_U64:
+    case TY_F64:
+    case TY_PTR:
+        return 8;
+    case TY_F128:
+        return 16;
+    case TY_CHAR:
+        return 1;
+    case TY_VOID:
+        return 0;
+    case TY_STRUCT:
+        return ty->strct.size_bytes;
+    default:
+        return 8;
+    }
 }
 
 static int is_type_start(Parser *ps, Token t)
@@ -113,10 +235,12 @@ static int is_type_start(Parser *ps, Token t)
     case TK_KW_CHAR:
     case TK_KW_STACK:
         return 1;
+    case TK_KW_STRUCT:
+        return 1;
     default:
         break;
     }
-    if (t.kind == TK_IDENT && alias_find(ps, t.lexeme, t.length) >= 0)
+    if (t.kind == TK_IDENT && (alias_find(ps, t.lexeme, t.length) >= 0 || named_type_find(ps, t.lexeme, t.length) >= 0))
         return 1;
     return 0;
 }
@@ -188,10 +312,17 @@ static Type *parse_type_spec(Parser *ps)
         int ai = alias_find(ps, b.lexeme, b.length);
         if (ai < 0)
         {
-            diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
-                          b.length, b.lexeme);
-            exit(1);
+            // maybe a named struct type
+            Type *nt = named_type_get(ps, b.lexeme, b.length);
+            if (nt)
+                base = nt;
+            else {
+                diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
+                              b.length, b.lexeme);
+                exit(1);
+            }
         }
+        if (ai >= 0) {
         struct Alias *A = &ps->aliases[ai];
         if (A->is_generic)
         {
@@ -263,6 +394,19 @@ static Type *parse_type_spec(Parser *ps)
             }
             base = make_ptr_chain_dyn(bk, A->ptr_depth);
         }
+        }
+    }
+    else if (b.kind == TK_KW_STRUCT)
+    {
+        // allow 'struct Name' as a type use
+        Token nm = expect(ps, TK_IDENT, "struct name");
+        Type *nt = named_type_get(ps, nm.lexeme, nm.length);
+        if (!nt)
+        {
+            diag_error_at(lexer_source(ps->lx), nm.line, nm.col, "unknown struct '%.*s'", nm.length, nm.lexeme);
+            exit(1);
+        }
+        base = nt;
     }
     else
     {
@@ -309,6 +453,15 @@ static Node *parse_primary(Parser *ps)
     }
     if (t.kind == TK_IDENT)
     {
+        // enum constant?
+        int ev = 0;
+        if (enum_const_get(ps, t.lexeme, t.length, &ev))
+        {
+            Node *n = new_node(ND_INT);
+            n->int_val = ev;
+            n->line = t.line; n->col = t.col; n->src = lexer_source(ps->lx);
+            return n;
+        }
         // Could be a call: ident '(' ... ')'
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_LPAREN)
@@ -367,6 +520,10 @@ static Node *parse_primary(Parser *ps)
                   "expected expression; got token kind=%d", t.kind);
     exit(1);
 }
+
+// Forward decls for new top-level decls
+static void parse_enum_decl(Parser *ps);
+static void parse_struct_decl(Parser *ps);
 static Node *parse_postfix(Parser *ps)
 {
     Node *e = parse_primary(ps);
@@ -420,6 +577,52 @@ static Node *parse_postfix(Parser *ps)
             cs->col = p.col;
             cs->src = lexer_source(ps->lx);
             e = cs;
+            continue;
+        }
+        if (p.kind == TK_ACCESS || p.kind == TK_DOT)
+        {
+            Token op = lexer_next(ps->lx);
+            Token field = expect(ps, TK_IDENT, "member name");
+            // Check for enum scoped constant: EnumType=>Value
+            if (e->kind == ND_VAR)
+            {
+                const char *base_name = e->var_ref;
+                int base_len = (int)strlen(base_name);
+                if (enum_type_find(ps, base_name, base_len) >= 0)
+                {
+                    int combo_len = base_len + 2 + field.length;
+                    char *combo = (char *)xmalloc((size_t)combo_len + 1);
+                    memcpy(combo, base_name, (size_t)base_len);
+                    combo[base_len] = '=';
+                    combo[base_len + 1] = '>';
+                    memcpy(combo + base_len + 2, field.lexeme, (size_t)field.length);
+                    combo[combo_len] = '\0';
+                    int ev = 0;
+                    if (enum_const_get(ps, combo, combo_len, &ev))
+                    {
+                        Node *n = new_node(ND_INT);
+                        n->int_val = ev;
+                        n->line = field.line;
+                        n->col = field.col;
+                        n->src = lexer_source(ps->lx);
+                        free(combo);
+                        e = n;
+                        continue;
+                    }
+                    free(combo);
+                }
+            }
+            Node *m = new_node(ND_MEMBER);
+            m->lhs = e;
+            char *nm = (char *)xmalloc((size_t)field.length + 1);
+            memcpy(nm, field.lexeme, (size_t)field.length);
+            nm[field.length] = '\0';
+            m->field_name = nm;
+            m->is_pointer_deref = (op.kind == TK_ACCESS);
+            m->line = field.line;
+            m->col = field.col;
+            m->src = lexer_source(ps->lx);
+            e = m;
             continue;
         }
         break;
@@ -679,6 +882,80 @@ static Node *parse_assign(Parser *ps)
 
 static Node *parse_expr(Parser *ps) { return parse_assign(ps); }
 
+static Node *parse_initializer(Parser *ps)
+{
+    Token t = lexer_peek(ps->lx);
+    if (t.kind != TK_LBRACE)
+        return parse_expr(ps);
+    lexer_next(ps->lx); // consume '{'
+    Node *init = new_node(ND_INIT_LIST);
+    init->line = t.line;
+    init->col = t.col;
+    init->src = lexer_source(ps->lx);
+    Node **elems = NULL;
+    const char **designators = NULL;
+    int count = 0, cap = 0;
+    Token nxt = lexer_peek(ps->lx);
+    if (nxt.kind == TK_RBRACE)
+    {
+        lexer_next(ps->lx);
+        init->init.is_zero = 1;
+        init->init.elems = NULL;
+        init->init.designators = NULL;
+        init->init.count = 0;
+        return init;
+    }
+    while (1)
+    {
+        const char *desig = NULL;
+        Token look = lexer_peek(ps->lx);
+        if (look.kind == TK_DOT)
+        {
+            lexer_next(ps->lx);
+            Token fld = expect(ps, TK_IDENT, "field designator");
+            char *nm = (char *)xmalloc((size_t)fld.length + 1);
+            memcpy(nm, fld.lexeme, (size_t)fld.length);
+            nm[fld.length] = '\0';
+            desig = nm;
+            expect(ps, TK_ASSIGN, "=");
+        }
+        Node *elem = NULL;
+        Token look2 = lexer_peek(ps->lx);
+        if (look2.kind == TK_LBRACE)
+            elem = parse_initializer(ps);
+        else
+            elem = parse_expr(ps);
+        if (count == cap)
+        {
+            cap = cap ? cap * 2 : 4;
+            elems = (Node **)realloc(elems, sizeof(Node *) * cap);
+            designators = (const char **)realloc(designators, sizeof(char *) * cap);
+        }
+        elems[count] = elem;
+        designators[count] = desig;
+        count++;
+        Token sep = lexer_peek(ps->lx);
+        if (sep.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            Token after = lexer_peek(ps->lx);
+            if (after.kind == TK_RBRACE)
+                break;
+            continue;
+        }
+        break;
+    }
+    expect(ps, TK_RBRACE, "}");
+    init->init.elems = elems;
+    init->init.designators = designators;
+    init->init.count = count;
+    if (count == 0)
+        init->init.is_zero = 1;
+    else if (count == 1 && !designators[0] && elems[0]->kind == ND_INT && elems[0]->int_val == 0)
+        init->init.is_zero = 1;
+    return init;
+}
+
 // (removed duplicate parse_unary definition)
 
 static Node *parse_stmt(Parser *ps)
@@ -771,7 +1048,7 @@ static Node *parse_stmt(Parser *ps)
         if (p2.kind == TK_ASSIGN)
         {
             lexer_next(ps->lx);
-            decl->rhs = parse_expr(ps);
+            decl->rhs = parse_initializer(ps);
         }
         expect(ps, TK_SEMI, ";");
         return decl;
@@ -871,7 +1148,7 @@ static Node *parse_for(Parser *ps)
             if (p2.kind == TK_ASSIGN)
             {
                 lexer_next(ps->lx);
-                decl->rhs = parse_expr(ps);
+                decl->rhs = parse_initializer(ps);
             }
             expect(ps, TK_SEMI, ";");
             init = decl;
@@ -1179,6 +1456,16 @@ Node *parse_unit(Parser *ps)
             parse_extend_decl(ps);
             continue;
         }
+        if (t.kind == TK_KW_ENUM)
+        {
+            parse_enum_decl(ps);
+            continue;
+        }
+        if (t.kind == TK_KW_STRUCT)
+        {
+            parse_struct_decl(ps);
+            continue;
+        }
         if (t.kind == TK_KW_ALIAS)
         {
             parse_alias_decl(ps);
@@ -1358,4 +1645,102 @@ static void parse_alias_decl(Parser *ps)
     ps->aliases[ps->alias_count].ptr_depth = ptr_depth;
     ps->aliases[ps->alias_count].gen_ptr_depth = 0;
     ps->alias_count++;
+}
+
+static void parse_enum_decl(Parser *ps)
+{
+    expect(ps, TK_KW_ENUM, "enum");
+    Token name = expect(ps, TK_IDENT, "enum name");
+    // For now, enums are i32-typed constants; register named type alias as i32
+    static Type ti32 = {.kind = TY_I32};
+    if (named_type_find(ps, name.lexeme, name.length) < 0)
+        named_type_add(ps, name.lexeme, name.length, &ti32);
+    enum_type_add(ps, name.lexeme, name.length);
+    expect(ps, TK_LBRACE, "{");
+    int cur = 0;
+    for (;;)
+    {
+        Token t = lexer_peek(ps->lx);
+        if (t.kind == TK_RBRACE) { lexer_next(ps->lx); break; }
+        Token id = expect(ps, TK_IDENT, "enumerator");
+        Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_ASSIGN)
+        {
+            lexer_next(ps->lx);
+            Node *e = parse_expr(ps);
+            // evaluate simple integer constant; fallback 0 if not INT
+            if (e->kind == ND_INT)
+                cur = (int)e->int_val;
+            else
+                cur = 0;
+        }
+        // add constant (global scope)
+    enum_const_add(ps, id.lexeme, id.length, cur);
+    // Also register scoped name Enum=>Member
+    int scoped_len = name.length + 2 + id.length;
+    char *scoped = (char *)xmalloc((size_t)scoped_len + 1);
+    memcpy(scoped, name.lexeme, (size_t)name.length);
+    scoped[name.length] = '=';
+    scoped[name.length + 1] = '>';
+    memcpy(scoped + name.length + 2, id.lexeme, (size_t)id.length);
+    scoped[scoped_len] = '\0';
+    enum_const_add(ps, scoped, scoped_len, cur);
+    free(scoped);
+        // next
+        Token sep = lexer_peek(ps->lx);
+        if (sep.kind == TK_COMMA) { lexer_next(ps->lx); cur++; continue; }
+        // maybe end
+        // if next is '}', we'll loop and close; otherwise, error
+        cur++;
+    }
+    expect(ps, TK_SEMI, ";");
+}
+
+static void parse_struct_decl(Parser *ps)
+{
+    expect(ps, TK_KW_STRUCT, "struct");
+    Token name = expect(ps, TK_IDENT, "struct name");
+    expect(ps, TK_LBRACE, "{");
+    // Create a Type object for the struct
+    Type *st = (Type*)xcalloc(1, sizeof(Type));
+    st->kind = TY_STRUCT;
+    st->struct_name = (char*)xmalloc((size_t)name.length + 1);
+    memcpy((char*)st->struct_name, name.lexeme, (size_t)name.length);
+    ((char*)st->struct_name)[name.length] = '\0';
+    // Parse fields: list of type ident ';'
+    const char **fnames = NULL; Type **ftypes = NULL; int *foff = NULL; int fcnt=0, fcap=0;
+    int offset = 0;
+    while (1)
+    {
+        Token t = lexer_peek(ps->lx);
+        if (t.kind == TK_RBRACE) { lexer_next(ps->lx); break; }
+        if (!(t.kind == TK_KW_CONSTANT || is_type_start(ps, t)))
+        {
+            diag_error_at(lexer_source(ps->lx), t.line, t.col, "expected field declaration or '}'");
+            exit(1);
+        }
+        int is_const = 0; if (t.kind == TK_KW_CONSTANT) { lexer_next(ps->lx); is_const = 1; }
+        (void)is_const; // fields ignore const for now
+        Type *fty = parse_type_spec(ps);
+        Token fname = expect(ps, TK_IDENT, "field name");
+        // optional multiple declarators not supported; one per line
+        expect(ps, TK_SEMI, ";");
+        if (fcnt==fcap) { fcap = fcap?fcap*2:4; fnames=(const char**)realloc(fnames, sizeof(char*)*fcap); ftypes=(Type**)realloc(ftypes, sizeof(Type*)*fcap); foff=(int*)realloc(foff, sizeof(int)*fcap);} 
+        char *nm = (char*)xmalloc((size_t)fname.length+1); memcpy(nm, fname.lexeme, (size_t)fname.length); nm[fname.length]='\0';
+        fnames[fcnt] = nm; ftypes[fcnt] = fty; fcnt++;
+        int sz = type_sizeof_simple(fty);
+        if (fty && fty->kind == TY_STRUCT && sz == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), fname.line, fname.col,
+                          "struct field '%.*s' has incomplete type", fname.length,
+                          fname.lexeme);
+            exit(1);
+        }
+        foff[fcnt-1] = offset;
+        offset += sz;
+    }
+    st->strct.field_names = fnames; st->strct.field_types = ftypes; st->strct.field_offsets = foff; st->strct.field_count = fcnt; st->strct.size_bytes = offset;
+    // register named type
+    named_type_add(ps, name.lexeme, name.length, st);
+    expect(ps, TK_SEMI, ";");
 }

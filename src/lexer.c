@@ -228,6 +228,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_ELSE;
     else if (len == 5 && strncmp(p, "while", 5) == 0)
         k = TK_KW_WHILE;
+    else if (len == 4 && strncmp(p, "enum", 4) == 0)
+        k = TK_KW_ENUM;
     else if (len == 3 && strncmp(p, "for", 3) == 0)
         k = TK_KW_FOR;
     else if (len == 5 && strncmp(p, "alias", 5) == 0)
@@ -312,6 +314,11 @@ Token lexer_next(Lexer *lx)
         getc2(lx);
         return make_tok(lx, TK_COMMA, lx->src.src + lx->idx - 1, 1);
     }
+    if (c == '.')
+    {
+        getc2(lx);
+        return make_tok(lx, TK_DOT, lx->src.src + lx->idx - 1, 1);
+    }
     if (c == '?')
     {
         getc2(lx);
@@ -384,6 +391,12 @@ Token lexer_next(Lexer *lx)
             getc2(lx);
             getc2(lx);
             return make_tok(lx, TK_EQEQ, lx->src.src + lx->idx - 2, 2);
+        }
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '>')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_ACCESS, lx->src.src + lx->idx - 2, 2);
         }
         getc2(lx);
         return make_tok(lx, TK_ASSIGN, lx->src.src + lx->idx - 1, 1);

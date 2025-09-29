@@ -196,6 +196,145 @@ static int kind_width(int k)
     }
 }
 
+static int type_storage_size(Type *ty)
+{
+    if (!ty)
+        return 8;
+    switch (ty->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+        return 1;
+    case TY_I16:
+    case TY_U16:
+        return 2;
+    case TY_I32:
+    case TY_U32:
+    case TY_F32:
+        return 4;
+    case TY_I64:
+    case TY_U64:
+    case TY_F64:
+    case TY_PTR:
+        return 8;
+    case TY_F128:
+        return 16;
+    case TY_STRUCT:
+        return ty->strct.size_bytes;
+    default:
+        return 8;
+    }
+}
+
+static int type_scalar_width(Type *ty)
+{
+    if (!ty)
+        return 8;
+    switch (ty->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+        return 1;
+    case TY_I16:
+    case TY_U16:
+        return 2;
+    case TY_I32:
+    case TY_U32:
+    case TY_F32:
+        return 4;
+    case TY_I64:
+    case TY_U64:
+    case TY_F64:
+    case TY_PTR:
+        return 8;
+    default:
+        return 8;
+    }
+}
+
+static void asm_store_scalar_to_stack(AsmCtx *ac, Type *ty, int offset)
+{
+    int w = type_scalar_width(ty);
+    int kind = ty ? ty->kind : TY_I64;
+    if (ty && ty->kind == TY_STRUCT)
+    {
+        cg_error(NULL, "codegen: struct store not supported as scalar");
+        exit(1);
+    }
+    if (w == 1)
+        fprintf(ac->as, "  mov byte ptr [rbp%+d], al\n", offset);
+    else if (w == 2)
+        fprintf(ac->as, "  mov word ptr [rbp%+d], ax\n", offset);
+    else if (w == 4)
+        fprintf(ac->as, "  mov dword ptr [rbp%+d], eax\n", offset);
+    else if (kind == TY_F128)
+        fprintf(ac->as, "  movdqu xmmword ptr [rbp%+d], xmm0\n", offset);
+    else
+        fprintf(ac->as, "  mov [rbp%+d], rax\n", offset);
+}
+
+static void asm_store_scalar_to_ptr(AsmCtx *ac, Type *ty, const char *reg)
+{
+    int w = type_scalar_width(ty);
+    int kind = ty ? ty->kind : TY_I64;
+    if (ty && ty->kind == TY_STRUCT)
+    {
+        cg_error(NULL, "codegen: struct store not supported as scalar");
+        exit(1);
+    }
+    if (w == 1)
+        fprintf(ac->as, "  mov byte ptr [%s], al\n", reg);
+    else if (w == 2)
+        fprintf(ac->as, "  mov word ptr [%s], ax\n", reg);
+    else if (w == 4)
+        fprintf(ac->as, "  mov dword ptr [%s], eax\n", reg);
+    else if (kind == TY_F128)
+        fprintf(ac->as, "  movdqu xmmword ptr [%s], xmm0\n", reg);
+    else
+        fprintf(ac->as, "  mov [%s], rax\n", reg);
+}
+
+static void asm_zero_bytes(AsmCtx *ac, int base_off, int size)
+{
+    if (size <= 0)
+        return;
+    int off = base_off;
+    int remaining = size;
+    while (remaining >= 8)
+    {
+        fprintf(ac->as, "  mov qword ptr [rbp%+d], 0\n", off);
+        off += 8;
+        remaining -= 8;
+    }
+    if (remaining >= 4)
+    {
+        fprintf(ac->as, "  mov dword ptr [rbp%+d], 0\n", off);
+        off += 4;
+        remaining -= 4;
+    }
+    if (remaining >= 2)
+    {
+        fprintf(ac->as, "  mov word ptr [rbp%+d], 0\n", off);
+        off += 2;
+        remaining -= 2;
+    }
+    if (remaining > 0)
+        fprintf(ac->as, "  mov byte ptr [rbp%+d], 0\n", off);
+}
+
+static int asm_struct_find_field(const Type *st, const char *name)
+{
+    if (!st || st->kind != TY_STRUCT || !name)
+        return -1;
+    for (int i = 0; i < st->strct.field_count; i++)
+    {
+        if (st->strct.field_names && st->strct.field_names[i] &&
+            strcmp(st->strct.field_names[i], name) == 0)
+            return i;
+    }
+    return -1;
+}
+
 // Truncate/sign- or zero-extend arithmetic result in RAX to match a type kind
 static void asm_trunc_to_kind(FILE *as, int k)
 {
@@ -682,6 +821,22 @@ static void asm_addr_for_lvalue_to_rax(AsmCtx *ac, const Node *lv)
         }
         return;
     }
+    if (lv->kind == ND_MEMBER)
+    {
+        if (lv->is_pointer_deref)
+        {
+            asm_eval_expr_to_rax(ac, lv->lhs);
+            if (lv->field_offset)
+                fprintf(ac->as, "  add rax, %d\n", lv->field_offset);
+        }
+        else
+        {
+            asm_addr_for_lvalue_to_rax(ac, lv->lhs);
+            if (lv->field_offset)
+                fprintf(ac->as, "  add rax, %d\n", lv->field_offset);
+        }
+        return;
+    }
     cg_error(lv, "codegen: unsupported lvalue kind %d", lv->kind);
     exit(1);
 }
@@ -734,6 +889,30 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
         else if (k == TY_I32 || k == TY_U32)
             fprintf(ac->as, "  mov eax, dword ptr [rax]\n");
         else /* 64-bit or other */
+            fprintf(ac->as, "  mov rax, [rax]\n");
+        break;
+    }
+    case ND_MEMBER:
+    {
+        asm_addr_for_lvalue_to_rax(ac, e);
+        Type *ft = e->type;
+        if (ft && ft->kind == TY_STRUCT)
+        {
+            cg_error(e, "codegen: loading struct member by value not supported yet");
+            exit(1);
+        }
+        int k = ft ? ft->kind : TY_I64;
+        if (k == TY_I8)
+            fprintf(ac->as, "  movsx eax, byte ptr [rax]\n");
+        else if (k == TY_U8)
+            fprintf(ac->as, "  movzx eax, byte ptr [rax]\n");
+        else if (k == TY_I16)
+            fprintf(ac->as, "  movsx eax, word ptr [rax]\n");
+        else if (k == TY_U16)
+            fprintf(ac->as, "  movzx eax, word ptr [rax]\n");
+        else if (k == TY_I32 || k == TY_U32 || k == TY_F32)
+            fprintf(ac->as, "  mov eax, dword ptr [rax]\n");
+        else
             fprintf(ac->as, "  mov rax, [rax]\n");
         break;
     }
@@ -1381,6 +1560,70 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
     }
 }
 
+static void asm_emit_initializer(AsmCtx *ac, const Node *init, Type *ty, int base_off)
+{
+    if (!ty)
+        return;
+    if (!init)
+    {
+        asm_zero_bytes(ac, base_off, type_storage_size(ty));
+        return;
+    }
+    if (init->kind != ND_INIT_LIST)
+    {
+        asm_eval_expr_to_rax(ac, init);
+        if (ty->kind == TY_STRUCT)
+        {
+            cg_error(init, "codegen: struct assignment from expression not supported");
+            exit(1);
+        }
+        asm_store_scalar_to_stack(ac, ty, base_off);
+        return;
+    }
+    if (ty->kind == TY_STRUCT)
+    {
+        int size = ty->strct.size_bytes;
+        asm_zero_bytes(ac, base_off, size);
+        if (init->init.is_zero)
+            return;
+        int pos_cursor = 0;
+        for (int i = 0; i < init->init.count; i++)
+        {
+            int field_index = -1;
+            if (init->init.field_indices)
+                field_index = init->init.field_indices[i];
+            else if (init->init.designators && init->init.designators[i])
+                field_index = asm_struct_find_field(ty, init->init.designators[i]);
+            else
+                field_index = pos_cursor++;
+            if (field_index < 0 || field_index >= ty->strct.field_count)
+                continue;
+            int field_off = ty->strct.field_offsets ? ty->strct.field_offsets[field_index] : 0;
+            Type *ft = ty->strct.field_types ? ty->strct.field_types[field_index] : NULL;
+            const Node *elem = init->init.elems ? init->init.elems[i] : NULL;
+            if (!elem || !ft)
+                continue;
+            if (elem->kind == ND_INIT_LIST)
+            {
+                asm_emit_initializer(ac, elem, ft, base_off + field_off);
+            }
+            else
+            {
+                asm_eval_expr_to_rax(ac, elem);
+                if (ft->kind == TY_STRUCT)
+                {
+                    cg_error(elem, "codegen: struct expressions not yet supported in field init");
+                    exit(1);
+                }
+                asm_store_scalar_to_stack(ac, ft, base_off + field_off);
+            }
+        }
+        return;
+    }
+    // Scalar brace initializer like {0}
+    asm_zero_bytes(ac, base_off, type_storage_size(ty));
+}
+
 static void asm_emit_stmt(AsmCtx *ac, const Node *s)
 {
     // debug disabled
@@ -1388,19 +1631,19 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
     {
     case ND_VAR_DECL:
     {
-        int size = (s->var_type ? kind_width(s->var_type->kind) : 8);
+        int size = s->var_type ? type_storage_size(s->var_type) : 8;
+        if (size <= 0)
+            size = 1;
         int off = asm_add_local(ac, s->var_name, s->var_type, size);
         if (s->rhs)
         {
-            asm_eval_expr_to_rax(ac, s->rhs);
-            if (size == 1)
-                fprintf(ac->as, "  mov byte ptr [rbp%+d], al\n", off);
-            else if (size == 2)
-                fprintf(ac->as, "  mov word ptr [rbp%+d], ax\n", off);
-            else if (size == 4)
-                fprintf(ac->as, "  mov dword ptr [rbp%+d], eax\n", off);
+            if (s->rhs->kind == ND_INIT_LIST)
+                asm_emit_initializer(ac, s->rhs, s->var_type, off);
             else
-                fprintf(ac->as, "  mov [rbp%+d], rax\n", off);
+            {
+                asm_eval_expr_to_rax(ac, s->rhs);
+                asm_store_scalar_to_stack(ac, s->var_type, off);
+            }
         }
         break;
     }
@@ -1469,6 +1712,20 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
                     fprintf(ac->as, "  mov dword ptr [rdx], eax\n");
                 else
                     fprintf(ac->as, "  mov [rdx], rax\n");
+            }
+            else if (as->lhs->kind == ND_MEMBER ||
+                     (as->lhs->kind == ND_CAST && as->lhs->lhs->kind == ND_MEMBER))
+            {
+                const Node *mem = (as->lhs->kind == ND_MEMBER) ? as->lhs : as->lhs->lhs;
+                asm_addr_for_lvalue_to_rax(ac, mem);
+                fprintf(ac->as, "  mov rdx, rax\n");
+                asm_eval_expr_to_rax(ac, as->rhs);
+                if (mem->type && mem->type->kind == TY_STRUCT)
+                {
+                    cg_error(mem, "codegen: struct member assignment from expression not supported");
+                    exit(1);
+                }
+                asm_store_scalar_to_ptr(ac, mem->type, "rdx");
             }
             else
             {
@@ -1545,6 +1802,20 @@ static void asm_emit_stmt(AsmCtx *ac, const Node *s)
                 fprintf(ac->as, "  mov dword ptr [rdx], eax\n");
             else
                 fprintf(ac->as, "  mov [rdx], rax\n");
+        }
+        else if (s->lhs->kind == ND_MEMBER ||
+                 (s->lhs->kind == ND_CAST && s->lhs->lhs->kind == ND_MEMBER))
+        {
+            const Node *mem = (s->lhs->kind == ND_MEMBER) ? s->lhs : s->lhs->lhs;
+            asm_addr_for_lvalue_to_rax(ac, mem);
+            fprintf(ac->as, "  mov rdx, rax\n");
+            asm_eval_expr_to_rax(ac, s->rhs);
+            if (mem->type && mem->type->kind == TY_STRUCT)
+            {
+                cg_error(mem, "codegen: struct member assignment from expression not supported");
+                exit(1);
+            }
+            asm_store_scalar_to_ptr(ac, mem->type, "rdx");
         }
         else
         {

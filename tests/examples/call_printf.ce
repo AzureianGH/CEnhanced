@@ -18,6 +18,34 @@ fun printwrapper() -> i32
     ret printf("Hello, %s! Number: %d\n", "CHance", 42);
 }
 
+enum Element
+{
+    ElementPart, // Auto 0
+    ElementPart2, // Auto 1
+    SetElement = 3 // 3
+}; // To access an element, do Element=>ElementPart, you can use ElementPart globally unless contained keyword is before enum keyword, which then it can only be used with the accessor
+
+struct AnElement
+{
+    Element internalElement;
+    Element* ptrToElement; // automatically int type i64
+};
+
+struct OtherElement
+{
+    i32 part;
+    char* str;
+    u64 bignumber;
+    AnElement thisthing;
+    AnElement* ptrToSmth;
+};
+
+struct SmallTest
+{
+    i32 testVar;
+    u8 smallValue;
+};
+
 fun main() -> i32
 {
     // allocate 128 bytes for input
@@ -76,12 +104,26 @@ fun main() -> i32
 
     printf("Test hex output: %d in hex is %x\n", 0xFF, 0xff); // expect ff
 
-    for (i32 i = 1; i < 1000; i = i * 2)
-    {
-        printf("For loop iteration %d\n", i);
-    }
+    SmallTest vari = {};
+    vari.smallValue = 3;
+    vari.testVar = 44;
+    
+    SmallTest another = {
+        .smallValue = 123,
+        .testVar = 333 
+    };
 
-    ret 0b1 * 0x2 - 0o2; // return 0
+
+    
+    ret vari.testVar + another.smallValue as i32; // return 456 (333 + 123)
+}
+
+fun construct_thing() -> SmallTest
+{
+    SmallTest thing = {};
+    thing.smallValue = 5;
+    thing.testVar = 10;
+    ret thing;
 }
 
 fun strlen(string strg) -> i32

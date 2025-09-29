@@ -48,6 +48,7 @@ typedef enum
     TK_KW_IF,
     TK_KW_ELSE,
     TK_KW_WHILE,
+    TK_KW_ENUM,
     TK_KW_ALIAS,
     TK_KW_AS,
     // punctuation
@@ -76,6 +77,8 @@ typedef enum
     TK_GTE,        // >=
     TK_QUESTION,   // ?
     TK_COLON,      // :
+    TK_ACCESS,     // =>
+    TK_DOT,        // .
 } TokenKind;
 
 typedef struct
@@ -104,12 +107,22 @@ typedef enum
     TY_VOID,
     TY_CHAR,
     TY_PTR,
+    TY_STRUCT,
 } TypeKind;
 
 typedef struct Type
 {
     TypeKind kind;
     struct Type *pointee; // for TY_PTR
+    // For TY_STRUCT
+    const char *struct_name;
+    struct {
+        const char **field_names;
+        struct Type **field_types;
+        int *field_offsets;
+        int field_count;
+        int size_bytes;
+    } strct;
 } Type;
 
 typedef enum
@@ -145,6 +158,8 @@ typedef enum
     ND_EQ,
     ND_NE,
     ND_COND, // ternary conditional expr: lhs ? rhs : body
+    ND_MEMBER, // struct/enum member access
+    ND_INIT_LIST, // brace initializer
 } NodeKind;
 
 typedef struct
@@ -190,6 +205,19 @@ typedef struct Node
     int stmt_count;
     // For ND_VAR reference
     const char *var_ref;
+    // For ND_MEMBER
+    const char *field_name;
+    int field_index;
+    int field_offset;
+    int is_pointer_deref; // 1 if base was pointer (for -> semantics)
+    // For ND_INIT_LIST
+    struct {
+        struct Node **elems;
+        const char **designators; // NULL for positional
+        int *field_indices; // computed during sema, parallel to elems
+        int count;
+        int is_zero; // for {} or {0} special cases
+    } init;
 } Node;
 
 typedef struct Lexer Lexer;
