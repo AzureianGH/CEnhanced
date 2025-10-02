@@ -94,9 +94,25 @@ static Type ty_f64 = {.kind = TY_F64};
 static Type ty_f128 = {.kind = TY_F128};
 static Type ty_void = {.kind = TY_VOID};
 static Type ty_char = {.kind = TY_CHAR};
+static Type ty_void_ptr = {.kind = TY_PTR, .pointee = &ty_void};
+
+static Type *make_ptr_chain(Type *base, int depth)
+{
+    Type *t = base;
+    for (int i = 0; i < depth; i++)
+    {
+        Type *p = (Type *)xcalloc(1, sizeof(Type));
+        p->kind = TY_PTR;
+        p->pointee = t;
+        t = p;
+    }
+    return t;
+}
 
 static int type_is_int(Type *t)
 {
+    int needs_malloc;
+    int needs_free;
     return t && (t->kind == TY_I8 || t->kind == TY_U8 || t->kind == TY_I16 ||
                  t->kind == TY_U16 || t->kind == TY_I32 || t->kind == TY_U32 ||
                  t->kind == TY_I64 || t->kind == TY_U64);
@@ -253,6 +269,54 @@ static int can_assign(Type *target, Node *rhs)
     return 0;
 }
 
+static void check_array_literal_for_pointer(SemaContext *sc, Node *init, Type *ptr_ty)
+{
+    if (!init || !ptr_ty)
+        return;
+    if (ptr_ty->kind != TY_PTR || !ptr_ty->pointee)
+    {
+        diag_error_at(init->src, init->line, init->col,
+                      "array literal requires pointer element type");
+        exit(1);
+    }
+    Type *elem_ty = ptr_ty->pointee;
+    if (init->init.count == 0)
+    {
+        init->type = ptr_ty;
+        return;
+    }
+    for (int i = 0; i < init->init.count; i++)
+    {
+        Node *elem = (init->init.elems && i < init->init.count) ? init->init.elems[i] : NULL;
+        if (!elem)
+        {
+            diag_error_at(init->src, init->line, init->col,
+                          "missing element in array literal");
+            exit(1);
+        }
+        if (elem_ty->kind == TY_PTR && elem->kind == ND_INIT_LIST && elem->init.is_array_literal)
+        {
+            check_array_literal_for_pointer(sc, elem, elem_ty);
+            continue;
+        }
+        if (elem->kind == ND_INIT_LIST && elem->init.is_array_literal)
+        {
+            diag_error_at(elem->src, elem->line, elem->col,
+                          "nested array literal requires pointer element type");
+            exit(1);
+        }
+        check_expr(sc, elem);
+        if (!can_assign(elem_ty, elem))
+        {
+            diag_error_at(elem->src, elem->line, elem->col,
+                          "array element type mismatch");
+            exit(1);
+        }
+    }
+    init->type = ptr_ty;
+    sc->needs_malloc = 1;
+}
+
 static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target)
 {
     if (!init || !target)
@@ -267,6 +331,17 @@ static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target
             exit(1);
         }
         init->type = target;
+        return;
+    }
+    if (init->init.is_array_literal)
+    {
+        if (!target || target->kind != TY_PTR)
+        {
+            diag_error_at(init->src, init->line, init->col,
+                          "array literal can only initialize pointer types");
+            exit(1);
+        }
+        check_array_literal_for_pointer(sc, init, target);
         return;
     }
     if (target->kind == TY_STRUCT)
@@ -708,6 +783,61 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = &ty_i32;
         return;
     }
+    if (e->kind == ND_NEW)
+    {
+        if (!e->new_base_type || e->new_dim_count <= 0)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "new expression missing type or dimension");
+            exit(1);
+        }
+        if (e->new_dim_count > 1)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "multi-dimensional new is not supported yet");
+            exit(1);
+        }
+        for (int i = 0; i < e->new_dim_count; i++)
+        {
+            Node *dim = e->new_dims ? e->new_dims[i] : NULL;
+            if (!dim)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "missing dimension in new expression");
+                exit(1);
+            }
+            check_expr(sc, dim);
+            if (!type_is_int(dim->type))
+            {
+                diag_error_at(dim->src, dim->line, dim->col,
+                              "new dimension must be an integer expression");
+                exit(1);
+            }
+        }
+        Type *res = make_ptr_chain(e->new_base_type, 1);
+        e->type = res;
+        sc->needs_malloc = 1;
+        return;
+    }
+    if (e->kind == ND_DELETE)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "delete expression missing operand");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        if (!e->lhs->type || e->lhs->type->kind != TY_PTR)
+        {
+            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
+                          "delete operand must be a pointer");
+            exit(1);
+        }
+        e->type = &ty_void;
+        sc->needs_free = 1;
+        return;
+    }
     if (e->kind == ND_EQ || e->kind == ND_NE)
     {
         check_expr(sc, e->lhs);
@@ -1108,6 +1238,34 @@ int sema_check_unit(SemaContext *sc, Node *unit)
     {
         if (sema_check_function(sc, unit->stmts[i]))
             return 1;
+    }
+    if (sc->needs_malloc && !symtab_get(sc->syms, "malloc"))
+    {
+        Symbol s = {0};
+        s.kind = SYM_FUNC;
+        s.name = "malloc";
+        s.is_extern = 1;
+        s.abi = "C";
+        s.sig.ret = &ty_void_ptr;
+        s.sig.param_count = 1;
+        s.sig.is_varargs = 0;
+        s.sig.params = (Type **)xcalloc(1, sizeof(Type *));
+        s.sig.params[0] = &ty_u64;
+        symtab_add(sc->syms, s);
+    }
+    if (sc->needs_free && !symtab_get(sc->syms, "free"))
+    {
+        Symbol s = {0};
+        s.kind = SYM_FUNC;
+        s.name = "free";
+        s.is_extern = 1;
+        s.abi = "C";
+        s.sig.ret = &ty_void;
+        s.sig.param_count = 1;
+        s.sig.is_varargs = 0;
+        s.sig.params = (Type **)xcalloc(1, sizeof(Type *));
+        s.sig.params[0] = &ty_void_ptr;
+        symtab_add(sc->syms, s);
     }
     return 0;
 }

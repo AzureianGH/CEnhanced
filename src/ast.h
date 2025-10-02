@@ -53,6 +53,8 @@ typedef enum
     TK_KW_AS,
     TK_KW_NULL,
     TK_KW_NULLPTR,
+    TK_KW_NEW,
+    TK_KW_DELETE,
     // punctuation
     TK_ARROW,      // ->
     TK_LPAREN,     // (
@@ -165,6 +167,8 @@ typedef enum
     ND_MEMBER, // struct/enum member access
     ND_ADDR,   // unary address-of
     ND_INIT_LIST, // brace initializer
+    ND_NEW,
+    ND_DELETE,
 } NodeKind;
 
 typedef struct
@@ -201,6 +205,10 @@ typedef struct Node
     const char *call_name;
     struct Node **args;
     int arg_count;
+    // For ND_NEW
+    Type *new_base_type;
+    struct Node **new_dims;
+    int new_dim_count;
     // For ND_VAR_DECL
     const char *var_name;
     Type *var_type;
@@ -222,6 +230,7 @@ typedef struct Node
         int *field_indices; // computed during sema, parallel to elems
         int count;
         int is_zero; // for {} or {0} special cases
+        int is_array_literal; // 1 if literal came from [] syntax
     } init;
 } Node;
 
@@ -331,6 +340,8 @@ typedef struct
 {
     SymTable *syms;
     struct Scope *scope;
+    int needs_malloc;
+    int needs_free;
 } SemaContext;
 
 SemaContext *sema_create(void);

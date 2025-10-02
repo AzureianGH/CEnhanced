@@ -35,6 +35,7 @@ struct Parser
     struct EnumType { char *name; int name_len; } *enum_types;
     int et_count; int et_cap;
     int generic_depth;
+    int suppress_array_suffix;
 };
 
 static Node *new_node(NodeKind k)
@@ -188,6 +189,30 @@ static Node *clone_alias_expr(const struct Alias *A, const Node *tmpl, Node *arg
             for (int i = 0; i < n->arg_count; i++)
                 n->args[i] = clone_alias_expr(A, tmpl->args[i], arg, src, line, col);
         }
+        break;
+    case ND_INIT_LIST:
+        n->init.count = tmpl->init.count;
+        n->init.is_zero = tmpl->init.is_zero;
+        n->init.is_array_literal = tmpl->init.is_array_literal;
+        if (tmpl->init.count > 0)
+        {
+            n->init.elems = (Node **)xcalloc((size_t)tmpl->init.count, sizeof(Node *));
+            for (int i = 0; i < tmpl->init.count; i++)
+                n->init.elems[i] = clone_alias_expr(A, tmpl->init.elems[i], arg, src, line, col);
+        }
+        break;
+    case ND_NEW:
+        n->new_base_type = tmpl->new_base_type;
+        n->new_dim_count = tmpl->new_dim_count;
+        if (tmpl->new_dim_count > 0 && tmpl->new_dims)
+        {
+            n->new_dims = (Node **)xcalloc((size_t)tmpl->new_dim_count, sizeof(Node *));
+            for (int i = 0; i < tmpl->new_dim_count; i++)
+                n->new_dims[i] = clone_alias_expr(A, tmpl->new_dims[i], arg, src, line, col);
+        }
+        break;
+    case ND_DELETE:
+        n->lhs = clone_alias_expr(A, tmpl->lhs, arg, src, line, col);
         break;
     default:
         diag_error("unsupported node kind %d in expression alias", tmpl->kind);
@@ -585,6 +610,18 @@ static Type *parse_type_spec(Parser *ps)
         depth++;
         p = lexer_peek(ps->lx);
     }
+    if (!ps->suppress_array_suffix)
+    {
+        for (;;)
+        {
+            Token lb = lexer_peek(ps->lx);
+            if (lb.kind != TK_LBRACKET)
+                break;
+            lexer_next(ps->lx);
+            expect(ps, TK_RBRACKET, "]");
+            depth++;
+        }
+    }
     if (depth == 0)
         return base;
     return make_ptr_chain_dyn(base, depth);
@@ -687,11 +724,57 @@ static Node *parse_primary(Parser *ps)
         v->src = lexer_source(ps->lx);
         return v;
     }
+    if (t.kind == TK_KW_NULL || t.kind == TK_KW_NULLPTR)
+    {
+        Node *n = new_node(ND_NULL);
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     if (t.kind == TK_LPAREN)
     {
         Node *inner = parse_expr(ps);
         expect(ps, TK_RPAREN, ")");
         return inner;
+    }
+    if (t.kind == TK_LBRACKET)
+    {
+        Node *lit = new_node(ND_INIT_LIST);
+        lit->line = t.line;
+        lit->col = t.col;
+        lit->src = lexer_source(ps->lx);
+        Node **elems = NULL;
+        int count = 0, cap = 0;
+        Token nxt = lexer_peek(ps->lx);
+        if (nxt.kind != TK_RBRACKET)
+        {
+            for (;;)
+            {
+                Node *elem = parse_expr(ps);
+                if (count == cap)
+                {
+                    cap = cap ? cap * 2 : 4;
+                    elems = (Node **)realloc(elems, sizeof(Node *) * cap);
+                }
+                elems[count++] = elem;
+                Token sep = lexer_peek(ps->lx);
+                if (sep.kind == TK_COMMA)
+                {
+                    lexer_next(ps->lx);
+                    continue;
+                }
+                break;
+            }
+        }
+        expect(ps, TK_RBRACKET, "]");
+        lit->init.elems = elems;
+        lit->init.designators = NULL;
+        lit->init.field_indices = NULL;
+        lit->init.count = count;
+        lit->init.is_zero = (count == 0);
+        lit->init.is_array_literal = 1;
+        return lit;
     }
     diag_error_at(lexer_source(ps->lx), t.line, t.col,
                   "expected expression; got token kind=%d", t.kind);
@@ -862,6 +945,55 @@ static Node *parse_unary(Parser *ps)
         n->lhs = lv;
         n->line = p.line;
         n->col = p.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
+    if (p.kind == TK_KW_NEW)
+    {
+        Token newtok = lexer_next(ps->lx);
+        ps->suppress_array_suffix++;
+        Type *base_ty = parse_type_spec(ps);
+        ps->suppress_array_suffix--;
+        Node **dims = NULL;
+        int dim_count = 0, cap = 0;
+        for (;;)
+        {
+            Token lb = lexer_peek(ps->lx);
+            if (lb.kind != TK_LBRACKET)
+                break;
+            lexer_next(ps->lx);
+            Node *dim = parse_expr(ps);
+            expect(ps, TK_RBRACKET, "]");
+            if (dim_count == cap)
+            {
+                cap = cap ? cap * 2 : 4;
+                dims = (Node **)realloc(dims, sizeof(Node *) * cap);
+            }
+            dims[dim_count++] = dim;
+        }
+        if (dim_count == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), newtok.line, newtok.col,
+                          "new expression requires at least one dimension []");
+            exit(1);
+        }
+        Node *n = new_node(ND_NEW);
+        n->new_base_type = base_ty;
+        n->new_dims = dims;
+        n->new_dim_count = dim_count;
+        n->line = newtok.line;
+        n->col = newtok.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
+    if (p.kind == TK_KW_DELETE)
+    {
+        Token deltok = lexer_next(ps->lx);
+        Node *operand = parse_unary(ps);
+        Node *n = new_node(ND_DELETE);
+        n->lhs = operand;
+        n->line = deltok.line;
+        n->col = deltok.col;
         n->src = lexer_source(ps->lx);
         return n;
     }
