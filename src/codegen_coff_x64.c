@@ -174,7 +174,6 @@ typedef struct
     int str_cnt;
     int stack_size; // bytes for locals + shadow space
     int ret_id;     // unique return label id per function
-    int is_linux;
 } AsmCtx;
 
 // Return storage width in bytes for a given primitive kind
@@ -226,58 +225,6 @@ static int type_storage_size(Type *ty)
         return ty->strct.size_bytes;
     default:
         return 8;
-    }
-}
-
-static void collect_runtime_needs(const Node *n, int *need_malloc, int *need_free)
-{
-    if (!n)
-        return;
-    if (n->kind == ND_NEW)
-    {
-        if (need_malloc)
-            *need_malloc = 1;
-        if (n->new_dims)
-        {
-            for (int i = 0; i < n->new_dim_count; i++)
-                collect_runtime_needs(n->new_dims[i], need_malloc, need_free);
-        }
-    }
-    else if (n->kind == ND_DELETE)
-    {
-        if (need_free)
-            *need_free = 1;
-    }
-    else if (n->kind == ND_INIT_LIST && n->init.is_array_literal)
-    {
-        if (need_malloc)
-            *need_malloc = 1;
-    }
-    if (n->lhs)
-        collect_runtime_needs(n->lhs, need_malloc, need_free);
-    if (n->rhs)
-        collect_runtime_needs(n->rhs, need_malloc, need_free);
-    if (n->body)
-        collect_runtime_needs(n->body, need_malloc, need_free);
-    if (n->kind == ND_CALL && n->arg_count > 0)
-    {
-        for (int i = 0; i < n->arg_count; i++)
-            collect_runtime_needs(n->args[i], need_malloc, need_free);
-    }
-    if (n->kind == ND_INIT_LIST && n->init.count > 0 && n->init.elems)
-    {
-        for (int i = 0; i < n->init.count; i++)
-            collect_runtime_needs(n->init.elems[i], need_malloc, need_free);
-    }
-    if (n->kind == ND_BLOCK && n->stmt_count > 0 && n->stmts)
-    {
-        for (int i = 0; i < n->stmt_count; i++)
-            collect_runtime_needs(n->stmts[i], need_malloc, need_free);
-    }
-    if (n->kind == ND_UNIT && n->stmt_count > 0 && n->stmts)
-    {
-        for (int i = 0; i < n->stmt_count; i++)
-            collect_runtime_needs(n->stmts[i], need_malloc, need_free);
     }
 }
 
@@ -1080,49 +1027,6 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
             asm_trunc_to_kind(ac->as, e->lhs->type->kind);
         break;
     }
-    case ND_NEW:
-    {
-        if (!e->new_base_type || e->new_dim_count <= 0)
-        {
-            cg_error(e, "codegen: malformed new expression");
-            exit(1);
-        }
-        if (!e->new_dims)
-        {
-            cg_error(e, "codegen: new missing dimension expressions");
-            exit(1);
-        }
-        fprintf(ac->as, "  mov rcx, 1\n");
-        for (int i = 0; i < e->new_dim_count; i++)
-        {
-            asm_eval_expr_to_rax(ac, e->new_dims[i]);
-            fprintf(ac->as, "  imul rcx, rax\n");
-        }
-        int elem_sz = type_storage_size(e->new_base_type);
-        if (elem_sz <= 0)
-            elem_sz = 1;
-        if (elem_sz != 1)
-            fprintf(ac->as, "  imul rcx, %d\n", elem_sz);
-        if (ac->is_linux)
-            fprintf(ac->as, "  mov rdi, rcx\n");
-        fprintf(ac->as, "  call malloc\n");
-        break;
-    }
-    case ND_DELETE:
-    {
-        if (!e->lhs)
-        {
-            cg_error(e, "codegen: delete missing operand");
-            exit(1);
-        }
-        asm_eval_expr_to_rax(ac, e->lhs);
-        if (ac->is_linux)
-            fprintf(ac->as, "  mov rdi, rax\n");
-        else
-            fprintf(ac->as, "  mov rcx, rax\n");
-        fprintf(ac->as, "  call free\n  xor eax, eax\n");
-        break;
-    }
     case ND_GT_EXPR:
     {
         asm_eval_expr_to_rax(ac, e->lhs);
@@ -1691,47 +1595,6 @@ static void asm_emit_initializer(AsmCtx *ac, const Node *init, Type *ty, int bas
         asm_store_scalar_to_stack(ac, ty, base_off);
         return;
     }
-    if (ty && ty->kind == TY_PTR && init->init.is_array_literal)
-    {
-        Type *elem_ty = ty->pointee;
-        int elem_kind = elem_ty ? elem_ty->kind : TY_I32;
-        int elem_size = kind_width(elem_kind);
-        if (elem_size <= 0)
-            elem_size = 1;
-        int count = init->init.count;
-        int total = elem_size * count;
-        if (ac->is_linux)
-            fprintf(ac->as, "  mov edi, %d\n", total);
-        else
-            fprintf(ac->as, "  mov ecx, %d\n", total);
-        fprintf(ac->as, "  call malloc\n");
-        fprintf(ac->as, "  mov [rbp%+d], rax\n", base_off);
-        if (count > 0)
-        {
-            for (int i = 0; i < count; i++)
-            {
-                Node *elem = (init->init.elems && i < init->init.count) ? init->init.elems[i] : NULL;
-                if (!elem)
-                    continue;
-                asm_eval_expr_to_rax(ac, elem);
-                if (elem_ty)
-                    asm_trunc_to_kind(ac->as, elem_kind);
-                fprintf(ac->as, "  mov rdx, [rbp%+d]\n", base_off);
-                int off = elem_size * i;
-                if (off)
-                    fprintf(ac->as, "  add rdx, %d\n", off);
-                if (elem_size == 1)
-                    fprintf(ac->as, "  mov byte ptr [rdx], al\n");
-                else if (elem_size == 2)
-                    fprintf(ac->as, "  mov word ptr [rdx], ax\n");
-                else if (elem_size == 4)
-                    fprintf(ac->as, "  mov dword ptr [rdx], eax\n");
-                else
-                    fprintf(ac->as, "  mov qword ptr [rdx], rax\n");
-            }
-        }
-        return;
-    }
     if (ty->kind == TY_STRUCT)
     {
         int size = ty->strct.size_bytes;
@@ -2051,17 +1914,9 @@ static int codegen_asm_backend_link(const Node *unit,
     // Prologue
     const char *fn_name = unit->name ? unit->name : "main";
     int is_linux = (opts && opts->os == OS_LINUX);
-    ac.is_linux = is_linux;
-    int need_malloc = 0;
-    int need_free = 0;
-    collect_runtime_needs(unit, &need_malloc, &need_free);
     __chance_emit_linux = is_linux;
-    fprintf(as, ".intel_syntax noprefix\n");
-    if (need_malloc)
-        fprintf(as, ".extern malloc\n");
-    if (need_free)
-        fprintf(as, ".extern free\n");
-    fprintf(as, ".section .text\n.globl %s\n%s:\n", fn_name, fn_name);
+    fprintf(as, ".intel_syntax noprefix\n.section .text\n.globl %s\n%s:\n",
+            fn_name, fn_name);
     if (is_linux)
     {
         // System V: 16-byte alignment before call; we'll align per locals, no
@@ -2198,17 +2053,8 @@ static int codegen_asm_backend_link_all(const Node *u,
     ac.str_cnt = 0;
     ac.stack_size = 0;
     int is_linux = (opts && opts->os == OS_LINUX);
-    ac.is_linux = is_linux;
     __chance_emit_linux = is_linux;
-    int need_malloc = 0;
-    int need_free = 0;
-    collect_runtime_needs(u, &need_malloc, &need_free);
-    fprintf(as, ".intel_syntax noprefix\n");
-    if (need_malloc)
-        fprintf(as, ".extern malloc\n");
-    if (need_free)
-        fprintf(as, ".extern free\n");
-    fprintf(as, ".section .text\n");
+    fprintf(as, ".intel_syntax noprefix\n.section .text\n");
     for (int i = 0; i < u->stmt_count; i++)
     {
         const Node *fn = u->stmts[i];
