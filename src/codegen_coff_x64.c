@@ -39,8 +39,6 @@ static int64_t eval_expr(const Node *n)
     {
     case ND_INT:
         return n->int_val;
-    case ND_NULL:
-        return 0;
     case ND_ADD:
         return eval_expr(n->lhs) + eval_expr(n->rhs);
     case ND_STRING:
@@ -851,9 +849,6 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
     case ND_INT:
         fprintf(ac->as, "  mov eax, %d\n", (int)(int32_t)e->int_val);
         break;
-    case ND_NULL:
-        fprintf(ac->as, "  xor eax, eax\n");
-        break;
     case ND_INDEX:
     {
         // Load from *(base + index) with correct element width
@@ -919,16 +914,6 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
             fprintf(ac->as, "  mov eax, dword ptr [rax]\n");
         else
             fprintf(ac->as, "  mov rax, [rax]\n");
-        break;
-    }
-    case ND_ADDR:
-    {
-        if (!e->lhs)
-        {
-            cg_error(e, "codegen: address-of missing operand");
-            exit(1);
-        }
-        asm_addr_for_lvalue_to_rax(ac, e->lhs);
         break;
     }
     case ND_VAR:
@@ -2461,12 +2446,10 @@ int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts)
             o += 4;
             if (expr->arg_count >= 2)
             {
-                if (expr->args[1]->kind == ND_INT || expr->args[1]->kind == ND_NULL)
+                if (expr->args[1]->kind == ND_INT)
                 {
                     has_int_arg = 1;
-                    int_arg_val = (expr->args[1]->kind == ND_INT)
-                                      ? (int)expr->args[1]->int_val
-                                      : 0;
+                    int_arg_val = (int)expr->args[1]->int_val;
                     call_code[o++] = 0xBA;
                     w32(call_code, o, (uint32_t)int_arg_val);
                     o += 4;

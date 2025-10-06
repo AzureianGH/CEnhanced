@@ -238,11 +238,6 @@ static int can_assign(Type *target, Node *rhs)
 {
     if (!target || !rhs)
         return 0;
-    if (target->kind == TY_PTR && rhs->kind == ND_NULL)
-    {
-        rhs->type = target;
-        return 1;
-    }
     if (rhs->type && type_equal(target, rhs->type))
         return 1;
     if (literal_fits_type(target, rhs))
@@ -454,8 +449,6 @@ static const char *nodekind_name(NodeKind k)
     {
     case ND_INT:
         return "ND_INT";
-    case ND_NULL:
-        return "ND_NULL";
     case ND_ADD:
         return "ND_ADD";
     case ND_RET:
@@ -478,8 +471,6 @@ static const char *nodekind_name(NodeKind k)
         return "ND_INDEX";
     case ND_CAST:
         return "ND_CAST";
-    case ND_ADDR:
-        return "ND_ADDR";
     case ND_GT_EXPR:
         return "ND_GT_EXPR";
     case ND_LT:
@@ -506,10 +497,6 @@ static const char *nodekind_name(NodeKind k)
         return "ND_POSTINC";
     case ND_POSTDEC:
         return "ND_POSTDEC";
-    case ND_MEMBER:
-        return "ND_MEMBER";
-    case ND_INIT_LIST:
-        return "ND_INIT_LIST";
     default:
         return "<unknown-node>";
     }
@@ -520,12 +507,6 @@ static void check_expr(SemaContext *sc, Node *e)
     if (e->kind == ND_INT)
     {
         e->type = &ty_i32;
-        return;
-    }
-    if (e->kind == ND_NULL)
-    {
-        static Type null_ptr = {.kind = TY_PTR, .pointee = &ty_void};
-        e->type = &null_ptr;
         return;
     }
     if (e->kind == ND_STRING)
@@ -544,37 +525,6 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         e->type = t;
-        return;
-    }
-    if (e->kind == ND_ADDR)
-    {
-        if (!e->lhs)
-        {
-            diag_error_at(e->src, e->line, e->col,
-                          "address-of requires an operand");
-            exit(1);
-        }
-        check_expr(sc, e->lhs);
-        Node *base = e->lhs;
-        if (base->kind == ND_CAST && base->lhs)
-            base = base->lhs;
-        int is_lvalue = (base->kind == ND_VAR || base->kind == ND_MEMBER || base->kind == ND_INDEX);
-        if (!is_lvalue)
-        {
-            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
-                          "operand of '&' must be an lvalue");
-            exit(1);
-        }
-        if (!e->lhs->type)
-        {
-            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
-                          "cannot take address of incomplete type");
-            exit(1);
-        }
-        Type *ptr = (Type *)xcalloc(1, sizeof(Type));
-        ptr->kind = TY_PTR;
-        ptr->pointee = e->lhs->type;
-        e->type = ptr;
         return;
     }
     if (e->kind == ND_MEMBER)
@@ -756,8 +706,8 @@ static void check_expr(SemaContext *sc, Node *e)
                           "subscripted value is not an array or pointer");
             exit(1);
         }
-        // Result type is element type of the pointer
-        e->type = e->lhs->type->pointee;
+        // For simplicity, treat as int in expressions (like char promotes to int)
+        e->type = &ty_i32;
         return;
     }
     if (e->kind == ND_ASSIGN)

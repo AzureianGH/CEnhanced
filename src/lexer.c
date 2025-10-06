@@ -236,10 +236,6 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_ALIAS;
     else if (len == 2 && strncmp(p, "as", 2) == 0)
         k = TK_KW_AS;
-    else if (len == 4 && strncmp(p, "null", 4) == 0)
-        k = TK_KW_NULL;
-    else if (len == 7 && strncmp(p, "nullptr", 7) == 0)
-        k = TK_KW_NULLPTR;
     return make_tok(lx, k, p, len);
 }
 
@@ -352,8 +348,10 @@ Token lexer_next(Lexer *lx)
             getc2(lx);
             return make_tok(lx, TK_ANDAND, lx->src.src + lx->idx - 2, 2);
         }
+        diag_error_at(&lx->src, lx->line, lx->col,
+                      "unexpected character '%c' (did you mean '&&'?)", c);
         getc2(lx);
-        return make_tok(lx, TK_AMP, lx->src.src + lx->idx - 1, 1);
+        return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);
     }
     if (c == '*')
     {
