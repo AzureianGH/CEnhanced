@@ -451,6 +451,12 @@ static Node *parse_primary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (t.kind == TK_LPAREN)
+    {
+        Node *inner = parse_expr(ps);
+        expect(ps, TK_RPAREN, ")");
+        return inner;
+    }
     if (t.kind == TK_IDENT)
     {
         // enum constant?
