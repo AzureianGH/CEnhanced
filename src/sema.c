@@ -748,6 +748,20 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = e->lhs->type;
         return;
     }
+    if (e->kind == ND_SHL || e->kind == ND_SHR)
+    {
+        check_expr(sc, e->lhs);
+        check_expr(sc, e->rhs);
+        if (!(type_is_int(e->lhs->type) && type_is_int(e->rhs->type)))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "shift operands must be integers");
+            exit(1);
+        }
+        // Result type is the type of the left operand
+        e->type = e->lhs->type;
+        return;
+    }
     if (e->kind == ND_GT_EXPR || e->kind == ND_LT || e->kind == ND_LE || e->kind == ND_GE)
     {
         check_expr(sc, e->lhs);

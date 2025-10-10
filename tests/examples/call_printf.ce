@@ -127,7 +127,13 @@ fun main() -> i32
         printf("Logical OR worked!\n");
     }
 
-    printf("typeof() = %s\n", typeof(ElementPart2));
+    i32 a = 1 << 1;
+    printf("1 << 1 = %d\n", a); // expect 2
+
+    i32 b = 4 >> 1;
+    printf("4 >> 1 = %d\n", b); // expect 2
+
+    printf("typeof() = %s with sizeof() = %d\n", typeof(SmallTest), sizeof(SmallTest));
 
     ret ((vari.testVar as i32) + (another.smallValue as i32)); // expect 45 + 123 = 168
 }

@@ -1022,6 +1022,47 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
             asm_trunc_to_kind(ac->as, e->lhs->type->kind);
         break;
     }
+    case ND_SHL:
+    case ND_SHR:
+    {
+        // Shift left/right: rax = lhs << rhs (rhs may be non-constant)
+        // Use CL for variable count. Width based on lhs type.
+        int is_left = (e->kind == ND_SHL);
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  push rax\n");
+        asm_eval_expr_to_rax(ac, e->rhs);
+        // Move shift count into CL (lower 8 of RCX)
+        fprintf(ac->as, "  mov cl, al\n  pop rax\n");
+        int k = e->lhs && e->lhs->type ? e->lhs->type->kind : TY_I64;
+        int w = kind_width(k);
+        if (is_left)
+        {
+            if (w <= 1)
+                fprintf(ac->as, "  shl al, cl\n");
+            else if (w == 2)
+                fprintf(ac->as, "  shl ax, cl\n");
+            else if (w == 4)
+                fprintf(ac->as, "  shl eax, cl\n");
+            else
+                fprintf(ac->as, "  shl rax, cl\n");
+        }
+        else
+        {
+            int is_unsigned = (k == TY_U8 || k == TY_U16 || k == TY_U32 || k == TY_U64);
+            if (w <= 1)
+                fprintf(ac->as, is_unsigned ? "  shr al, cl\n" : "  sar al, cl\n");
+            else if (w == 2)
+                fprintf(ac->as, is_unsigned ? "  shr ax, cl\n" : "  sar ax, cl\n");
+            else if (w == 4)
+                fprintf(ac->as, is_unsigned ? "  shr eax, cl\n" : "  sar eax, cl\n");
+            else
+                fprintf(ac->as, is_unsigned ? "  shr rax, cl\n" : "  sar rax, cl\n");
+        }
+        // Truncate/extend result to expression type if known
+        if (e->type)
+            asm_trunc_to_kind(ac->as, e->type->kind);
+        break;
+    }
     case ND_GT_EXPR:
     {
         asm_eval_expr_to_rax(ac, e->lhs);

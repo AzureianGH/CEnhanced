@@ -80,6 +80,8 @@ typedef enum
     TK_GT,         // >
     TK_LTE,        // <=
     TK_GTE,        // >=
+    TK_SHL,        // <<
+    TK_SHR,        // >>
     TK_QUESTION,   // ?
     TK_COLON,      // :
     TK_ACCESS,     // =>
@@ -169,6 +171,8 @@ typedef enum
     ND_COND, // ternary conditional expr: lhs ? rhs : body
     ND_MEMBER, // struct/enum member access
     ND_INIT_LIST, // brace initializer
+    ND_SHL,      // <<
+    ND_SHR,      // >>
 } NodeKind;
 
 typedef struct

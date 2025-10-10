@@ -68,6 +68,7 @@ static Node *parse_rel(Parser *ps);
 static Node *parse_and(Parser *ps);
 static Node *parse_eq(Parser *ps);
 static Node *parse_or(Parser *ps);
+static Node *parse_shift(Parser *ps);
 
 static Node *parse_initializer(Parser *ps);
 
@@ -834,15 +835,34 @@ static Node *parse_add(Parser *ps)
     return lhs;
 }
 
-static Node *parse_rel(Parser *ps)
+static Node *parse_shift(Parser *ps)
 {
     Node *lhs = parse_add(ps);
+    for(;;){
+        Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_SHL || p.kind == TK_SHR)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_add(ps);
+            Node *n = new_node(op.kind == TK_SHL ? ND_SHL : ND_SHR);
+            n->lhs = lhs; n->rhs = rhs; n->line=op.line; n->col=op.col; n->src=lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
+        break;
+    }
+    return lhs;
+}
+
+static Node *parse_rel(Parser *ps)
+{
+    Node *lhs = parse_shift(ps);
     for(;;){
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_GT || p.kind == TK_LT || p.kind == TK_LTE || p.kind == TK_GTE)
         {
             Token op = lexer_next(ps->lx);
-            Node *rhs = parse_add(ps);
+            Node *rhs = parse_shift(ps);
             Node *n = NULL;
             if(op.kind==TK_GT) n = new_node(ND_GT_EXPR);
             else if(op.kind==TK_LT) n = new_node(ND_LT);
@@ -856,7 +876,6 @@ static Node *parse_rel(Parser *ps)
     }
     return lhs;
 }
-
 static Node *parse_eq(Parser *ps)
 {
     Node *lhs = parse_rel(ps);
