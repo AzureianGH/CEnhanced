@@ -11,6 +11,7 @@ typedef enum
     TK_IDENT,
     TK_INT,
     TK_STRING,
+    TK_CHAR_LIT,
     // keywords
     TK_KW_FUN,
     TK_KW_RET,
@@ -64,6 +65,8 @@ typedef enum
     TK_PLUS,       // +
     TK_PLUSPLUS,   // ++
     TK_ANDAND,     // &&
+    TK_OROR,       // ||
+    TK_AMP,        // &
     TK_STAR,       // *
     TK_SLASH,      // /
     TK_MINUS,      // -
@@ -154,7 +157,9 @@ typedef enum
     ND_PREDEC,
     ND_POSTINC,
     ND_POSTDEC,
+    ND_ADDR,
     ND_LAND,
+    ND_LOR,
     ND_EQ,
     ND_NE,
     ND_COND, // ternary conditional expr: lhs ? rhs : body
@@ -243,6 +248,12 @@ void parser_export_externs(Parser *ps, SymTable *st);
 
 // Utilities
 void ast_free(Node *n);
+Type *type_i32(void);
+Type *type_i64(void);
+Type *type_void(void);
+Type *type_char(void);
+Type *type_ptr(Type *to);
+int type_equals(Type *a, Type *b);
 
 // Codegen to x64 COFF/PE: returns 0 on success
 typedef enum

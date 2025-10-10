@@ -916,6 +916,16 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
             fprintf(ac->as, "  mov rax, [rax]\n");
         break;
     }
+    case ND_ADDR:
+    {
+        if (!e->lhs)
+        {
+            cg_error(e, "codegen: '&' missing operand");
+            exit(1);
+        }
+        asm_addr_for_lvalue_to_rax(ac, e->lhs);
+        break;
+    }
     case ND_VAR:
     {
         int idx = asm_find_local(ac, e->var_ref);
@@ -1155,6 +1165,18 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
                 "  cmp eax, 0\n  je .Lland_false%d\n  mov eax, 1\n  jmp "
                 ".Lland_end%d\n.Lland_false%d:\n  xor eax, eax\n.Lland_end%d:\n",
                 lid, lid, lid, lid);
+        break;
+    }
+    case ND_LOR:
+    {
+        int lid = ac->next_lbl++;
+        int lend = ac->next_lbl++;
+        // if (lhs != 0) goto true; else evaluate rhs
+        asm_eval_expr_to_rax(ac, e->lhs);
+        fprintf(ac->as, "  cmp eax, 0\n  jne .Llor_true%d\n", lid);
+        asm_eval_expr_to_rax(ac, e->rhs);
+    fprintf(ac->as, "  cmp eax, 0\n  jne .Llor_true%d\n  xor eax, eax\n  jmp .Llor_end%d\n.Llor_true%d:\n  mov eax, 1\n.Llor_end%d:\n",
+        lid, lend, lid, lend);
         break;
     }
     case ND_COND:

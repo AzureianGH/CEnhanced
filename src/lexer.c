@@ -49,6 +49,204 @@ static Token make_tok(Lexer *lx, TokenKind k, const char *start, int len)
 static int is_ident_start(int c) { return isalpha(c) || c == '_'; }
 static int is_ident_part(int c) { return isalnum(c) || c == '_'; }
 
+static int is_hex_digit(int c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+           (c >= 'A' && c <= 'F');
+}
+static int hex_value(int c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F')
+        return 10 + (c - 'A');
+    return 0;
+}
+static int is_oct_digit(int c) { return c >= '0' && c <= '7'; }
+
+static Token lex_char_literal(Lexer *lx)
+{
+    int start = lx->idx;
+    int line = lx->line;
+    int col = lx->col;
+    getc2(lx); // consume opening quote
+    if (at_end(lx))
+    {
+        diag_error_at(&lx->src, line, col, "unterminated character literal");
+        return make_tok(lx, TK_CHAR_LIT, lx->src.src + start, lx->idx - start);
+    }
+
+    int value = 0;
+    int saw_value = 0;
+
+    char c = getc2(lx);
+    if (c == '\n' || c == '\r')
+    {
+        diag_error_at(&lx->src, line, col, "newline in character literal");
+    }
+    if (c != '\\')
+    {
+        value = (unsigned char)c;
+        saw_value = 1;
+    }
+    else
+    {
+        if (at_end(lx))
+        {
+            diag_error_at(&lx->src, line, col,
+                          "unterminated escape sequence in character literal");
+        }
+        else
+        {
+            char esc = getc2(lx);
+            switch (esc)
+            {
+            case '\\':
+                value = '\\';
+                break;
+            case '\'':
+                value = '\'';
+                break;
+            case '"':
+                value = '"';
+                break;
+            case 'n':
+                value = '\n';
+                break;
+            case 'r':
+                value = '\r';
+                break;
+            case 't':
+                value = '\t';
+                break;
+            case 'v':
+                value = '\v';
+                break;
+            case 'b':
+                value = '\b';
+                break;
+            case 'a':
+                value = '\a';
+                break;
+            case 'f':
+                value = '\f';
+                break;
+            case '?':
+                value = '?';
+                break;
+            case 'e':
+                value = 0x1B;
+                break;
+            case 'x':
+            {
+                int v = 0;
+                int digits = 0;
+                while (is_hex_digit((unsigned char)peekc(lx)))
+                {
+                    v = (v << 4) | hex_value((unsigned char)getc2(lx));
+                    digits++;
+                }
+                if (digits == 0)
+                {
+                    diag_error_at(&lx->src, line, col,
+                                  "expected hex digits after \\x in character literal");
+                    value = 'x';
+                }
+                else
+                    value = v & 0xFF;
+                break;
+            }
+            case 'u':
+            {
+                int ok = 1;
+                int v = 0;
+                for (int k = 0; k < 4; k++)
+                {
+                    if (!is_hex_digit((unsigned char)peekc(lx)))
+                    {
+                        ok = 0;
+                        break;
+                    }
+                    v = (v << 4) | hex_value((unsigned char)getc2(lx));
+                }
+                if (!ok)
+                    diag_error_at(&lx->src, line, col,
+                                  "expected 4 hex digits after \\u in character literal");
+                value = v;
+                break;
+            }
+            case 'U':
+            {
+                int ok = 1;
+                int v = 0;
+                for (int k = 0; k < 8; k++)
+                {
+                    if (!is_hex_digit((unsigned char)peekc(lx)))
+                    {
+                        ok = 0;
+                        break;
+                    }
+                    v = (v << 4) | hex_value((unsigned char)getc2(lx));
+                }
+                if (!ok)
+                    diag_error_at(&lx->src, line, col,
+                                  "expected 8 hex digits after \\U in character literal");
+                value = v;
+                break;
+            }
+            default:
+                if (is_oct_digit((unsigned char)esc))
+                {
+                    int v = esc - '0';
+                    int digits = 1;
+                    while (digits < 3 && is_oct_digit((unsigned char)peekc(lx)))
+                    {
+                        v = (v << 3) | (getc2(lx) - '0');
+                        digits++;
+                    }
+                    value = v & 0xFF;
+                }
+                else
+                {
+                    value = (unsigned char)esc;
+                }
+                break;
+            }
+            saw_value = 1;
+        }
+    }
+
+    if (!saw_value)
+    {
+        value = 0;
+    }
+
+    if (at_end(lx))
+    {
+        diag_error_at(&lx->src, line, col, "unterminated character literal");
+        return make_tok(lx, TK_CHAR_LIT, lx->src.src + start, lx->idx - start);
+    }
+
+    char term = peekc(lx);
+    if (term != '\'')
+    {
+        diag_error_at(&lx->src, line, col,
+                      "multi-character character literal");
+        while (!at_end(lx) && peekc(lx) != '\'' && peekc(lx) != '\n')
+            getc2(lx);
+    }
+    if (!at_end(lx) && peekc(lx) == '\'')
+        getc2(lx);
+
+    Token tok = make_tok(lx, TK_CHAR_LIT, lx->src.src + start, lx->idx - start);
+    tok.int_val = value;
+    tok.line = line;
+    tok.col = col;
+    return tok;
+}
+
 Lexer *lexer_create(SourceBuffer src)
 {
     Lexer *lx = (Lexer *)xcalloc(1, sizeof(Lexer));
@@ -271,6 +469,8 @@ Token lexer_next(Lexer *lx)
         int len = lx->idx - start;
         return make_tok(lx, TK_STRING, lx->src.src + start, len);
     }
+    if (c == '\'')
+        return lex_char_literal(lx);
     if (is_ident_start((unsigned char)c))
         return lex_ident_or_kw(lx);
     // punctuation
@@ -340,6 +540,32 @@ Token lexer_next(Lexer *lx)
         getc2(lx);
         return make_tok(lx, TK_PLUS, lx->src.src + lx->idx - 1, 1);
     }
+    if (c == '|')
+    {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '|')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_OROR, lx->src.src + lx->idx - 2, 2);
+        }
+        diag_error_at(&lx->src, lx->line, lx->col,
+                      "unexpected character '%c' (did you mean '||'?)", c);
+        getc2(lx);
+        return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);
+    }
+    if (c == '|')
+    {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '|')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_OROR, lx->src.src + lx->idx - 2, 2);
+        }
+        diag_error_at(&lx->src, lx->line, lx->col,
+                      "unexpected character '%c' (did you mean '||'?)", c);
+        getc2(lx);
+        return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);
+    }
     if (c == '&')
     {
         if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '&')
@@ -348,10 +574,8 @@ Token lexer_next(Lexer *lx)
             getc2(lx);
             return make_tok(lx, TK_ANDAND, lx->src.src + lx->idx - 2, 2);
         }
-        diag_error_at(&lx->src, lx->line, lx->col,
-                      "unexpected character '%c' (did you mean '&&'?)", c);
         getc2(lx);
-        return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);
+        return make_tok(lx, TK_AMP, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '*')
     {

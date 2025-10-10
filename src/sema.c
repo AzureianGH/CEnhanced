@@ -497,6 +497,10 @@ static const char *nodekind_name(NodeKind k)
         return "ND_POSTINC";
     case ND_POSTDEC:
         return "ND_POSTDEC";
+    case ND_ADDR:
+        return "ND_ADDR";
+    case ND_LOR:
+        return "ND_LOR";
     default:
         return "<unknown-node>";
     }
@@ -506,7 +510,8 @@ static void check_expr(SemaContext *sc, Node *e)
 {
     if (e->kind == ND_INT)
     {
-        e->type = &ty_i32;
+        if (!e->type)
+            e->type = &ty_i32;
         return;
     }
     if (e->kind == ND_STRING)
@@ -582,6 +587,31 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         return;
     }
+    if (e->kind == ND_ADDR)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "address-of operator requires an operand");
+            exit(1);
+        }
+        Node *target = e->lhs;
+        if (target->kind != ND_VAR && target->kind != ND_MEMBER && target->kind != ND_INDEX)
+        {
+            diag_error_at(target->src, target->line, target->col,
+                          "operand of '&' must be an lvalue");
+            exit(1);
+        }
+        check_expr(sc, target);
+        if (!target->type)
+        {
+            diag_error_at(target->src, target->line, target->col,
+                          "cannot determine operand type for '&'");
+            exit(1);
+        }
+        e->type = type_ptr(target->type);
+        return;
+    }
     if (e->kind == ND_ADD)
     {
         check_expr(sc, e->lhs);
@@ -646,13 +676,14 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = &ty_i32;
         return;
     }
-    if (e->kind == ND_LAND)
+    if (e->kind == ND_LAND || e->kind == ND_LOR)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
         if (!(type_is_int(e->lhs->type) && type_is_int(e->rhs->type)))
         {
-            diag_error_at(e->src, e->line, e->col, "'&&' requires integer operands");
+            diag_error_at(e->src, e->line, e->col, "%s requires integer operands",
+                          e->kind == ND_LAND ? "&&" : "||");
             exit(1);
         }
         e->type = &ty_i32;

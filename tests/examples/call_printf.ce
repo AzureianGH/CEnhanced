@@ -23,12 +23,12 @@ enum Element
     ElementPart, // Auto 0
     ElementPart2, // Auto 1
     SetElement = 3 // 3
-}; // To access an element, do Element=>ElementPart, you can use ElementPart globally unless contained keyword is before enum keyword, which then it can only be used with the accessor
+};
 
 struct AnElement
 {
     Element internalElement;
-    Element* ptrToElement; // automatically int type i64
+    Element* ptrToElement;
 };
 
 struct OtherElement
@@ -57,18 +57,21 @@ fun main() -> i32
     // read from stdin (fd = 0), max 127 chars
     i32 len = read(0, buf as char *, 127);
 
-    printf("Read %d bytes\n", printwrapper());
+    // test printwrapper result
+    i32 printed = printwrapper();
+    printf("Read %d bytes (printwrapper printed %d chars)\n", len, printed);
 
-    // null-terminate the string
+    // null-terminate the string safely
     string str = buf as string;
-    if (len > 1)
+    if (len > 0)
     {
-        str[len - 1] = 0; // replace newline with terminator
+        if (str[len - 1] == '\n') str[--len] = 0;
+        if (len > 0 && str[len - 1] == '\r') str[--len] = 0;
     }
     else
     {
         printf("No input read, using empty string\n");
-        str[0] = 0; // ensure valid empty string
+        str[0] = 0;
     }
 
     // print greeting
@@ -98,11 +101,11 @@ fun main() -> i32
 
     printf("Calling extended C function test(): %d\n", test());
 
-    printf("Multiplication test: 6 * 7 = %d\n", 6 * 7); // expect 42
+    printf("Multiplication test: 6 * 7 = %d\n", 6 * 7);
 
-    printf("Multiplication overflow test (200 * 200 = 64): %d\n", test_mul_overflow()); // expect 64
+    printf("Multiplication overflow test (200 * 200 = 64): %d\n", test_mul_overflow());
 
-    printf("Test hex output: %d in hex is %x\n", 0xFF, 0xff); // expect ff
+    printf("Test hex output: %d in hex is %x\n", 0xFF, 0xFF);
 
     SmallTest vari = {};
     vari.smallValue = 3;
@@ -113,9 +116,16 @@ fun main() -> i32
         .testVar = 333 
     };
 
+    SmallTest* test = &vari;
 
-    
-    ret (vari.testVar + another.smallValue) as i32; // return 456 (333 + 123)
+    test=>testVar = 45;
+
+    if (test=>testVar == 45 || another.smallValue == 3)
+    {
+        printf("Logical OR worked!\n");
+    }
+
+    ret ((vari.testVar as i32) + (another.smallValue as i32)); // expect 45 + 123 = 168
 }
 
 fun construct_thing() -> SmallTest

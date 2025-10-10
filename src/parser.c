@@ -67,6 +67,7 @@ static Node *parse_unary(Parser *ps);
 static Node *parse_rel(Parser *ps);
 static Node *parse_and(Parser *ps);
 static Node *parse_eq(Parser *ps);
+static Node *parse_or(Parser *ps);
 
 static Node *parse_initializer(Parser *ps);
 
@@ -451,6 +452,16 @@ static Node *parse_primary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (t.kind == TK_CHAR_LIT)
+    {
+        Node *n = new_node(ND_INT);
+        n->int_val = t.int_val;
+        n->type = type_char();
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     if (t.kind == TK_LPAREN)
     {
         Node *inner = parse_expr(ps);
@@ -683,6 +694,17 @@ static Node *parse_unary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (p.kind == TK_AMP)
+    {
+        lexer_next(ps->lx);
+        Node *lv = parse_unary(ps);
+        Node *n = new_node(ND_ADDR);
+        n->lhs = lv;
+        n->line = p.line;
+        n->col = p.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     return parse_postfix(ps);
 }
 
@@ -829,8 +851,32 @@ static Node *parse_and(Parser *ps)
         if (p.kind == TK_ANDAND)
         {
             Token op = lexer_next(ps->lx);
-            Node *rhs = parse_rel(ps);
+            Node *rhs = parse_eq(ps);
             Node *n = new_node(ND_LAND);
+            n->lhs = lhs;
+            n->rhs = rhs;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
+        break;
+    }
+    return lhs;
+}
+
+static Node *parse_or(Parser *ps)
+{
+    Node *lhs = parse_and(ps);
+    for (;;)
+    {
+        Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_OROR)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_and(ps);
+            Node *n = new_node(ND_LOR);
             n->lhs = lhs;
             n->rhs = rhs;
             n->line = op.line;
@@ -847,7 +893,7 @@ static Node *parse_and(Parser *ps)
 // conditional (ternary) has lower precedence than && and ==, higher than assignment
 static Node *parse_cond(Parser *ps)
 {
-    Node *cond = parse_and(ps);
+    Node *cond = parse_or(ps);
     Token q = lexer_peek(ps->lx);
     if (q.kind != TK_QUESTION)
         return cond;

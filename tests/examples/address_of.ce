@@ -1,0 +1,12 @@
+fun main() -> i32
+{
+    i32 value = 123;
+    i32* ptr = &value;
+
+    if (ptr == &value)
+    {
+        ret 0;
+    }
+
+    ret 1;
+}

@@ -21,6 +21,7 @@ add_ce_test(ret0 ret0.ce 0)
 add_ce_test(ret42 ret42.ce 42)
 add_ce_test(ret_sum ret_sum.ce 7)
 add_ce_test(call_printf call_printf.ce 16)
+add_ce_test(address_of address_of.ce 0)
 
 # Freestanding mode tests
 function(add_ce_test_fs name src expected_rc)
