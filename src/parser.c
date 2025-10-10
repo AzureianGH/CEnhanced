@@ -432,6 +432,58 @@ static Type *parse_type_spec(Parser *ps)
 static Node *parse_primary(Parser *ps)
 {
     Token t = lexer_next(ps->lx);
+    if (t.kind == TK_KW_SIZEOF)
+    {
+        expect(ps, TK_LPAREN, "(");
+        // sizeof takes a type spec
+        Type *ty = parse_type_spec(ps);
+        expect(ps, TK_RPAREN, ")");
+        Node *n = new_node(ND_SIZEOF);
+        n->type = type_i32();
+        // store computed size in int_val for constant-folding/codegen ease
+        // we'll compute in sema to ensure consistency
+        n->lhs = NULL;
+        n->rhs = NULL;
+        n->line = t.line; n->col = t.col; n->src = lexer_source(ps->lx);
+        // temporarily stash the type node via var_type field to carry it to sema
+        n->var_type = ty;
+        return n;
+    }
+    if (t.kind == TK_KW_TYPEOF)
+    {
+        expect(ps, TK_LPAREN, "(");
+        // typeof can take a type name or an expression/identifier
+        Token p = lexer_peek(ps->lx);
+        Node *arg_node = NULL;
+        Type *arg_type = NULL;
+        char *alias_name = NULL;
+        if (is_type_start(ps, p))
+        {
+            if (p.kind == TK_IDENT)
+            {
+                // check if it's an alias so we can preserve the alias name for formatting
+                if (alias_find(ps, p.lexeme, p.length) >= 0)
+                {
+                    alias_name = (char*)xmalloc((size_t)p.length + 1);
+                    memcpy(alias_name, p.lexeme, (size_t)p.length);
+                    alias_name[p.length] = '\0';
+                }
+            }
+            arg_type = parse_type_spec(ps);
+        }
+        else
+        {
+            arg_node = parse_expr(ps);
+        }
+        expect(ps, TK_RPAREN, ")");
+        Node *n = new_node(ND_TYPEOF);
+        n->lhs = arg_node;
+        n->var_type = arg_type; // carry explicit type if provided
+        if (alias_name)
+            n->var_ref = alias_name; // stash alias text for sema formatting
+        n->line = t.line; n->col = t.col; n->src = lexer_source(ps->lx);
+        return n;
+    }
     if (t.kind == TK_INT)
     {
         Node *n = new_node(ND_INT);

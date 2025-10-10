@@ -434,6 +434,10 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_ALIAS;
     else if (len == 2 && strncmp(p, "as", 2) == 0)
         k = TK_KW_AS;
+    else if (len == 6 && strncmp(p, "sizeof", 6) == 0)
+        k = TK_KW_SIZEOF;
+    else if (len == 6 && strncmp(p, "typeof", 6) == 0)
+        k = TK_KW_TYPEOF;
     return make_tok(lx, k, p, len);
 }
 

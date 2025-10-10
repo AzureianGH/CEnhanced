@@ -532,6 +532,95 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = t;
         return;
     }
+    if (e->kind == ND_SIZEOF)
+    {
+        // size of a type known at parse-time; stored in e->var_type
+        Type *ty = e->var_type ? e->var_type : &ty_i32;
+        int sz = 0;
+        switch (ty->kind)
+        {
+        case TY_I8: case TY_U8: case TY_CHAR: sz = 1; break;
+        case TY_I16: case TY_U16: sz = 2; break;
+        case TY_I32: case TY_U32: case TY_F32: sz = 4; break;
+        case TY_I64: case TY_U64: case TY_F64: case TY_PTR: sz = 8; break;
+        case TY_F128: sz = 16; break;
+        case TY_STRUCT: sz = ty->strct.size_bytes; break;
+        case TY_VOID: sz = 0; break;
+        default: sz = 8; break;
+        }
+        e->int_val = sz;
+        e->type = &ty_i32;
+        return;
+    }
+    if (e->kind == ND_TYPEOF)
+    {
+        // Determine type either from explicit type or from expression
+        Type *target = NULL;
+        if (e->var_type)
+            target = e->var_type;
+        else if (e->lhs)
+        {
+            check_expr(sc, e->lhs);
+            target = e->lhs->type;
+        }
+        // Build a string literal node carrying the formatted type name
+        const char *prefix = NULL;
+        char buf[256];
+        buf[0] = '\0';
+        if (!target)
+        {
+            snprintf(buf, sizeof(buf), "<unknown>::?" );
+        }
+        else
+        {
+            // Built-ins tag
+            const char *tn = NULL;
+            switch (target->kind)
+            {
+            case TY_I8: tn = "i8"; prefix = "<built-in>"; break;
+            case TY_U8: tn = "u8"; prefix = "<built-in>"; break;
+            case TY_I16: tn = "i16"; prefix = "<built-in>"; break;
+            case TY_U16: tn = "u16"; prefix = "<built-in>"; break;
+            case TY_I32: tn = "i32"; prefix = "<built-in>"; break;
+            case TY_U32: tn = "u32"; prefix = "<built-in>"; break;
+            case TY_I64: tn = "i64"; prefix = "<built-in>"; break;
+            case TY_U64: tn = "u64"; prefix = "<built-in>"; break;
+            case TY_F32: tn = "f32"; prefix = "<built-in>"; break;
+            case TY_F64: tn = "f64"; prefix = "<built-in>"; break;
+            case TY_F128: tn = "f128"; prefix = "<built-in>"; break;
+            case TY_VOID: tn = "void"; prefix = "<built-in>"; break;
+            case TY_CHAR: tn = "char"; prefix = "<built-in>"; break;
+            case TY_PTR:
+                tn = "ptr"; prefix = "<built-in>"; break;
+            case TY_STRUCT:
+                prefix = target->struct_name ? target->struct_name : "<struct>";
+                tn = "struct";
+                break;
+            default:
+                prefix = "<built-in>"; tn = "?"; break;
+            }
+            // If parse recorded an alias name in var_ref, show as "<char*/alias>::string" style
+            if (e->var_ref)
+                snprintf(buf, sizeof(buf), "<char*/alias>::%s", e->var_ref);
+            else
+                snprintf(buf, sizeof(buf), "%s::%s", prefix ? prefix : "<built-in>", tn);
+        }
+        // Convert to string literal
+        Node *s = (Node *)xcalloc(1, sizeof(Node));
+        s->kind = ND_STRING;
+        s->src = e->src; s->line = e->line; s->col = e->col;
+        s->str_len = (int)strlen(buf);
+        char *heap = (char*)xmalloc((size_t)s->str_len + 1);
+        memcpy(heap, buf, (size_t)s->str_len + 1);
+        s->str_data = heap;
+        // Replace e with string node semantics: set type to char*
+        e->kind = ND_STRING;
+        e->str_data = s->str_data;
+        e->str_len = s->str_len;
+        static Type char_ptr = { .kind = TY_PTR, .pointee = &ty_char};
+        e->type = &char_ptr;
+        return;
+    }
     if (e->kind == ND_MEMBER)
     {
         if (!e->lhs)

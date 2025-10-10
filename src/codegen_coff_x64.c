@@ -1441,6 +1441,9 @@ static void asm_eval_expr_to_rax(AsmCtx *ac, const Node *e)
         fprintf(ac->as, "  lea rax, [rip + .Lstr%d]\n", id);
         break;
     }
+    case ND_SIZEOF:
+        fprintf(ac->as, "  mov eax, %d\n", (int)(int32_t)e->int_val);
+        break;
     case ND_CALL:
     {
         // OS-specific calling convention

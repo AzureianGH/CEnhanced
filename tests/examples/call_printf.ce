@@ -118,12 +118,16 @@ fun main() -> i32
 
     SmallTest* test = &vari;
 
+    Element elem = SetElement;
+
     test=>testVar = 45;
 
     if (test=>testVar == 45 || another.smallValue == 3)
     {
         printf("Logical OR worked!\n");
     }
+
+    printf("typeof() = %s\n", typeof(ElementPart2));
 
     ret ((vari.testVar as i32) + (another.smallValue as i32)); // expect 45 + 123 = 168
 }

@@ -52,6 +52,8 @@ typedef enum
     TK_KW_ENUM,
     TK_KW_ALIAS,
     TK_KW_AS,
+    TK_KW_SIZEOF,
+    TK_KW_TYPEOF,
     // punctuation
     TK_ARROW,      // ->
     TK_LPAREN,     // (
@@ -160,6 +162,8 @@ typedef enum
     ND_ADDR,
     ND_LAND,
     ND_LOR,
+    ND_SIZEOF,
+    ND_TYPEOF,
     ND_EQ,
     ND_NE,
     ND_COND, // ternary conditional expr: lhs ? rhs : body
