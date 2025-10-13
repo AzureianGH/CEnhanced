@@ -55,6 +55,10 @@ typedef enum
     TK_KW_SIZEOF,
     TK_KW_TYPEOF,
     TK_KW_NORETURN,
+    TK_KW_MODULE,
+    TK_KW_BRING,
+    TK_KW_HIDE,
+    TK_KW_EXPOSE,
     // punctuation
     TK_ARROW,      // ->
     TK_LPAREN,     // (
@@ -131,7 +135,15 @@ typedef struct Type
         int field_count;
         int size_bytes;
     } strct;
+    int is_exposed; // visibility flag for module system
 } Type;
+
+typedef struct ModulePath
+{
+    const char **parts;
+    int part_count;
+    const char *full_name;
+} ModulePath;
 
 typedef enum
 {
@@ -235,6 +247,12 @@ typedef struct Node
         int count;
         int is_zero; // for {} or {0} special cases
     } init;
+    // Module metadata (only valid for ND_UNIT)
+    ModulePath module_path;
+    ModulePath *imports;
+    int import_count;
+    // Declaration visibility flag (used for ND_FUNC and other decl nodes)
+    int is_exposed;
 } Node;
 
 typedef struct Lexer Lexer;
@@ -356,6 +374,7 @@ typedef struct
 {
     SymTable *syms;
     struct Scope *scope;
+    const struct Node *unit;
 } SemaContext;
 
 SemaContext *sema_create(void);

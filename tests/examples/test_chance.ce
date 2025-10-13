@@ -1,4 +1,6 @@
-fun test_chance() -> i32
+module RandomThing;
+
+expose fun test_chance() -> i32
 {
     ret 67;
 }

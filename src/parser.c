@@ -4,6 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+struct ModuleImport
+{
+    char **parts;
+    int part_count;
+    char *full_name;
+};
+
 struct Parser
 {
     Lexer *lx;
@@ -22,18 +29,29 @@ struct Parser
         TypeKind base_kind;
         int ptr_depth;
         int gen_ptr_depth;
+        int is_exposed;
     } *aliases;
     int alias_count;
     int alias_cap;
     // named types: structs and typedef-like entries
-    struct NamedType { char *name; int name_len; Type *type; } *named_types;
+    struct NamedType { char *name; int name_len; Type *type; int is_exposed; } *named_types;
     int nt_count; int nt_cap;
     // enum constants: name->value
     struct EnumConst { char *name; int name_len; int value; } *enum_consts;
     int ec_count; int ec_cap;
-    struct EnumType { char *name; int name_len; } *enum_types;
+    struct EnumType { char *name; int name_len; int is_exposed; } *enum_types;
     int et_count; int et_cap;
+    // module metadata
+    char **module_parts;
+    int module_part_count;
+    int module_part_cap;
+    char *module_full_name;
+    struct ModuleImport *imports;
+    int import_count;
+    int import_cap;
 };
+
+static Token expect(Parser *ps, TokenKind k, const char *what);
 
 static void parse_extend_decl(Parser *ps, int leading_noreturn);
 
@@ -45,6 +63,169 @@ static Node *new_node(NodeKind k)
     n->col = 0;
     n->src = NULL;
     return n;
+}
+
+static char *dup_token_text(Token t)
+{
+    char *nm = (char *)xmalloc((size_t)t.length + 1);
+    memcpy(nm, t.lexeme, (size_t)t.length);
+    nm[t.length] = '\0';
+    return nm;
+}
+
+static char *call_name_from_expr(const Node *expr)
+{
+    if (!expr)
+        return NULL;
+    if (expr->kind == ND_VAR)
+    {
+        if (!expr->var_ref)
+            return NULL;
+        return xstrdup(expr->var_ref);
+    }
+    if (expr->kind == ND_MEMBER)
+    {
+        if (expr->is_pointer_deref)
+            return NULL;
+        if (!expr->field_name)
+            return NULL;
+        char *base = call_name_from_expr(expr->lhs);
+        if (!base)
+            return NULL;
+        size_t base_len = strlen(base);
+        size_t field_len = strlen(expr->field_name);
+        char *res = (char *)xmalloc(base_len + 1 + field_len + 1);
+        memcpy(res, base, base_len);
+        res[base_len] = '.';
+        memcpy(res + base_len + 1, expr->field_name, field_len);
+        res[base_len + 1 + field_len] = '\0';
+        free(base);
+        return res;
+    }
+    return NULL;
+}
+
+static void append_string(char ***arr, int *count, int *cap, char *value)
+{
+    if (!arr || !count || !cap)
+        return;
+    if (*count == *cap)
+    {
+        int new_cap = *cap ? (*cap * 2) : 4;
+        char **resized = (char **)realloc(*arr, (size_t)new_cap * sizeof(char *));
+        if (!resized)
+        {
+            diag_error("out of memory while growing string array");
+            exit(1);
+        }
+        *arr = resized;
+        *cap = new_cap;
+    }
+    (*arr)[(*count)++] = value;
+}
+
+static char *join_parts_with_dot(char **parts, int count)
+{
+    if (!parts || count <= 0)
+        return NULL;
+    size_t total = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        if (parts[i])
+            total += strlen(parts[i]);
+        if (i + 1 < count)
+            total += 1; // for '.'
+    }
+    char *res = (char *)xmalloc(total + 1);
+    size_t pos = 0;
+    for (int i = 0; i < count; ++i)
+    {
+        if (parts[i])
+        {
+            size_t len = strlen(parts[i]);
+            memcpy(res + pos, parts[i], len);
+            pos += len;
+        }
+        if (i + 1 < count)
+            res[pos++] = '.';
+    }
+    res[pos] = '\0';
+    return res;
+}
+
+static void parse_module_path(Parser *ps, char ***out_parts, int *out_count, char **out_full_name)
+{
+    if (!ps)
+        return;
+    int cap = 0;
+    int count = 0;
+    char **parts = NULL;
+
+    Token part = expect(ps, TK_IDENT, "identifier");
+    append_string(&parts, &count, &cap, dup_token_text(part));
+
+    while (1)
+    {
+        Token dot = lexer_peek(ps->lx);
+        if (dot.kind != TK_DOT)
+            break;
+        lexer_next(ps->lx);
+        Token next = expect(ps, TK_IDENT, "identifier");
+        append_string(&parts, &count, &cap, dup_token_text(next));
+    }
+
+    if (out_parts)
+        *out_parts = parts;
+    else
+        free(parts);
+    if (out_count)
+        *out_count = count;
+    if (out_full_name)
+        *out_full_name = join_parts_with_dot(parts, count);
+}
+
+static void parse_module_decl(Parser *ps)
+{
+    Token module_tok = expect(ps, TK_KW_MODULE, "module");
+    if (ps->module_full_name)
+    {
+        diag_error_at(lexer_source(ps->lx), module_tok.line, module_tok.col, "module already declared as '%s'", ps->module_full_name);
+        exit(1);
+    }
+    char **parts = NULL;
+    int count = 0;
+    char *full = NULL;
+    parse_module_path(ps, &parts, &count, &full);
+    expect(ps, TK_SEMI, ";");
+    ps->module_parts = parts;
+    ps->module_part_count = count;
+    ps->module_part_cap = count;
+    ps->module_full_name = full;
+}
+
+static void parse_bring_decl(Parser *ps)
+{
+    expect(ps, TK_KW_BRING, "bring");
+    char **parts = NULL;
+    int count = 0;
+    char *full = NULL;
+    parse_module_path(ps, &parts, &count, &full);
+    expect(ps, TK_SEMI, ";");
+
+    if (ps->import_count == ps->import_cap)
+    {
+        ps->import_cap = ps->import_cap ? ps->import_cap * 2 : 4;
+        ps->imports = (struct ModuleImport *)realloc(ps->imports, (size_t)ps->import_cap * sizeof(struct ModuleImport));
+        if (!ps->imports)
+        {
+            diag_error("out of memory while recording module import");
+            exit(1);
+        }
+    }
+    ps->imports[ps->import_count].parts = parts;
+    ps->imports[ps->import_count].part_count = count;
+    ps->imports[ps->import_count].full_name = full;
+    ps->import_count++;
 }
 
 static Token expect(Parser *ps, TokenKind k, const char *what)
@@ -65,7 +246,7 @@ static Node *parse_stmt(Parser *ps);
 static Node *parse_block(Parser *ps);
 static Node *parse_while(Parser *ps);
 static Node *parse_for(Parser *ps);
-static void parse_alias_decl(Parser *ps);
+static void parse_alias_decl(Parser *ps, int is_exposed);
 static Node *parse_unary(Parser *ps);
 static Node *parse_rel(Parser *ps);
 static Node *parse_and(Parser *ps);
@@ -74,6 +255,10 @@ static Node *parse_or(Parser *ps);
 static Node *parse_shift(Parser *ps);
 
 static Node *parse_initializer(Parser *ps);
+static void parse_struct_decl(Parser *ps, int is_exposed);
+static void parse_enum_decl(Parser *ps, int is_exposed);
+static void parse_module_decl(Parser *ps);
+static void parse_bring_decl(Parser *ps);
 
 static int alias_find(Parser *ps, const char *name, int len)
 {
@@ -100,7 +285,7 @@ static Type *named_type_get(Parser *ps, const char *name, int len)
     int i = named_type_find(ps, name, len);
     return i >= 0 ? ps->named_types[i].type : NULL;
 }
-static void named_type_add(Parser *ps, const char *name, int len, Type *ty)
+static void named_type_add(Parser *ps, const char *name, int len, Type *ty, int is_exposed)
 {
     if (ps->nt_count == ps->nt_cap)
     {
@@ -112,6 +297,7 @@ static void named_type_add(Parser *ps, const char *name, int len, Type *ty)
     ps->named_types[ps->nt_count].name[len] = '\0';
     ps->named_types[ps->nt_count].name_len = len;
     ps->named_types[ps->nt_count].type = ty;
+    ps->named_types[ps->nt_count].is_exposed = is_exposed;
     ps->nt_count++;
 }
 static int enum_const_find(Parser *ps, const char *name, int len)
@@ -148,10 +334,15 @@ static int enum_type_find(Parser *ps, const char *name, int len)
             return i;
     return -1;
 }
-static void enum_type_add(Parser *ps, const char *name, int len)
+static void enum_type_add(Parser *ps, const char *name, int len, int is_exposed)
 {
-    if (enum_type_find(ps, name, len) >= 0)
+    int existing = enum_type_find(ps, name, len);
+    if (existing >= 0)
+    {
+        if (is_exposed && !ps->enum_types[existing].is_exposed)
+            ps->enum_types[existing].is_exposed = 1;
         return;
+    }
     if (ps->et_count == ps->et_cap)
     {
         ps->et_cap = ps->et_cap ? ps->et_cap * 2 : 4;
@@ -161,6 +352,7 @@ static void enum_type_add(Parser *ps, const char *name, int len)
     memcpy(ps->enum_types[ps->et_count].name, name, (size_t)len);
     ps->enum_types[ps->et_count].name[len] = '\0';
     ps->enum_types[ps->et_count].name_len = len;
+    ps->enum_types[ps->et_count].is_exposed = is_exposed;
     ps->et_count++;
 }
 
@@ -595,8 +787,8 @@ static Node *parse_primary(Parser *ps)
 }
 
 // Forward decls for new top-level decls
-static void parse_enum_decl(Parser *ps);
-static void parse_struct_decl(Parser *ps);
+static void parse_enum_decl(Parser *ps, int is_exposed);
+static void parse_struct_decl(Parser *ps, int is_exposed);
 static Node *parse_postfix(Parser *ps)
 {
     Node *e = parse_primary(ps);
@@ -696,6 +888,56 @@ static Node *parse_postfix(Parser *ps)
             m->col = field.col;
             m->src = lexer_source(ps->lx);
             e = m;
+            continue;
+        }
+        if (p.kind == TK_LPAREN)
+        {
+            lexer_next(ps->lx); // consume '('
+            Node **args = NULL;
+            int argc = 0, cap = 0;
+            Token nxt = lexer_peek(ps->lx);
+            if (nxt.kind != TK_RPAREN)
+            {
+                for (;;)
+                {
+                    Node *arg = parse_expr(ps);
+                    if (argc == cap)
+                    {
+                        cap = cap ? cap * 2 : 4;
+                        args = (Node **)realloc(args, sizeof(Node *) * cap);
+                        if (!args)
+                        {
+                            diag_error("out of memory while parsing call arguments");
+                            exit(1);
+                        }
+                    }
+                    args[argc++] = arg;
+                    Token comma = lexer_peek(ps->lx);
+                    if (comma.kind == TK_COMMA)
+                    {
+                        lexer_next(ps->lx);
+                        continue;
+                    }
+                    break;
+                }
+            }
+            expect(ps, TK_RPAREN, ")");
+            char *call_name = call_name_from_expr(e);
+            if (!call_name)
+            {
+                diag_error_at(lexer_source(ps->lx), e ? e->line : p.line, e ? e->col : p.col,
+                              "unsupported call target");
+                exit(1);
+            }
+            Node *call = new_node(ND_CALL);
+            call->lhs = e;
+            call->args = args;
+            call->arg_count = argc;
+            call->call_name = call_name;
+            call->line = e ? e->line : p.line;
+            call->col = e ? e->col : p.col;
+            call->src = lexer_source(ps->lx);
+            e = call;
             continue;
         }
         break;
@@ -1364,7 +1606,7 @@ static Node *parse_for(Parser *ps)
 }
 
 
-static Node *parse_function(Parser *ps, int is_noreturn)
+static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed)
 {
     expect(ps, TK_KW_FUN, "fun");
     Token name = expect(ps, TK_IDENT, "identifier");
@@ -1428,6 +1670,7 @@ static Node *parse_function(Parser *ps, int is_noreturn)
     fn->col = name.col;
     fn->src = lexer_source(ps->lx);
     fn->is_noreturn = is_noreturn;
+    fn->is_exposed = is_exposed;
     return fn;
 }
 
@@ -1650,60 +1893,99 @@ void parser_destroy(Parser *ps)
 
 Node *parse_unit(Parser *ps)
 {
-    // Allow externs and multiple functions; build ND_UNIT containing all
-    // functions
     Node **fns = NULL;
     int fn_count = 0, fn_cap = 0;
+
     for (;;)
     {
         Token t = lexer_peek(ps->lx);
+        if (t.kind == TK_KW_MODULE)
+        {
+            parse_module_decl(ps);
+            continue;
+        }
+        if (t.kind == TK_KW_BRING)
+        {
+            parse_bring_decl(ps);
+            continue;
+        }
+        if (t.kind == TK_EOF)
+            break;
+
+        int visibility = 0;
+        Token vis_tok = {0};
+        if (t.kind == TK_KW_HIDE || t.kind == TK_KW_EXPOSE)
+        {
+            vis_tok = lexer_next(ps->lx);
+            visibility = (vis_tok.kind == TK_KW_EXPOSE);
+            t = lexer_peek(ps->lx);
+        }
+
+        int leading_noreturn = 0;
+        Token noreturn_tok = {0};
+        if (t.kind == TK_KW_NORETURN)
+        {
+            noreturn_tok = lexer_next(ps->lx);
+            leading_noreturn = 1;
+            t = lexer_peek(ps->lx);
+        }
+
+        if (t.kind == TK_EOF)
+        {
+            Token err_tok = visibility ? vis_tok : noreturn_tok;
+            diag_error_at(lexer_source(ps->lx), err_tok.line, err_tok.col,
+                          "unexpected end of file after '%.*s'",
+                          err_tok.length, err_tok.lexeme);
+            exit(1);
+        }
+
         if (t.kind == TK_KW_EXTEND)
         {
-            parse_extend_decl(ps, 0);
+            if (visibility)
+            {
+                diag_error_at(lexer_source(ps->lx), vis_tok.line, vis_tok.col,
+                              "'hide'/'expose' cannot be applied to 'extend'");
+                exit(1);
+            }
+            parse_extend_decl(ps, leading_noreturn);
             continue;
         }
         if (t.kind == TK_KW_ENUM)
         {
-            parse_enum_decl(ps);
+            if (leading_noreturn)
+            {
+                diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
+                              "'noreturn' is only valid before functions or extern declarations");
+                exit(1);
+            }
+            parse_enum_decl(ps, visibility);
             continue;
         }
         if (t.kind == TK_KW_STRUCT)
         {
-            parse_struct_decl(ps);
+            if (leading_noreturn)
+            {
+                diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
+                              "'noreturn' is only valid before functions or extern declarations");
+                exit(1);
+            }
+            parse_struct_decl(ps, visibility);
             continue;
         }
         if (t.kind == TK_KW_ALIAS)
         {
-            parse_alias_decl(ps);
+            if (leading_noreturn)
+            {
+                diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
+                              "'noreturn' is only valid before functions or extern declarations");
+                exit(1);
+            }
+            parse_alias_decl(ps, visibility);
             continue;
-        }
-        if (t.kind == TK_KW_NORETURN)
-        {
-            lexer_next(ps->lx);
-            Token after = lexer_peek(ps->lx);
-            if (after.kind == TK_KW_FUN)
-            {
-                Node *fn = parse_function(ps, 1);
-                if (fn_count == fn_cap)
-                {
-                    fn_cap = fn_cap ? fn_cap * 2 : 4;
-                    fns = (Node **)realloc(fns, sizeof(Node *) * fn_cap);
-                }
-                fns[fn_count++] = fn;
-                continue;
-            }
-            if (after.kind == TK_KW_EXTEND)
-            {
-                parse_extend_decl(ps, 1);
-                continue;
-            }
-            diag_error_at(lexer_source(ps->lx), t.line, t.col,
-                          "unexpected token after 'noreturn'");
-            exit(1);
         }
         if (t.kind == TK_KW_FUN)
         {
-            Node *fn = parse_function(ps, 0);
+            Node *fn = parse_function(ps, leading_noreturn, visibility);
             if (fn_count == fn_cap)
             {
                 fn_cap = fn_cap ? fn_cap * 2 : 4;
@@ -1712,17 +1994,18 @@ Node *parse_unit(Parser *ps)
             fns[fn_count++] = fn;
             continue;
         }
-        if (t.kind == TK_EOF)
-            break;
+
         diag_error_at(lexer_source(ps->lx), t.line, t.col,
-                      "expected 'extend', 'fun' or EOF");
+                      "expected declaration; got token kind=%d", t.kind);
         exit(1);
     }
+
     if (fn_count == 0)
     {
         diag_error_at(lexer_source(ps->lx), 1, 1, "no functions found");
         exit(1);
     }
+
     Node *u = (Node *)xcalloc(1, sizeof(Node));
     u->kind = ND_UNIT;
     u->stmts = fns;
@@ -1730,6 +2013,38 @@ Node *parse_unit(Parser *ps)
     u->src = lexer_source(ps->lx);
     u->line = 1;
     u->col = 1;
+
+    if (ps->module_part_count > 0)
+    {
+        const char **parts = (const char **)xcalloc((size_t)ps->module_part_count, sizeof(const char *));
+        for (int i = 0; i < ps->module_part_count; ++i)
+            parts[i] = ps->module_parts[i];
+        u->module_path.parts = parts;
+        u->module_path.part_count = ps->module_part_count;
+        u->module_path.full_name = ps->module_full_name;
+    }
+
+    if (ps->import_count > 0)
+    {
+        ModulePath *imports = (ModulePath *)xcalloc((size_t)ps->import_count, sizeof(ModulePath));
+        for (int i = 0; i < ps->import_count; ++i)
+        {
+            struct ModuleImport *imp = &ps->imports[i];
+            ModulePath *dst = &imports[i];
+            if (imp->part_count > 0)
+            {
+                const char **parts = (const char **)xcalloc((size_t)imp->part_count, sizeof(const char *));
+                for (int j = 0; j < imp->part_count; ++j)
+                    parts[j] = imp->parts[j];
+                dst->parts = parts;
+                dst->part_count = imp->part_count;
+            }
+            dst->full_name = imp->full_name;
+        }
+        u->imports = imports;
+        u->import_count = ps->import_count;
+    }
+
     return u;
 }
 
@@ -1752,7 +2067,7 @@ const Symbol *parser_get_externs(const Parser *ps, int *count)
     return ps->externs;
 }
 
-static void parse_alias_decl(Parser *ps)
+static void parse_alias_decl(Parser *ps, int is_exposed)
 {
     expect(ps, TK_KW_ALIAS, "alias");
     Token name = expect(ps, TK_IDENT, "identifier");
@@ -1815,6 +2130,7 @@ static void parse_alias_decl(Parser *ps)
         ps->aliases[ps->alias_count].gen_ptr_depth = gen_ptr_depth;
         ps->aliases[ps->alias_count].base_kind = TY_VOID;
         ps->aliases[ps->alias_count].ptr_depth = 0;
+    ps->aliases[ps->alias_count].is_exposed = is_exposed;
         ps->alias_count++;
         return;
     }
@@ -1883,18 +2199,19 @@ static void parse_alias_decl(Parser *ps)
     ps->aliases[ps->alias_count].base_kind = base_kind;
     ps->aliases[ps->alias_count].ptr_depth = ptr_depth;
     ps->aliases[ps->alias_count].gen_ptr_depth = 0;
+    ps->aliases[ps->alias_count].is_exposed = is_exposed;
     ps->alias_count++;
 }
 
-static void parse_enum_decl(Parser *ps)
+static void parse_enum_decl(Parser *ps, int is_exposed)
 {
     expect(ps, TK_KW_ENUM, "enum");
     Token name = expect(ps, TK_IDENT, "enum name");
     // For now, enums are i32-typed constants; register named type alias as i32
     static Type ti32 = {.kind = TY_I32};
     if (named_type_find(ps, name.lexeme, name.length) < 0)
-        named_type_add(ps, name.lexeme, name.length, &ti32);
-    enum_type_add(ps, name.lexeme, name.length);
+        named_type_add(ps, name.lexeme, name.length, &ti32, is_exposed);
+    enum_type_add(ps, name.lexeme, name.length, is_exposed);
     expect(ps, TK_LBRACE, "{");
     int cur = 0;
     for (;;)
@@ -1935,7 +2252,7 @@ static void parse_enum_decl(Parser *ps)
     expect(ps, TK_SEMI, ";");
 }
 
-static void parse_struct_decl(Parser *ps)
+static void parse_struct_decl(Parser *ps, int is_exposed)
 {
     expect(ps, TK_KW_STRUCT, "struct");
     Token name = expect(ps, TK_IDENT, "struct name");
@@ -1946,6 +2263,7 @@ static void parse_struct_decl(Parser *ps)
     st->struct_name = (char*)xmalloc((size_t)name.length + 1);
     memcpy((char*)st->struct_name, name.lexeme, (size_t)name.length);
     ((char*)st->struct_name)[name.length] = '\0';
+    st->is_exposed = is_exposed;
     // Parse fields: list of type ident ';'
     const char **fnames = NULL; Type **ftypes = NULL; int *foff = NULL; int fcnt=0, fcap=0;
     int offset = 0;
@@ -1963,6 +2281,18 @@ static void parse_struct_decl(Parser *ps)
         Type *fty = parse_type_spec(ps);
         Token fname = expect(ps, TK_IDENT, "field name");
         // optional multiple declarators not supported; one per line
+        if (is_exposed)
+        {
+            if (fty && fty->kind == TY_STRUCT && !fty->is_exposed)
+            {
+                const char *hidden_name = fty->struct_name ? fty->struct_name : "<anonymous>";
+                diag_error_at(lexer_source(ps->lx), fname.line, fname.col,
+                              "exposed struct '%.*s' field '%.*s' uses hidden struct '%s'",
+                              name.length, name.lexeme, fname.length, fname.lexeme,
+                              hidden_name);
+                exit(1);
+            }
+        }
         expect(ps, TK_SEMI, ";");
         if (fcnt==fcap) { fcap = fcap?fcap*2:4; fnames=(const char**)realloc(fnames, sizeof(char*)*fcap); ftypes=(Type**)realloc(ftypes, sizeof(Type*)*fcap); foff=(int*)realloc(foff, sizeof(int)*fcap);} 
         char *nm = (char*)xmalloc((size_t)fname.length+1); memcpy(nm, fname.lexeme, (size_t)fname.length); nm[fname.length]='\0';
@@ -1980,6 +2310,6 @@ static void parse_struct_decl(Parser *ps)
     }
     st->strct.field_names = fnames; st->strct.field_types = ftypes; st->strct.field_offsets = foff; st->strct.field_count = fcnt; st->strct.size_bytes = offset;
     // register named type
-    named_type_add(ps, name.lexeme, name.length, st);
+    named_type_add(ps, name.lexeme, name.length, st, is_exposed);
     expect(ps, TK_SEMI, ";");
 }

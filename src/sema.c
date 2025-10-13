@@ -71,6 +71,7 @@ SemaContext *sema_create(void)
 {
     SemaContext *sc = (SemaContext *)xcalloc(1, sizeof(SemaContext));
     sc->syms = symtab_create();
+    sc->unit = NULL;
     return sc;
 }
 void sema_destroy(SemaContext *sc)
@@ -95,11 +96,195 @@ static Type ty_f128 = {.kind = TY_F128};
 static Type ty_void = {.kind = TY_VOID};
 static Type ty_char = {.kind = TY_CHAR};
 
+static char *make_qualified_name(const ModulePath *mod, const char *name)
+{
+    if (!mod || mod->part_count == 0 || !mod->full_name || !name || !*name)
+        return NULL;
+    size_t base_len = strlen(mod->full_name);
+    size_t name_len = strlen(name);
+    char *res = (char *)xmalloc(base_len + 1 + name_len + 1);
+    memcpy(res, mod->full_name, base_len);
+    res[base_len] = '.';
+    memcpy(res + base_len + 1, name, name_len);
+    res[base_len + 1 + name_len] = '\0';
+    return res;
+}
+
+static int module_name_matches(const char *full, const char *candidate, size_t len)
+{
+    if (!full || !candidate)
+        return 0;
+    return strlen(full) == len && strncmp(full, candidate, len) == 0;
+}
+
+static int unit_allows_module_call(const Node *unit, const char *qualified_name)
+{
+    if (!unit || unit->kind != ND_UNIT || !qualified_name)
+        return 0;
+    const char *dot = strrchr(qualified_name, '.');
+    if (!dot || dot == qualified_name)
+        return 0;
+    size_t module_len = (size_t)(dot - qualified_name);
+    if (module_name_matches(unit->module_path.full_name, qualified_name, module_len))
+        return 1;
+    if (unit->imports && unit->import_count > 0)
+    {
+        for (int i = 0; i < unit->import_count; ++i)
+        {
+            const ModulePath *imp = &unit->imports[i];
+            if (module_name_matches(imp->full_name, qualified_name, module_len))
+                return 1;
+        }
+    }
+    return 0;
+}
+
 static int type_is_int(Type *t)
 {
     return t && (t->kind == TY_I8 || t->kind == TY_U8 || t->kind == TY_I16 ||
                  t->kind == TY_U16 || t->kind == TY_I32 || t->kind == TY_U32 ||
                  t->kind == TY_I64 || t->kind == TY_U64);
+}
+
+static int type_is_builtin(const Type *t)
+{
+    if (!t)
+        return 1;
+    switch (t->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+    case TY_I16:
+    case TY_U16:
+    case TY_I32:
+    case TY_U32:
+    case TY_I64:
+    case TY_U64:
+    case TY_F32:
+    case TY_F64:
+    case TY_F128:
+    case TY_VOID:
+    case TY_CHAR:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static void describe_type(const Type *t, char *buf, size_t bufsz)
+{
+    if (!buf || bufsz == 0)
+        return;
+    if (!t)
+    {
+        snprintf(buf, bufsz, "i32");
+        return;
+    }
+    switch (t->kind)
+    {
+    case TY_I8:
+        snprintf(buf, bufsz, "i8");
+        return;
+    case TY_U8:
+        snprintf(buf, bufsz, "u8");
+        return;
+    case TY_I16:
+        snprintf(buf, bufsz, "i16");
+        return;
+    case TY_U16:
+        snprintf(buf, bufsz, "u16");
+        return;
+    case TY_I32:
+        snprintf(buf, bufsz, "i32");
+        return;
+    case TY_U32:
+        snprintf(buf, bufsz, "u32");
+        return;
+    case TY_I64:
+        snprintf(buf, bufsz, "i64");
+        return;
+    case TY_U64:
+        snprintf(buf, bufsz, "u64");
+        return;
+    case TY_F32:
+        snprintf(buf, bufsz, "f32");
+        return;
+    case TY_F64:
+        snprintf(buf, bufsz, "f64");
+        return;
+    case TY_F128:
+        snprintf(buf, bufsz, "f128");
+        return;
+    case TY_VOID:
+        snprintf(buf, bufsz, "void");
+        return;
+    case TY_CHAR:
+        snprintf(buf, bufsz, "char");
+        return;
+    case TY_PTR:
+        if (!t->pointee)
+        {
+            snprintf(buf, bufsz, "ptr");
+            return;
+        }
+        else
+        {
+            char inner[128];
+            describe_type(t->pointee, inner, sizeof(inner));
+            snprintf(buf, bufsz, "ptr to %s", inner);
+            return;
+        }
+    case TY_STRUCT:
+        snprintf(buf, bufsz, "struct %s", t->struct_name ? t->struct_name : "<anonymous>");
+        return;
+    default:
+        snprintf(buf, bufsz, "type kind %d", t->kind);
+        return;
+    }
+}
+
+static int type_is_exportable(const Type *t)
+{
+    if (!t)
+        return 1;
+    if (type_is_builtin(t))
+        return 1;
+    if (t->kind == TY_PTR)
+        return 1;
+    if (t->kind == TY_STRUCT)
+        return t->is_exposed != 0;
+    return 1;
+}
+
+static int check_exposed_function_signature(const Node *fn)
+{
+    if (!fn || fn->kind != ND_FUNC || !fn->is_exposed)
+        return 0;
+    Type *ret_type = fn->ret_type ? fn->ret_type : &ty_i32;
+    if (!type_is_exportable(ret_type))
+    {
+        char buf[128];
+        describe_type(ret_type, buf, sizeof(buf));
+        diag_error_at(fn->src, fn->line, fn->col,
+                      "exposed function '%s' cannot return hidden type '%s'",
+                      fn->name ? fn->name : "<unnamed>", buf);
+        return 1;
+    }
+    for (int i = 0; i < fn->param_count; i++)
+    {
+        Type *param_type = fn->param_types ? fn->param_types[i] : NULL;
+        if (!type_is_exportable(param_type))
+        {
+            char buf[128];
+            describe_type(param_type, buf, sizeof(buf));
+            const char *param_name = (fn->param_names && fn->param_names[i]) ? fn->param_names[i] : "<param>";
+            diag_error_at(fn->src, fn->line, fn->col,
+                          "exposed function '%s' parameter '%s' uses hidden type '%s'",
+                          fn->name ? fn->name : "<unnamed>", param_name, buf);
+            return 1;
+        }
+    }
+    return 0;
 }
 static int type_equal(Type *a, Type *b)
 {
@@ -940,6 +1125,23 @@ static void check_expr(SemaContext *sc, Node *e)
         const Symbol *sym = symtab_get(sc->syms, e->call_name);
         if (!sym)
         {
+            if (unit_allows_module_call(sc->unit, e->call_name))
+            {
+                Symbol stub = {0};
+                stub.kind = SYM_FUNC;
+                stub.name = e->call_name;
+                stub.is_extern = 1;
+                stub.abi = "C";
+                stub.sig.ret = &ty_i32;
+                stub.sig.params = NULL;
+                stub.sig.param_count = 0;
+                stub.sig.is_varargs = 1;
+                symtab_add(sc->syms, stub);
+                sym = symtab_get(sc->syms, e->call_name);
+            }
+        }
+        if (!sym)
+        {
             diag_error_at(e->src, e->line, e->col, "unknown function '%s'",
                           e->call_name);
             exit(1);
@@ -950,6 +1152,8 @@ static void check_expr(SemaContext *sc, Node *e)
             check_expr(sc, e->args[i]);
         }
         e->type = sym->sig.ret;
+        if (sym->name)
+            e->call_name = sym->name;
         return;
     }
     if (e->kind == ND_COND)
@@ -1146,6 +1350,8 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         diag_error("null unit");
         return 1;
     }
+    const Node *previous_unit = sc->unit;
+    sc->unit = unit;
     if (unit->kind == ND_FUNC)
     {
         // single function case
@@ -1160,6 +1366,8 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         s.sig.param_count = 0;
         s.sig.is_varargs = 0;
         symtab_add(sc->syms, s);
+        if (check_exposed_function_signature(unit))
+            return 1;
         return sema_check_function(sc, unit);
     }
     if (unit->kind != ND_UNIT)
@@ -1186,13 +1394,27 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         s.sig.param_count = 0;
         s.sig.is_varargs = 0;
         symtab_add(sc->syms, s);
+        if (fn->is_exposed && unit->module_path.full_name)
+        {
+            char *qualified = make_qualified_name(&unit->module_path, fn->name);
+            if (qualified)
+            {
+                Symbol alias = s;
+                alias.name = qualified;
+                symtab_add(sc->syms, alias);
+            }
+        }
     }
     // Second pass: type-check bodies
     for (int i = 0; i < unit->stmt_count; i++)
     {
-        if (sema_check_function(sc, unit->stmts[i]))
+        Node *fn = unit->stmts[i];
+        if (check_exposed_function_signature(fn))
+            return 1;
+        if (sema_check_function(sc, fn))
             return 1;
     }
+    sc->unit = previous_unit;
     return 0;
 }
 

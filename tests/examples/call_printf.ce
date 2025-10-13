@@ -1,3 +1,7 @@
+module Call_Printf.Program;
+
+bring RandomThing;
+
 extend from "C" i32 printf(char *, _vaargs_);
 extend from "C" i32 write(int, char *, int);
 extend from "C" i32 read(i32, char *, int);
@@ -6,45 +10,43 @@ extend from "C" void free(void *);
 extend from "C" void exit(int);
 extend from "C" int test();
 
-extend fun test_chance() -> i32;
+hide alias string = char*;
+hide alias ptr<T> = T*;
 
-alias string = char*;
-alias ptr<T> = T*;
-
-fun printwrapper() -> i32
+hide fun printwrapper() -> i32
 {
     ret printf("Hello, %s! Number: %d\n", "CHance", 42);
 }
 
-enum Element
+expose enum Element
 {
     ElementPart, // Auto 0
     ElementPart2, // Auto 1
     SetElement = 3 // 3
 };
 
-struct AnElement
+expose struct AnElement
 {
     Element internalElement;
     Element* ptrToElement;
 };
 
-struct OtherElement
+expose struct OtherElement
 {
     i32 part;
     char* str;
     u64 bignumber;
-    AnElement thisthing;
+    AnElement thisthing; // Will error because AnElement is hidden and cannot be used in an exposed struct
     AnElement* ptrToSmth;
 };
 
-struct SmallTest
+hide struct SmallTest
 {
     i32 testVar;
     u8 smallValue;
 };
 
-fun main() -> i32
+expose fun main() -> i32
 {
     // allocate 128 bytes for input
     ptr<void> buf = malloc(128);
@@ -95,7 +97,7 @@ fun main() -> i32
     i16 of = test_overflow();
     printf("Overflow test result (should be -25536): %d\n", of);
 
-    printf("Calling test_chance(): %d\n", test_chance());
+    printf("Calling test_chance(): %d\n", RandomThing.test_chance());
 
     printf("Calling extended C function test(): %d\n", test());
 
@@ -136,7 +138,7 @@ fun main() -> i32
     ret ((vari.testVar as i32) + (another.smallValue as i32)); // expect 45 + 123 = 168
 }
 
-fun construct_thing() -> SmallTest
+hide fun construct_thing() -> SmallTest
 {
     SmallTest thing = {};
     thing.smallValue = 5;
@@ -144,7 +146,7 @@ fun construct_thing() -> SmallTest
     ret thing;
 }
 
-fun strlen(string strg) -> i32
+hide fun strlen(string strg) -> i32
 {
     i32 len = 0;
     while (strg[len])
@@ -154,7 +156,7 @@ fun strlen(string strg) -> i32
     ret len;
 }
 
-fun strcmp(string a, string b) -> i32
+hide fun strcmp(string a, string b) -> i32
 {
     i32 i = 0;
     while (a[i] && b[i])
@@ -168,20 +170,20 @@ fun strcmp(string a, string b) -> i32
     ret a[i] - b[i];
 }
 
-fun abort() -> void
+hide fun abort() -> void
 {
     exit(1);
     ret;
 }
 
-fun test_overflow() -> i16
+expose fun test_overflow() -> i16
 {
     i16 x = 30000;
     i16 y = 10000;
     ret x + y; // expect overflow to -25536
 }
 
-fun test_mul_overflow() -> u8
+hide fun test_mul_overflow() -> u8
 {
     u8 a = 200;
     u8 b = 200;
