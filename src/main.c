@@ -347,7 +347,26 @@ static int locate_chancecodec(char *out, size_t outsz, const char *exe_dir)
     return 1;
 }
 
-static int run_chancecodec_process(const char *cmd, const char *backend, int opt_level, const char *asm_path, const char *ccb_path, int *spawn_errno_out)
+static const char *target_os_to_option(TargetOS os)
+{
+    switch (os)
+    {
+    case OS_WINDOWS:
+        return "windows";
+    case OS_LINUX:
+        return "linux";
+    default:
+        return NULL;
+    }
+}
+
+static int run_chancecodec_process(const char *cmd,
+                                   const char *backend,
+                                   int opt_level,
+                                   const char *asm_path,
+                                   const char *ccb_path,
+                                   const char *target_os_arg,
+                                   int *spawn_errno_out)
 {
     if (spawn_errno_out)
         *spawn_errno_out = 0;
@@ -358,9 +377,16 @@ static int run_chancecodec_process(const char *cmd, const char *backend, int opt
         return -1;
     }
 #ifdef _WIN32
-    const char *args[8];
+    const char *args[12];
     int idx = 0;
     char optbuf[8];
+    char target_option_buf[64];
+    const char *target_option_value = NULL;
+    if (target_os_arg && *target_os_arg)
+    {
+        snprintf(target_option_buf, sizeof(target_option_buf), "target-os=%s", target_os_arg);
+        target_option_value = target_option_buf;
+    }
     args[idx++] = cmd;
     args[idx++] = "--backend";
     args[idx++] = backend;
@@ -371,6 +397,11 @@ static int run_chancecodec_process(const char *cmd, const char *backend, int opt
     }
     args[idx++] = "--output";
     args[idx++] = asm_path;
+    if (target_option_value)
+    {
+        args[idx++] = "--option";
+        args[idx++] = target_option_value;
+    }
     args[idx++] = ccb_path;
     args[idx] = NULL;
     intptr_t rc = _spawnvp(_P_WAIT, cmd, args);
@@ -382,9 +413,16 @@ static int run_chancecodec_process(const char *cmd, const char *backend, int opt
     }
     return (int)rc;
 #else
-    char *args[8];
+    char *args[12];
     int idx = 0;
     char optbuf[8];
+    char target_option_buf[64];
+    char *target_option_value = NULL;
+    if (target_os_arg && *target_os_arg)
+    {
+        snprintf(target_option_buf, sizeof(target_option_buf), "target-os=%s", target_os_arg);
+        target_option_value = target_option_buf;
+    }
     args[idx++] = (char *)cmd;
     args[idx++] = "--backend";
     args[idx++] = (char *)backend;
@@ -395,6 +433,11 @@ static int run_chancecodec_process(const char *cmd, const char *backend, int opt
     }
     args[idx++] = "--output";
     args[idx++] = (char *)asm_path;
+    if (target_option_value)
+    {
+        args[idx++] = "--option";
+        args[idx++] = target_option_value;
+    }
     args[idx++] = (char *)ccb_path;
     args[idx] = NULL;
     pid_t pid = 0;
@@ -923,6 +966,7 @@ int main(int argc, char **argv)
         if (target_arch == ARCH_X86 && !stop_after_ccb)
         {
             const char *backend = chancecode_backend ? chancecode_backend : "x86-gas";
+            const char *target_os_option = target_os_to_option(target_os);
             if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
             {
                 fprintf(stderr, "internal error: ChanceCode CLI command unresolved\n");
@@ -931,14 +975,26 @@ int main(int argc, char **argv)
             }
             char display_cmd[4096];
             if (opt_level > 0)
-                snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
-                         chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path);
+            {
+                if (target_os_option)
+                    snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s -O%d --output \"%s\" --option target-os=%s \"%s\"",
+                             chancecodec_cmd_to_use, backend, opt_level, asm_path, target_os_option, ccb_path);
+                else
+                    snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
+                             chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path);
+            }
             else
-                snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s --output \"%s\" \"%s\"",
-                         chancecodec_cmd_to_use, backend, asm_path, ccb_path);
+            {
+                if (target_os_option)
+                    snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s --output \"%s\" --option target-os=%s \"%s\"",
+                             chancecodec_cmd_to_use, backend, asm_path, target_os_option, ccb_path);
+                else
+                    snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s --output \"%s\" \"%s\"",
+                             chancecodec_cmd_to_use, backend, asm_path, ccb_path);
+            }
 
             int spawn_errno = 0;
-            int chance_rc = run_chancecodec_process(chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path, &spawn_errno);
+            int chance_rc = run_chancecodec_process(chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path, target_os_option, &spawn_errno);
             if (chance_rc != 0)
             {
                 if (chance_rc < 0)
@@ -1095,6 +1151,7 @@ int main(int argc, char **argv)
         if (target_arch == ARCH_X86 && !stop_after_ccb)
         {
             const char *backend = chancecode_backend ? chancecode_backend : "x86-gas";
+            const char *target_os_option = target_os_to_option(target_os);
             if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
             {
                 fprintf(stderr, "internal error: ChanceCode CLI command unresolved\n");
@@ -1103,14 +1160,26 @@ int main(int argc, char **argv)
             }
             char display_cmd[4096];
             if (opt_level > 0)
-                snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
-                         chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path);
+            {
+                if (target_os_option)
+                    snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s -O%d --output \"%s\" --option target-os=%s \"%s\"",
+                             chancecodec_cmd_to_use, backend, opt_level, asm_path, target_os_option, ccb_path);
+                else
+                    snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
+                             chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path);
+            }
             else
-                snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s --output \"%s\" \"%s\"",
-                         chancecodec_cmd_to_use, backend, asm_path, ccb_path);
+            {
+                if (target_os_option)
+                    snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s --output \"%s\" --option target-os=%s \"%s\"",
+                             chancecodec_cmd_to_use, backend, asm_path, target_os_option, ccb_path);
+                else
+                    snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s --output \"%s\" \"%s\"",
+                             chancecodec_cmd_to_use, backend, asm_path, ccb_path);
+            }
 
             int spawn_errno = 0;
-            int chance_rc = run_chancecodec_process(chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path, &spawn_errno);
+            int chance_rc = run_chancecodec_process(chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path, target_os_option, &spawn_errno);
             if (chance_rc != 0)
             {
                 if (chance_rc < 0)
