@@ -1,3 +1,4 @@
+
 #include "ast.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,8 @@ struct Parser
     struct EnumType { char *name; int name_len; } *enum_types;
     int et_count; int et_cap;
 };
+
+static void parse_extend_decl(Parser *ps, int leading_noreturn);
 
 static Node *new_node(NodeKind k)
 {
@@ -1361,7 +1364,7 @@ static Node *parse_for(Parser *ps)
 }
 
 
-static Node *parse_function(Parser *ps)
+static Node *parse_function(Parser *ps, int is_noreturn)
 {
     expect(ps, TK_KW_FUN, "fun");
     Token name = expect(ps, TK_IDENT, "identifier");
@@ -1403,6 +1406,12 @@ static Node *parse_function(Parser *ps)
     expect(ps, TK_ARROW, "->");
     // return type
     Type *rtype = parse_type_spec(ps);
+    if (is_noreturn && rtype && rtype->kind != TY_VOID)
+    {
+        diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                      "noreturn functions must return void");
+        exit(1);
+    }
     Node *body = parse_block(ps);
     Node *fn = new_node(ND_FUNC);
     // duplicate function name to a stable C string
@@ -1418,35 +1427,75 @@ static Node *parse_function(Parser *ps)
     fn->line = name.line;
     fn->col = name.col;
     fn->src = lexer_source(ps->lx);
+    fn->is_noreturn = is_noreturn;
     return fn;
 }
 
-static void parse_extend_decl(Parser *ps)
+static void parse_extend_decl(Parser *ps, int leading_noreturn)
 {
     // Two forms:
     // 1) extend from "C" i32 printf(char*, _vaargs_);
     // 2) extend fun name(params) -> ret;   // default ABI "C"
     expect(ps, TK_KW_EXTEND, "extend");
+    int is_noreturn = leading_noreturn;
     Token next = lexer_peek(ps->lx);
+    if (!is_noreturn && next.kind == TK_KW_NORETURN)
+    {
+        lexer_next(ps->lx);
+        is_noreturn = 1;
+        next = lexer_peek(ps->lx);
+    }
     if (next.kind == TK_KW_FUN)
     {
         // Parse: fun name(params) -> ret;
         lexer_next(ps->lx); // consume 'fun'
         Token name = expect(ps, TK_IDENT, "identifier");
         expect(ps, TK_LPAREN, "(");
-        // Skip parameter list; we don't need full types for extern symbol table
-        for (;;)
+        Type **param_types = NULL;
+        int param_count = 0;
+        int param_cap = 0;
+        int is_varargs = 0;
+        Token peek = lexer_peek(ps->lx);
+        if (peek.kind != TK_RPAREN)
         {
-            Token t = lexer_next(ps->lx);
-            if (t.kind == TK_RPAREN)
-                break;
-            if (t.kind == TK_EOF)
+            for (;;)
             {
-                diag_error_at(lexer_source(ps->lx), 0, 0,
-                              "unexpected end of file in extern parameter list");
-                exit(1);
+                Token maybe_va = lexer_peek(ps->lx);
+                if (maybe_va.kind == TK_IDENT && maybe_va.length == 8 &&
+                    strncmp(maybe_va.lexeme, "_vaargs_", 8) == 0)
+                {
+                    lexer_next(ps->lx);
+                    is_varargs = 1;
+                }
+                else
+                {
+                    Type *pty = parse_type_spec(ps);
+                    if (param_count == param_cap)
+                    {
+                        param_cap = param_cap ? param_cap * 2 : 4;
+                        param_types =
+                            (Type **)realloc(param_types, sizeof(Type *) * param_cap);
+                    }
+                    param_types[param_count++] = pty;
+                    Token maybe_name = lexer_peek(ps->lx);
+                    if (maybe_name.kind == TK_IDENT &&
+                        !(maybe_name.length == 8 &&
+                          strncmp(maybe_name.lexeme, "_vaargs_", 8) == 0) &&
+                        !is_type_start(ps, maybe_name))
+                    {
+                        lexer_next(ps->lx);
+                    }
+                }
+                Token delim = lexer_peek(ps->lx);
+                if (delim.kind == TK_COMMA)
+                {
+                    lexer_next(ps->lx);
+                    continue;
+                }
+                break;
             }
         }
+        expect(ps, TK_RPAREN, ")");
         expect(ps, TK_ARROW, "->");
         Type *ret_ty = parse_type_spec(ps);
         expect(ps, TK_SEMI, ";");
@@ -1459,13 +1508,14 @@ static void parse_extend_decl(Parser *ps)
         s.name = nm;
         s.is_extern = 1;
         s.abi = xstrdup("C");
-    // Default to i32 if return type omitted (should not happen here),
-    // using a stable static object instead of a temporary.
-    static Type ti32_ext = {.kind = TY_I32};
-    s.sig.ret = ret_ty ? ret_ty : &ti32_ext;
-        s.sig.params = NULL;
-        s.sig.param_count = 0;
-        s.sig.is_varargs = 0;
+        // Default to i32 if return type omitted (should not happen here),
+        // using a stable static object instead of a temporary.
+        static Type ti32_ext = {.kind = TY_I32};
+        s.sig.ret = ret_ty ? ret_ty : &ti32_ext;
+        s.sig.params = param_types;
+        s.sig.param_count = param_count;
+        s.sig.is_varargs = is_varargs;
+        s.is_noreturn = is_noreturn;
         if (ps->ext_count == ps->ext_cap)
         {
             ps->ext_cap = ps->ext_cap ? ps->ext_cap * 2 : 8;
@@ -1488,26 +1538,58 @@ static void parse_extend_decl(Parser *ps)
     Type *ret_ty = parse_type_spec(ps);
     Token name = expect(ps, TK_IDENT, "identifier");
     expect(ps, TK_LPAREN, "(");
-    // Very minimal signature capture: detect varargs if present; ignore param
-    // types for now
     int is_varargs = 0;
-    for (;;)
+    Type **param_types = NULL;
+    int param_count = 0;
+    int param_cap = 0;
+    Token pstart = lexer_peek(ps->lx);
+    if (pstart.kind != TK_RPAREN)
     {
-        Token t = lexer_next(ps->lx);
-        if (t.kind == TK_RPAREN)
-            break;
-        if (t.kind == TK_EOF)
+        for (;;)
         {
-            diag_error_at(lexer_source(ps->lx), 0, 0,
-                          "unexpected end of file in extern parameter list");
-            exit(1);
-        }
-        if (t.kind == TK_IDENT && t.length == 8 &&
-            strncmp(t.lexeme, "_vaargs_", 8) == 0)
-        {
-            is_varargs = 1;
+            Token maybe_va = lexer_peek(ps->lx);
+            if (maybe_va.kind == TK_IDENT && maybe_va.length == 8 &&
+                strncmp(maybe_va.lexeme, "_vaargs_", 8) == 0)
+            {
+                lexer_next(ps->lx);
+                is_varargs = 1;
+            }
+            else
+            {
+                Type *pty = parse_type_spec(ps);
+                if (param_count == param_cap)
+                {
+                    param_cap = param_cap ? param_cap * 2 : 4;
+                    param_types =
+                        (Type **)realloc(param_types, sizeof(Type *) * param_cap);
+                }
+                param_types[param_count++] = pty;
+                Token maybe_name = lexer_peek(ps->lx);
+                if (maybe_name.kind == TK_IDENT &&
+                    !(maybe_name.length == 8 &&
+                      strncmp(maybe_name.lexeme, "_vaargs_", 8) == 0) &&
+                    !is_type_start(ps, maybe_name))
+                {
+                    lexer_next(ps->lx);
+                }
+            }
+            Token delim = lexer_peek(ps->lx);
+            if (delim.kind == TK_COMMA)
+            {
+                lexer_next(ps->lx);
+                continue;
+            }
+            if (delim.kind == TK_RPAREN)
+                break;
+            if (delim.kind == TK_EOF)
+            {
+                diag_error_at(lexer_source(ps->lx), 0, 0,
+                              "unexpected end of file in extern parameter list");
+                exit(1);
+            }
         }
     }
+    expect(ps, TK_RPAREN, ")");
     expect(ps, TK_SEMI, ";");
     // Save extern
     Symbol s = {0};
@@ -1539,9 +1621,10 @@ static void parse_extend_decl(Parser *ps)
     }
     else
         s.sig.ret = &ti32;
-    s.sig.params = NULL;
-    s.sig.param_count = 0;
+    s.sig.params = param_types;
+    s.sig.param_count = param_count;
     s.sig.is_varargs = is_varargs;
+    s.is_noreturn = is_noreturn;
     if (ps->ext_count == ps->ext_cap)
     {
         ps->ext_cap = ps->ext_cap ? ps->ext_cap * 2 : 8;
@@ -1576,7 +1659,7 @@ Node *parse_unit(Parser *ps)
         Token t = lexer_peek(ps->lx);
         if (t.kind == TK_KW_EXTEND)
         {
-            parse_extend_decl(ps);
+            parse_extend_decl(ps, 0);
             continue;
         }
         if (t.kind == TK_KW_ENUM)
@@ -1594,9 +1677,33 @@ Node *parse_unit(Parser *ps)
             parse_alias_decl(ps);
             continue;
         }
+        if (t.kind == TK_KW_NORETURN)
+        {
+            lexer_next(ps->lx);
+            Token after = lexer_peek(ps->lx);
+            if (after.kind == TK_KW_FUN)
+            {
+                Node *fn = parse_function(ps, 1);
+                if (fn_count == fn_cap)
+                {
+                    fn_cap = fn_cap ? fn_cap * 2 : 4;
+                    fns = (Node **)realloc(fns, sizeof(Node *) * fn_cap);
+                }
+                fns[fn_count++] = fn;
+                continue;
+            }
+            if (after.kind == TK_KW_EXTEND)
+            {
+                parse_extend_decl(ps, 1);
+                continue;
+            }
+            diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                          "unexpected token after 'noreturn'");
+            exit(1);
+        }
         if (t.kind == TK_KW_FUN)
         {
-            Node *fn = parse_function(ps);
+            Node *fn = parse_function(ps, 0);
             if (fn_count == fn_cap)
             {
                 fn_cap = fn_cap ? fn_cap * 2 : 4;
@@ -1634,6 +1741,15 @@ void parser_export_externs(Parser *ps, SymTable *st)
     {
         symtab_add(st, ps->externs[i]);
     }
+}
+
+const Symbol *parser_get_externs(const Parser *ps, int *count)
+{
+    if (count)
+        *count = ps ? ps->ext_count : 0;
+    if (!ps || ps->ext_count == 0)
+        return NULL;
+    return ps->externs;
 }
 
 static void parse_alias_decl(Parser *ps)

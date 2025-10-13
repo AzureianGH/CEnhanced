@@ -54,6 +54,7 @@ typedef enum
     TK_KW_AS,
     TK_KW_SIZEOF,
     TK_KW_TYPEOF,
+    TK_KW_NORETURN,
     // punctuation
     TK_ARROW,      // ->
     TK_LPAREN,     // (
@@ -175,6 +176,8 @@ typedef enum
     ND_SHR,      // >>
 } NodeKind;
 
+const char *node_kind_name(NodeKind kind);
+
 typedef struct
 {
     const char *src; // entire source buffer
@@ -218,6 +221,7 @@ typedef struct Node
     int stmt_count;
     // For ND_VAR reference
     const char *var_ref;
+    int is_noreturn;
     // For ND_MEMBER
     const char *field_name;
     int field_index;
@@ -253,6 +257,7 @@ Node *parse_unit(Parser *ps);
 // definition below
 typedef struct SymTable SymTable;
 void parser_export_externs(Parser *ps, SymTable *st);
+const struct Symbol *parser_get_externs(const Parser *ps, int *count);
 
 // Utilities
 void ast_free(Node *n);
@@ -263,7 +268,7 @@ Type *type_char(void);
 Type *type_ptr(Type *to);
 int type_equals(Type *a, Type *b);
 
-// Codegen to x64 COFF/PE: returns 0 on success
+// Codegen options when emitting ChanceCode bytecode (.ccb)
 typedef enum
 {
     ASM_INTEL = 0,
@@ -277,21 +282,26 @@ typedef enum
     OS_LINUX = 1
 } TargetOS;
 
+struct Symbol;
+
 typedef struct
 {
     bool freestanding;
     bool m32;
-    bool emit_asm;           // for -S
-    bool no_link;            // don't link; assemble to object only
-    AsmSyntax asm_syntax;    // intel (GAS noprefix), att (GAS AT&T), nasm
-    const char *output_path; // .exe path
-    const char *obj_output_path; // optional: explicit object output path (if null, use output_path)
-    // Target OS/ABI
+    bool emit_asm;           // for -S (produces .S from chancecodec)
+    bool no_link;            // don't link; emit .ccb only
+    AsmSyntax asm_syntax;    // desired assembly flavor when translating via chancecodec
+    const char *output_path; // Final executable (when linking) or output module path
+    const char *obj_output_path; // Optional: explicit intermediate object path
+    const char *ccb_output_path; // Optional: explicit .ccb output path override
     TargetOS os;
+    const struct Symbol *externs;
+    int extern_count;
+    int opt_level;
 } CodegenOptions;
 
-int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts);
-int codegen_pe_x64_write_exe_const(int32_t retval, const CodegenOptions *opts);
+int codegen_ccb_write_module(const Node *unit, const CodegenOptions *opts);
+int codegen_ccb_resolve_module_path(const CodegenOptions *opts, char *buffer, size_t bufsz);
 
 // tiny utility functions
 void *xmalloc(size_t sz);
@@ -332,6 +342,7 @@ typedef struct Symbol
     int is_extern;   // 1 if extern (extend from "C")
     const char *abi; // e.g., "C"
     FuncSig sig;
+    int is_noreturn;
 } Symbol;
 
 typedef struct SymTable SymTable;

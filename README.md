@@ -5,7 +5,7 @@ CHance is a C-like systems language aimed at OS and general programming. This re
 Highlights (current stage):
 - Minimal parser for: `fun main() -> i32 { ret <int or sum>; }`
 - Codegen directly to x64 PE with a tiny header and one .text section
-- CLI: `chancec -o out.exe [-S] [--freestanding] [-m64] input.ce`
+- CLI: `chancec -x86 [-S|-Sccb] [-c [obj]] [--freestanding] [-m64] [-o out.exe] input.ce`
 - CTest integration with examples returning specific exit codes
 
 Planned:
@@ -31,11 +31,18 @@ Use CMake with a non-Ninja generator, e.g. Visual Studio 2022 or NMake Makefiles
 ## Usage
 
 ```
-chancec -o out.exe program.ce
-out.exe
+# Compile and link to an executable (requires selecting a backend)
+chancec -x86 program.ce
+program.exe
+
+# Emit assembly only and keep the .S file
+chancec -x86 -S program.ce
+
+# Stop after Chance bytecode emission
+chancec -Sccb program.ce
 ```
 
-Enable `-S` to emit a pseudo-asm `.S` file next to the executable for inspection.
+Use `-x86` to select the current x86-64 backend whenever you need assembly, object, or executable output. Combine with `-c` to keep object files, `--freestanding` for freestanding builds, or `-O1`/`-O2` for optimization.
 
 ## Notes
 - This is intentionally minimal to establish the toolchain skeleton. The backends and front-end are designed to be modular (lexer, parser, AST, codegen are separate units under `src/`).

@@ -15,11 +15,14 @@ add_library(chance_core
     src/parser.c
     src/sema.c
     src/includes.c
-    src/codegen_coff_x64.c
+    src/codegen_ccb.c
     src/util.c
 )
 
-target_include_directories(chance_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_include_directories(chance_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../ChanceCode/include
+)
 
 add_executable(chancec
     src/main.c

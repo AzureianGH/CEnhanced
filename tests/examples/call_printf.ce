@@ -1,5 +1,3 @@
-#include "test.h"
-
 extend from "C" i32 printf(char *, _vaargs_);
 extend from "C" i32 write(int, char *, int);
 extend from "C" i32 read(i32, char *, int);
