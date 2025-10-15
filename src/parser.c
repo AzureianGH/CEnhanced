@@ -1,5 +1,6 @@
 
 #include "ast.h"
+#include "module_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,71 @@ struct Parser
     int import_count;
     int import_cap;
 };
+
+static int import_alias_matches(const struct ModuleImport *imp, const char *alias, int alias_len)
+{
+    if (!imp || !alias || alias_len <= 0 || !imp->alias)
+        return 0;
+    return ((int)strlen(imp->alias) == alias_len) && strncmp(imp->alias, alias, (size_t)alias_len) == 0;
+}
+
+static int import_prefix_matches(const struct ModuleImport *imp, const Token *parts, int part_count)
+{
+    if (!imp || part_count <= 0 || !parts)
+        return 0;
+    if (imp->part_count < part_count)
+        return 0;
+    for (int i = 0; i < part_count; ++i)
+    {
+        if (!imp->parts[i])
+            return 0;
+        if (strncmp(imp->parts[i], parts[i].lexeme, (size_t)parts[i].length) != 0 ||
+            (int)strlen(imp->parts[i]) != parts[i].length)
+            return 0;
+    }
+    return 1;
+}
+
+static const struct ModuleImport *parser_find_import_by_alias(Parser *ps, const char *alias, int alias_len)
+{
+    if (!ps || !alias)
+        return NULL;
+    for (int i = 0; i < ps->import_count; ++i)
+    {
+        if (import_alias_matches(&ps->imports[i], alias, alias_len))
+            return &ps->imports[i];
+    }
+    return NULL;
+}
+
+static const struct ModuleImport *parser_find_import_by_parts(Parser *ps, const Token *parts, int part_count)
+{
+    if (!ps || !parts || part_count <= 0)
+        return NULL;
+    for (int i = 0; i < ps->import_count; ++i)
+    {
+        if (import_prefix_matches(&ps->imports[i], parts, part_count))
+            return &ps->imports[i];
+    }
+    return NULL;
+}
+
+static int parser_module_tokens_match_current(Parser *ps, const Token *parts, int part_count)
+{
+    if (!ps || part_count <= 0)
+        return 0;
+    if (!ps->module_parts || ps->module_part_count != part_count)
+        return 0;
+    for (int i = 0; i < part_count; ++i)
+    {
+        if (!ps->module_parts[i])
+            return 0;
+        if (strncmp(ps->module_parts[i], parts[i].lexeme, (size_t)parts[i].length) != 0 ||
+            (int)strlen(ps->module_parts[i]) != parts[i].length)
+            return 0;
+    }
+    return 1;
+}
 
 struct PendingAttr
 {
@@ -948,6 +1014,7 @@ static Type *make_ptr_chain_dyn(Type *base, int depth)
 
 static int type_sizeof_simple(Type *ty)
 {
+    ty = module_registry_canonical_type(ty);
     if (!ty)
         return 8;
     switch (ty->kind)
@@ -975,6 +1042,8 @@ static int type_sizeof_simple(Type *ty)
         return 0;
     case TY_STRUCT:
         return ty->strct.size_bytes;
+    case TY_IMPORT:
+        return 0;
     default:
         return 8;
     }
@@ -1014,8 +1083,15 @@ static int is_type_start(Parser *ps, Token t)
     default:
         break;
     }
-    if (t.kind == TK_IDENT && (alias_find(ps, t.lexeme, t.length) >= 0 || named_type_find(ps, t.lexeme, t.length) >= 0))
-        return 1;
+    if (t.kind == TK_IDENT)
+    {
+        if (alias_find(ps, t.lexeme, t.length) >= 0 || named_type_find(ps, t.lexeme, t.length) >= 0)
+            return 1;
+        if (parser_find_import_by_alias(ps, t.lexeme, t.length))
+            return 1;
+        if (parser_find_import_by_parts(ps, &t, 1))
+            return 1;
+    }
     return 0;
 }
 
@@ -1083,91 +1159,179 @@ static Type *parse_type_spec(Parser *ps)
     }
     else if (b.kind == TK_IDENT)
     {
-        int ai = alias_find(ps, b.lexeme, b.length);
-        if (ai < 0)
+        Token local_buf[8];
+        Token *tokens = local_buf;
+        int token_count = 0;
+        int token_cap = (int)(sizeof(local_buf) / sizeof(local_buf[0]));
+        tokens[token_count++] = b;
+        Token dot = lexer_peek(ps->lx);
+        while (dot.kind == TK_DOT)
         {
-            // maybe a named struct type
-            Type *nt = named_type_get(ps, b.lexeme, b.length);
-            if (nt)
-                base = nt;
-            else {
-                diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
-                              b.length, b.lexeme);
-                exit(1);
+            lexer_next(ps->lx);
+            Token next_ident = expect(ps, TK_IDENT, "identifier");
+            if (token_count == token_cap)
+            {
+                token_cap *= 2;
+                Token *grown = (Token *)xmalloc((size_t)token_cap * sizeof(Token));
+                memcpy(grown, tokens, (size_t)token_count * sizeof(Token));
+                if (tokens != local_buf)
+                    free(tokens);
+                tokens = grown;
             }
+            tokens[token_count++] = next_ident;
+            dot = lexer_peek(ps->lx);
         }
-        if (ai >= 0) {
-        struct Alias *A = &ps->aliases[ai];
-        if (A->is_generic)
+
+        if (token_count >= 2)
         {
-            Token lt = lexer_next(ps->lx);
-            if (lt.kind != TK_LT)
+            int module_parts = token_count - 1;
+            Token *module_tokens = tokens;
+            Token type_tok = tokens[token_count - 1];
+            const struct ModuleImport *imp = NULL;
+            if (module_parts == 1)
+                imp = parser_find_import_by_alias(ps, module_tokens[0].lexeme, module_tokens[0].length);
+            if (!imp)
+                imp = parser_find_import_by_parts(ps, module_tokens, module_parts);
+            const char *module_full = imp ? imp->full_name : NULL;
+            if (!module_full && parser_module_tokens_match_current(ps, module_tokens, module_parts))
+                module_full = ps->module_full_name;
+            if (!module_full)
             {
-                diag_error_at(lexer_source(ps->lx), lt.line, lt.col,
-                              "expected '<' after generic alias '%.*s'", b.length,
-                              b.lexeme);
+                size_t total_len = 0;
+                for (int i = 0; i < module_parts; ++i)
+                    total_len += (size_t)module_tokens[i].length + 1;
+                char *module_name = (char *)xmalloc(total_len + 1);
+                size_t pos = 0;
+                for (int i = 0; i < module_parts; ++i)
+                {
+                    memcpy(module_name + pos, module_tokens[i].lexeme, (size_t)module_tokens[i].length);
+                    pos += (size_t)module_tokens[i].length;
+                    if (i + 1 < module_parts)
+                        module_name[pos++] = '.';
+                }
+                module_name[pos] = '\0';
+                diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                              "unknown module '%s' for qualified type", module_name);
+                free(module_name);
+                if (tokens != local_buf)
+                    free(tokens);
                 exit(1);
             }
-            Type *arg = parse_type_spec(ps);
-            Token gt = lexer_next(ps->lx);
-            if (gt.kind != TK_GT)
+
+            char *type_name = (char *)xmalloc((size_t)type_tok.length + 1);
+            memcpy(type_name, type_tok.lexeme, (size_t)type_tok.length);
+            type_name[type_tok.length] = '\0';
+
+            Type *resolved = module_registry_lookup_struct(module_full, type_name);
+            if (!resolved)
+                resolved = module_registry_lookup_enum(module_full, type_name);
+            if (resolved)
             {
-                diag_error_at(lexer_source(ps->lx), gt.line, gt.col,
-                              "expected '>' after generic argument");
-                exit(1);
+                base = resolved;
+                free(type_name);
             }
-            base = make_ptr_chain_dyn(arg, A->gen_ptr_depth);
+            else
+            {
+                Type *imp_type = (Type *)xcalloc(1, sizeof(Type));
+                imp_type->kind = TY_IMPORT;
+                imp_type->struct_name = type_name;
+                imp_type->import_module = xstrdup(module_full);
+                imp_type->import_type_name = type_name;
+                base = imp_type;
+            }
+
+            if (tokens != local_buf)
+                free(tokens);
         }
         else
         {
-            Type *bk = NULL;
-            switch (A->base_kind)
+            int ai = alias_find(ps, b.lexeme, b.length);
+            if (ai < 0)
             {
-            case TY_I8:
-                bk = &ti8;
-                break;
-            case TY_U8:
-                bk = &tu8;
-                break;
-            case TY_I16:
-                bk = &ti16;
-                break;
-            case TY_U16:
-                bk = &tu16;
-                break;
-            case TY_I32:
-                bk = &ti32;
-                break;
-            case TY_U32:
-                bk = &tu32;
-                break;
-            case TY_I64:
-                bk = &ti64;
-                break;
-            case TY_U64:
-                bk = &tu64;
-                break;
-            case TY_F32:
-                bk = &tf32;
-                break;
-            case TY_F64:
-                bk = &tf64;
-                break;
-            case TY_F128:
-                bk = &tf128;
-                break;
-            case TY_VOID:
-                bk = &tv;
-                break;
-            case TY_CHAR:
-                bk = &tch;
-                break;
-            default:
-                diag_error("unsupported alias base kind");
-                exit(1);
+                Type *nt = named_type_get(ps, b.lexeme, b.length);
+                if (nt)
+                    base = nt;
+                else
+                {
+                    diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
+                                  b.length, b.lexeme);
+                    exit(1);
+                }
             }
-            base = make_ptr_chain_dyn(bk, A->ptr_depth);
-        }
+            if (ai >= 0)
+            {
+                struct Alias *A = &ps->aliases[ai];
+                if (A->is_generic)
+                {
+                    Token lt = lexer_next(ps->lx);
+                    if (lt.kind != TK_LT)
+                    {
+                        diag_error_at(lexer_source(ps->lx), lt.line, lt.col,
+                                      "expected '<' after generic alias '%.*s'", b.length,
+                                      b.lexeme);
+                        exit(1);
+                    }
+                    Type *arg = parse_type_spec(ps);
+                    Token gt = lexer_next(ps->lx);
+                    if (gt.kind != TK_GT)
+                    {
+                        diag_error_at(lexer_source(ps->lx), gt.line, gt.col,
+                                      "expected '>' after generic argument");
+                        exit(1);
+                    }
+                    base = make_ptr_chain_dyn(arg, A->gen_ptr_depth);
+                }
+                else
+                {
+                    Type *bk = NULL;
+                    switch (A->base_kind)
+                    {
+                    case TY_I8:
+                        bk = &ti8;
+                        break;
+                    case TY_U8:
+                        bk = &tu8;
+                        break;
+                    case TY_I16:
+                        bk = &ti16;
+                        break;
+                    case TY_U16:
+                        bk = &tu16;
+                        break;
+                    case TY_I32:
+                        bk = &ti32;
+                        break;
+                    case TY_U32:
+                        bk = &tu32;
+                        break;
+                    case TY_I64:
+                        bk = &ti64;
+                        break;
+                    case TY_U64:
+                        bk = &tu64;
+                        break;
+                    case TY_F32:
+                        bk = &tf32;
+                        break;
+                    case TY_F64:
+                        bk = &tf64;
+                        break;
+                    case TY_F128:
+                        bk = &tf128;
+                        break;
+                    case TY_VOID:
+                        bk = &tv;
+                        break;
+                    case TY_CHAR:
+                        bk = &tch;
+                        break;
+                    default:
+                        diag_error("unsupported alias base kind");
+                        exit(1);
+                    }
+                    base = make_ptr_chain_dyn(bk, A->ptr_depth);
+                }
+            }
         }
     }
     else if (b.kind == TK_KW_STRUCT)
@@ -2907,6 +3071,9 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
     if (named_type_find(ps, name.lexeme, name.length) < 0)
         named_type_add(ps, name.lexeme, name.length, &ti32, is_exposed);
     enum_type_add(ps, name.lexeme, name.length, is_exposed);
+    char *enum_name_heap = NULL;
+    if (is_exposed && ps->module_full_name)
+        enum_name_heap = dup_token_text(name);
     expect(ps, TK_LBRACE, "{");
     int cur = 0;
     for (;;)
@@ -2937,6 +3104,12 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
     scoped[scoped_len] = '\0';
     enum_const_add(ps, scoped, scoped_len, cur);
     free(scoped);
+        if (enum_name_heap && ps->module_full_name)
+        {
+            char *value_name = dup_token_text(id);
+            module_registry_register_enum_value(ps->module_full_name, enum_name_heap, value_name, cur);
+            free(value_name);
+        }
         // next
         Token sep = lexer_peek(ps->lx);
         if (sep.kind == TK_COMMA) { lexer_next(ps->lx); cur++; continue; }
@@ -2945,6 +3118,11 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
         cur++;
     }
     expect(ps, TK_SEMI, ";");
+    if (enum_name_heap && ps->module_full_name)
+    {
+        module_registry_register_enum(ps->module_full_name, enum_name_heap, &ti32);
+        free(enum_name_heap);
+    }
 }
 
 static void parse_struct_decl(Parser *ps, int is_exposed)
@@ -3006,5 +3184,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
     st->strct.field_names = fnames; st->strct.field_types = ftypes; st->strct.field_offsets = foff; st->strct.field_count = fcnt; st->strct.size_bytes = offset;
     // register named type
     named_type_add(ps, name.lexeme, name.length, st, is_exposed);
+    if (is_exposed && ps->module_full_name)
+        module_registry_register_struct(ps->module_full_name, st);
     expect(ps, TK_SEMI, ";");
 }

@@ -117,7 +117,7 @@ expose fun main() -> i32
 
     TC.SmallTest* test = &vari;
 
-    Element elem = SetElement;
+    Element elem = Element.SetElement;
 
     test=>testVar = 45;
 

@@ -1,7 +1,5 @@
 extend from "C" i32 printf(char *, _vaargs_);
-noreturn extend from "C" void exit(int);
 extend from "C" void *malloc(int);
-extend fun testce() -> i32;
 
 struct TestThing
 {
@@ -9,28 +7,10 @@ struct TestThing
     u8 b;
 };
 
+[EntryPoint]
 fun main() -> i32
 {
-    TestThing* test = malloc(sizeof(TestThing)) as TestThing*;
-    test=>a = 5;
-    test=>b = 10;
-
-    printf("MinicCB works! %d\n", (test=>b as i32) * test=>a); // expect 50
-    testexit();
+    f32 val = (4 as f32);
+    printf("Size of TestThing: %d\n", sizeof(TestThing));
     ret 0;
-}
-
-noreturn fun testexit() -> void
-{
-    i32 a = testce();
-    testexit2(a);
-    ret;
-}
-
-noreturn fun testexit2(i32 b) -> void
-{
-    exit(b);
-
-    // should not reach here
-    ret;
 }

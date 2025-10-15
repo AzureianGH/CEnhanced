@@ -16,6 +16,7 @@ add_library(chance_core
     src/sema.c
     src/includes.c
     src/codegen_ccb.c
+    src/module_registry.c
     src/util.c
 )
 

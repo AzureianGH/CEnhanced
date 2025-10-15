@@ -6,6 +6,13 @@ expose struct SmallTest
     u8 smallValue;
 };
 
+expose enum Idk
+{
+    First = 1,
+    Second = 2,
+    Third = 3
+};
+
 expose fun test_chance() -> i32
 {
     ret 67;

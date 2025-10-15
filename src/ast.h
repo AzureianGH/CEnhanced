@@ -120,6 +120,7 @@ typedef enum
     TY_CHAR,
     TY_PTR,
     TY_STRUCT,
+    TY_IMPORT,
 } TypeKind;
 
 typedef struct Type
@@ -136,6 +137,9 @@ typedef struct Type
         int size_bytes;
     } strct;
     int is_exposed; // visibility flag for module system
+    const char *import_module;
+    const char *import_type_name;
+    struct Type *import_resolved;
 } Type;
 
 typedef struct ModulePath

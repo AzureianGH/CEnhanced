@@ -1,8 +1,20 @@
 #include "ast.h"
+#include "module_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+static Type *canonicalize_type_deep(Type *ty)
+{
+    ty = module_registry_canonical_type(ty);
+    if (ty && ty->kind == TY_PTR && ty->pointee)
+    {
+        Type *resolved = canonicalize_type_deep(ty->pointee);
+        if (resolved && resolved != ty->pointee)
+            ty->pointee = resolved;
+    }
+    return ty;
+}
 
 struct SymTable
 {
@@ -418,6 +430,8 @@ static int check_exposed_function_signature(const Node *fn)
 }
 static int type_equal(Type *a, Type *b)
 {
+    a = canonicalize_type_deep(a);
+    b = canonicalize_type_deep(b);
     if (a == b)
         return 1;
     if (!a || !b)
@@ -649,6 +663,7 @@ static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target
 {
     if (!init || !target)
         return;
+    target = canonicalize_type_deep(target);
     if (init->kind != ND_INIT_LIST)
     {
         check_expr(sc, init);
@@ -818,6 +833,7 @@ static void scope_add(SemaContext *sc, const char *name, Type *ty,
 {
     if (!sc->scope)
         scope_push(sc);
+    ty = canonicalize_type_deep(ty);
     struct Scope *s = sc->scope;
     if (s->local_count < 128)
     {
@@ -926,13 +942,15 @@ static void check_expr(SemaContext *sc, Node *e)
                           e->var_ref);
             exit(1);
         }
-        e->type = t;
+        e->type = canonicalize_type_deep(t);
         return;
     }
     if (e->kind == ND_SIZEOF)
     {
         // size of a type known at parse-time; stored in e->var_type
-        Type *ty = e->var_type ? e->var_type : &ty_i32;
+        Type *ty = e->var_type ? canonicalize_type_deep(e->var_type) : &ty_i32;
+        if (ty && ty->kind == TY_IMPORT)
+            ty = canonicalize_type_deep(ty);
         int sz = 0;
         switch (ty->kind)
         {
@@ -960,8 +978,8 @@ static void check_expr(SemaContext *sc, Node *e)
             check_expr(sc, e->lhs);
             target = e->lhs->type;
         }
+        target = canonicalize_type_deep(target);
         // Build a string literal node carrying the formatted type name
-        const char *prefix = NULL;
         char buf[256];
         buf[0] = '\0';
         if (!target)
@@ -970,37 +988,40 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         else
         {
-            // Built-ins tag
-            const char *tn = NULL;
             switch (target->kind)
             {
-            case TY_I8: tn = "i8"; prefix = "<built-in>"; break;
-            case TY_U8: tn = "u8"; prefix = "<built-in>"; break;
-            case TY_I16: tn = "i16"; prefix = "<built-in>"; break;
-            case TY_U16: tn = "u16"; prefix = "<built-in>"; break;
-            case TY_I32: tn = "i32"; prefix = "<built-in>"; break;
-            case TY_U32: tn = "u32"; prefix = "<built-in>"; break;
-            case TY_I64: tn = "i64"; prefix = "<built-in>"; break;
-            case TY_U64: tn = "u64"; prefix = "<built-in>"; break;
-            case TY_F32: tn = "f32"; prefix = "<built-in>"; break;
-            case TY_F64: tn = "f64"; prefix = "<built-in>"; break;
-            case TY_F128: tn = "f128"; prefix = "<built-in>"; break;
-            case TY_VOID: tn = "void"; prefix = "<built-in>"; break;
-            case TY_CHAR: tn = "char"; prefix = "<built-in>"; break;
-            case TY_PTR:
-                tn = "ptr"; prefix = "<built-in>"; break;
             case TY_STRUCT:
-                prefix = target->struct_name ? target->struct_name : "<struct>";
-                tn = "struct";
+            {
+                const char *mod = module_registry_find_struct_module(target);
+                const char *name = target->struct_name ? target->struct_name : "<struct>";
+                if (mod && *mod)
+                    snprintf(buf, sizeof(buf), "%s.%s::struct", mod, name);
+                else
+                    snprintf(buf, sizeof(buf), "%s::struct", name);
                 break;
-            default:
-                prefix = "<built-in>"; tn = "?"; break;
             }
-            // If parse recorded an alias name in var_ref, show as "<char*/alias>::string" style
-            if (e->var_ref)
+            case TY_I8: snprintf(buf, sizeof(buf), "<built-in>::i8"); break;
+            case TY_U8: snprintf(buf, sizeof(buf), "<built-in>::u8"); break;
+            case TY_I16: snprintf(buf, sizeof(buf), "<built-in>::i16"); break;
+            case TY_U16: snprintf(buf, sizeof(buf), "<built-in>::u16"); break;
+            case TY_I32: snprintf(buf, sizeof(buf), "<built-in>::i32"); break;
+            case TY_U32: snprintf(buf, sizeof(buf), "<built-in>::u32"); break;
+            case TY_I64: snprintf(buf, sizeof(buf), "<built-in>::i64"); break;
+            case TY_U64: snprintf(buf, sizeof(buf), "<built-in>::u64"); break;
+            case TY_F32: snprintf(buf, sizeof(buf), "<built-in>::f32"); break;
+            case TY_F64: snprintf(buf, sizeof(buf), "<built-in>::f64"); break;
+            case TY_F128: snprintf(buf, sizeof(buf), "<built-in>::f128"); break;
+            case TY_VOID: snprintf(buf, sizeof(buf), "<built-in>::void"); break;
+            case TY_CHAR: snprintf(buf, sizeof(buf), "<built-in>::char"); break;
+            case TY_PTR: snprintf(buf, sizeof(buf), "<built-in>::ptr"); break;
+            default:
+                snprintf(buf, sizeof(buf), "<built-in>::?");
+                break;
+            }
+            if (e->var_ref && target->kind != TY_STRUCT)
+            {
                 snprintf(buf, sizeof(buf), "<char*/alias>::%s", e->var_ref);
-            else
-                snprintf(buf, sizeof(buf), "%s::%s", prefix ? prefix : "<built-in>", tn);
+            }
         }
         // Convert to string literal
         Node *s = (Node *)xcalloc(1, sizeof(Node));
@@ -1026,7 +1047,7 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, e->lhs);
-        Type *base = e->lhs->type;
+        Type *base = canonicalize_type_deep(e->lhs->type);
         if (e->is_pointer_deref)
         {
             if (!base || base->kind != TY_PTR || !base->pointee)
@@ -1035,7 +1056,7 @@ static void check_expr(SemaContext *sc, Node *e)
                               "'->' requires pointer to struct");
                 exit(1);
             }
-            base = base->pointee;
+            base = canonicalize_type_deep(base->pointee);
         }
         else
         {
@@ -1472,7 +1493,10 @@ static int sema_check_function(SemaContext *sc, Node *fn)
     // bind parameters in a new scope
     scope_push(sc);
     for (int i = 0; i < fn->param_count; i++)
+    {
+        fn->param_types[i] = canonicalize_type_deep(fn->param_types[i]);
         scope_add(sc, fn->param_names[i], fn->param_types[i], 0);
+    }
     Node *ret = NULL;
     if (body->kind == ND_RET)
     {
@@ -1497,6 +1521,7 @@ static int sema_check_function(SemaContext *sc, Node *fn)
                     scope_pop(sc);
                     return 1;
                 }
+                s->var_type = canonicalize_type_deep(s->var_type);
                 scope_add(sc, s->var_name, s->var_type, s->var_is_const);
                 if (s->rhs)
                 {
