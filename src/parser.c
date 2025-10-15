@@ -1766,6 +1766,23 @@ static Node *parse_unary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (p.kind == TK_STAR)
+    {
+        lexer_next(ps->lx);
+        Node *base = parse_unary(ps);
+        Node *zero = new_node(ND_INT);
+        zero->int_val = 0;
+        zero->line = p.line;
+        zero->col = p.col;
+        zero->src = lexer_source(ps->lx);
+        Node *ix = new_node(ND_INDEX);
+        ix->lhs = base;
+        ix->rhs = zero;
+        ix->line = p.line;
+        ix->col = p.col;
+        ix->src = lexer_source(ps->lx);
+        return ix;
+    }
     return parse_postfix(ps);
 }
 

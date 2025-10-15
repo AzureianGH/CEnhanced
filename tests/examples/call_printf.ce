@@ -119,11 +119,22 @@ expose fun main() -> i32
 
     TC.SmallTest* test = &vari;
 
-    // NATHAN - REMEMBER TO FIX THIS BUG
-    // WHAT IS THE BUG? THE BUG IS THAT UPON DEREFERENCING A POINTER TO A STRUCT,
-    // THE TYPECHECKER THINKS IT'S AN I32, NOT THE STRUCT TYPE.
+    TC.SmallTest deref = *test;
 
-    printf("Type of deref test: %d\n", test[0]);
+    printf("Type of deref test: %d\n", deref.testVar); // expect 44
+
+    i32 testint = 123;
+    i32* testintp = &testint;
+    i32** testintpp = &testintp;
+    printf("Ptrptr deref: %d\n", testintpp[0][0]); // expect 123
+
+    TC.SmallTest* addptr = malloc(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
+    addptr[0] = construct_thing();
+    addptr[1] = another;
+
+    printf("addptr[0].smallValue = %d\n", (*addptr).smallValue); // expect 5
+    printf("addptr[1].smallValue = %d\n", (*(addptr + 1 * 2 / 2)).smallValue); // expect 123, optimized constant folding
+
 
     i32* testintptr = test as i32*;
     printf("testVar via intptr: %p\n", testintptr);

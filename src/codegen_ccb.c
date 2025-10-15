@@ -177,8 +177,16 @@ static bool ccb_emit_store_indirect(StringList *body, CCValueType ty);
 static int ccb_emit_convert_between(CcbFunctionBuilder *fb, CCValueType from_ty, CCValueType to_ty, const Node *node);
 static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCValueType *out_elem_ty, const Type **out_elem_type);
 static int ccb_emit_member_address(CcbFunctionBuilder *fb, const Node *expr, CCValueType *out_field_ty, const Type **out_field_type);
+static size_t ccb_pointer_elem_size(const Type *ptr_type);
+static int ccb_emit_pointer_add_like(CcbFunctionBuilder *fb, const Node *expr, bool is_add);
+static int ccb_emit_pointer_difference(CcbFunctionBuilder *fb, const Node *expr);
 static int ccb_emit_struct_zero(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *struct_type);
 static int ccb_emit_struct_initializer(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *struct_type, const Node *init);
+static bool type_is_address_only(const Type *ty);
+static int ccb_emit_pointer_offset(CcbFunctionBuilder *fb, int offset, const Node *node);
+static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type, CcbLocal *dst_ptr, CcbLocal *src_ptr);
+static bool ccb_emit_load_local(CcbFunctionBuilder *fb, const CcbLocal *local);
+static bool ccb_emit_store_local(CcbFunctionBuilder *fb, const CcbLocal *local);
 static size_t ccb_type_size_bytes(const Type *ty);
 static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym);
 static int ccb_module_emit_externs(CcbModule *mod, const CodegenOptions *opts);
@@ -1491,6 +1499,152 @@ static size_t ccb_type_size_bytes(const Type *ty)
     }
 }
 
+static size_t ccb_pointer_elem_size(const Type *ptr_type)
+{
+    if (!ptr_type || ptr_type->kind != TY_PTR)
+        return 1;
+    const Type *elem = ptr_type->pointee;
+    size_t size = ccb_type_size_bytes(elem);
+    if (size == 0)
+        size = 1;
+    return size;
+}
+
+static int ccb_emit_pointer_add_like(CcbFunctionBuilder *fb, const Node *expr, bool is_add)
+{
+    if (!fb || !expr || !expr->lhs || !expr->rhs)
+        return 1;
+
+    const Node *lhs = expr->lhs;
+    const Node *rhs = expr->rhs;
+    Type *lhs_type = lhs->type;
+    Type *rhs_type = rhs->type;
+    bool lhs_is_ptr = lhs_type && lhs_type->kind == TY_PTR;
+    bool rhs_is_ptr = rhs_type && rhs_type->kind == TY_PTR;
+    const Node *ptr_node = lhs_is_ptr ? lhs : rhs;
+    const Node *idx_node = lhs_is_ptr ? rhs : lhs;
+    const Type *ptr_type = ptr_node ? ptr_node->type : NULL;
+    if (!ptr_type || ptr_type->kind != TY_PTR)
+    {
+        diag_error_at(expr->src, expr->line, expr->col,
+                      "internal error: pointer arithmetic missing pointer operand");
+        return 1;
+    }
+
+    size_t elem_size = ccb_pointer_elem_size(ptr_type);
+
+    CcbLocal *lhs_local = ccb_local_add(fb, NULL, lhs_type, false, false);
+    if (!lhs_local)
+        return 1;
+    if (ccb_emit_expr_basic(fb, lhs))
+        return 1;
+    if (!ccb_emit_store_local(fb, lhs_local))
+        return 1;
+
+    CcbLocal *rhs_local = ccb_local_add(fb, NULL, rhs_type, false, false);
+    if (!rhs_local)
+        return 1;
+    if (ccb_emit_expr_basic(fb, rhs))
+        return 1;
+    if (!ccb_emit_store_local(fb, rhs_local))
+        return 1;
+
+    CcbLocal *ptr_local = lhs_is_ptr ? lhs_local : rhs_local;
+    CcbLocal *idx_local = lhs_is_ptr ? rhs_local : lhs_local;
+
+    if (!ccb_value_type_is_integer(idx_local->value_type))
+    {
+        diag_error_at(expr->src, expr->line, expr->col,
+                      "pointer arithmetic requires integer offset");
+        return 1;
+    }
+
+    if (!ccb_emit_load_local(fb, ptr_local))
+        return 1;
+    if (ccb_emit_convert_between(fb, ptr_local->value_type, CC_TYPE_I64, ptr_node))
+        return 1;
+
+    if (!ccb_emit_load_local(fb, idx_local))
+        return 1;
+    if (ccb_emit_convert_between(fb, idx_local->value_type, CC_TYPE_I64, idx_node))
+        return 1;
+
+    if (elem_size > 1)
+    {
+        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  binop mul %s", cc_type_name(CC_TYPE_I64)))
+            return 1;
+    }
+
+    const char *op = is_add ? "add" : "sub";
+    if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(CC_TYPE_I64)))
+        return 1;
+
+    if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+        return 1;
+
+    return 0;
+}
+
+static int ccb_emit_pointer_difference(CcbFunctionBuilder *fb, const Node *expr)
+{
+    if (!fb || !expr || !expr->lhs || !expr->rhs)
+        return 1;
+
+    const Node *lhs = expr->lhs;
+    const Node *rhs = expr->rhs;
+    Type *lhs_type = lhs->type;
+    Type *rhs_type = rhs->type;
+    if (!lhs_type || lhs_type->kind != TY_PTR || !rhs_type || rhs_type->kind != TY_PTR)
+    {
+        diag_error_at(expr->src, expr->line, expr->col,
+                      "pointer subtraction requires pointer operands");
+        return 1;
+    }
+
+    size_t elem_size = ccb_pointer_elem_size(lhs_type);
+
+    CcbLocal *lhs_local = ccb_local_add(fb, NULL, lhs_type, false, false);
+    if (!lhs_local)
+        return 1;
+    if (ccb_emit_expr_basic(fb, lhs))
+        return 1;
+    if (!ccb_emit_store_local(fb, lhs_local))
+        return 1;
+
+    CcbLocal *rhs_local = ccb_local_add(fb, NULL, rhs_type, false, false);
+    if (!rhs_local)
+        return 1;
+    if (ccb_emit_expr_basic(fb, rhs))
+        return 1;
+    if (!ccb_emit_store_local(fb, rhs_local))
+        return 1;
+
+    if (!ccb_emit_load_local(fb, lhs_local))
+        return 1;
+    if (ccb_emit_convert_between(fb, lhs_local->value_type, CC_TYPE_I64, lhs))
+        return 1;
+
+    if (!ccb_emit_load_local(fb, rhs_local))
+        return 1;
+    if (ccb_emit_convert_between(fb, rhs_local->value_type, CC_TYPE_I64, rhs))
+        return 1;
+
+    if (!string_list_appendf(&fb->body, "  binop sub %s", cc_type_name(CC_TYPE_I64)))
+        return 1;
+
+    if (elem_size > 1)
+    {
+        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  binop div %s", cc_type_name(CC_TYPE_I64)))
+            return 1;
+    }
+
+    return 0;
+}
+
 static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCValueType *out_elem_ty, const Type **out_elem_type)
 {
     if (!fb || !expr || expr->kind != ND_INDEX)
@@ -1561,8 +1715,12 @@ static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
         elem_type = base_type->pointee;
 
     CCValueType elem_cc_ty = map_type_to_cc(elem_type);
-    if (elem_cc_ty == CC_TYPE_INVALID || elem_cc_ty == CC_TYPE_VOID)
+    if (elem_type && elem_type->kind == TY_STRUCT) {
+        // Struct: use struct type
+        // (leave elem_cc_ty as mapped)
+    } else if (elem_cc_ty == CC_TYPE_INVALID || elem_cc_ty == CC_TYPE_VOID) {
         elem_cc_ty = CC_TYPE_I32;
+    }
 
     size_t elem_size = elem_type ? ccb_type_size_bytes(elem_type) : ccb_value_type_size(elem_cc_ty);
     if (elem_size == 0)
@@ -1665,6 +1823,97 @@ static int ccb_emit_member_address(CcbFunctionBuilder *fb, const Node *expr, CCV
     return 0;
 }
 
+static bool type_is_address_only(const Type *ty)
+{
+    return ty && ty->kind == TY_STRUCT;
+}
+
+static int ccb_emit_pointer_offset(CcbFunctionBuilder *fb, int offset, const Node *node)
+{
+    if (!fb)
+        return 1;
+    if (offset == 0)
+        return 0;
+    if (ccb_emit_convert_between(fb, CC_TYPE_PTR, CC_TYPE_I64, node))
+        return 1;
+    if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)offset))
+        return 1;
+    if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
+        return 1;
+    if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, node))
+        return 1;
+    return 0;
+}
+
+static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type, CcbLocal *dst_ptr, CcbLocal *src_ptr)
+{
+    if (!fb || !struct_type || struct_type->kind != TY_STRUCT || !dst_ptr || !src_ptr)
+        return 0;
+
+    int field_count = struct_type->strct.field_count;
+    for (int i = 0; i < field_count; ++i)
+    {
+        const Type *field_type = struct_type->strct.field_types ? struct_type->strct.field_types[i] : NULL;
+        if (!field_type)
+            continue;
+
+        int field_offset = struct_type->strct.field_offsets ? struct_type->strct.field_offsets[i] : 0;
+
+        if (type_is_address_only(field_type))
+        {
+            Type *field_ptr_ty = type_ptr((Type *)field_type);
+
+            CcbLocal *dst_field = ccb_local_add(fb, NULL, field_ptr_ty, false, false);
+            if (!dst_field)
+                return 1;
+            if (!ccb_emit_load_local(fb, dst_ptr))
+                return 1;
+            if (ccb_emit_pointer_offset(fb, field_offset, NULL))
+                return 1;
+            if (!ccb_emit_store_local(fb, dst_field))
+                return 1;
+
+            CcbLocal *src_field = ccb_local_add(fb, NULL, field_ptr_ty, false, false);
+            if (!src_field)
+                return 1;
+            if (!ccb_emit_load_local(fb, src_ptr))
+                return 1;
+            if (ccb_emit_pointer_offset(fb, field_offset, NULL))
+                return 1;
+            if (!ccb_emit_store_local(fb, src_field))
+                return 1;
+
+            if (ccb_emit_struct_copy(fb, field_type, dst_field, src_field))
+                return 1;
+            continue;
+        }
+
+        CCValueType field_cc_ty = map_type_to_cc(field_type);
+        if (!ccb_emit_load_local(fb, src_ptr))
+            return 1;
+        if (ccb_emit_pointer_offset(fb, field_offset, NULL))
+            return 1;
+        if (!ccb_emit_load_indirect(&fb->body, field_cc_ty))
+            return 1;
+
+        CcbLocal *value_tmp = ccb_local_add(fb, NULL, (Type *)field_type, false, false);
+        if (!value_tmp)
+            return 1;
+        if (!ccb_emit_store_local(fb, value_tmp))
+            return 1;
+
+        if (!ccb_emit_load_local(fb, dst_ptr))
+            return 1;
+        if (ccb_emit_pointer_offset(fb, field_offset, NULL))
+            return 1;
+        if (!ccb_emit_load_local(fb, value_tmp))
+            return 1;
+        if (!ccb_emit_store_indirect(&fb->body, field_cc_ty))
+            return 1;
+    }
+    return 0;
+}
+
 static int ccb_emit_struct_zero(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *struct_type)
 {
     if (!fb || !var_name || !struct_type || struct_type->kind != TY_STRUCT)
@@ -1709,11 +1958,74 @@ static int ccb_emit_struct_initializer(CcbFunctionBuilder *fb, const Node *var_d
     if (!init)
         return 0;
 
+    Node var_ref = {0};
+    var_ref.kind = ND_VAR;
+    var_ref.var_ref = var_name;
+    var_ref.type = (Type *)struct_type;
+    var_ref.src = var_decl ? var_decl->src : NULL;
+    var_ref.line = var_decl ? var_decl->line : 0;
+    var_ref.col = var_decl ? var_decl->col : 0;
+
     if (init->kind != ND_INIT_LIST)
     {
-        diag_error_at(init->src, init->line, init->col,
-                      "unsupported initializer for struct local");
-        return 1;
+        if (!init->type || init->type->kind != TY_STRUCT)
+        {
+            diag_error_at(init->src, init->line, init->col,
+                          "unsupported initializer for struct local");
+            return 1;
+        }
+
+        int field_count = struct_type->strct.field_count;
+        for (int i = 0; i < field_count; ++i)
+        {
+            Node member = {0};
+            member.kind = ND_MEMBER;
+            member.lhs = &var_ref;
+            member.field_index = i;
+            member.field_offset = struct_type->strct.field_offsets ? struct_type->strct.field_offsets[i] : 0;
+            member.type = struct_type->strct.field_types ? struct_type->strct.field_types[i] : NULL;
+            member.is_pointer_deref = 0;
+            member.src = var_decl ? var_decl->src : NULL;
+            member.line = var_decl ? var_decl->line : 0;
+            member.col = var_decl ? var_decl->col : 0;
+
+            CCValueType field_ty = CC_TYPE_I32;
+            const Type *field_type = NULL;
+            if (ccb_emit_member_address(fb, &member, &field_ty, &field_type))
+                return 1;
+
+            if (!field_type)
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "unknown field type for struct copy");
+                return 1;
+            }
+
+            Node src_member = {0};
+            src_member.kind = ND_MEMBER;
+            src_member.lhs = (Node *)init;
+            src_member.field_index = i;
+            src_member.field_offset = struct_type->strct.field_offsets ? struct_type->strct.field_offsets[i] : 0;
+            src_member.type = (Type *)field_type;
+            src_member.is_pointer_deref = 0;
+            src_member.src = init->src;
+            src_member.line = init->line;
+            src_member.col = init->col;
+
+            if (ccb_emit_expr_basic(fb, &src_member))
+                return 1;
+
+            CCValueType value_ty = ccb_type_for_expr(&src_member);
+            if (value_ty == CC_TYPE_INVALID)
+                value_ty = map_type_to_cc(field_type);
+
+            if (ccb_emit_convert_between(fb, value_ty, field_ty, &src_member))
+                return 1;
+
+            if (!ccb_emit_store_indirect(&fb->body, field_ty))
+                return 1;
+        }
+        return 0;
     }
 
     if (init->init.is_zero)
@@ -1723,14 +2035,6 @@ static int ccb_emit_struct_initializer(CcbFunctionBuilder *fb, const Node *var_d
 
     if (ccb_emit_struct_zero(fb, var_decl, var_name, struct_type))
         return 1;
-
-    Node var_ref = {0};
-    var_ref.kind = ND_VAR;
-    var_ref.var_ref = var_name;
-    var_ref.type = (Type *)struct_type;
-    var_ref.src = var_decl ? var_decl->src : NULL;
-    var_ref.line = var_decl ? var_decl->line : 0;
-    var_ref.col = var_decl ? var_decl->col : 0;
 
     for (int i = 0; i < init->init.count; ++i)
     {
@@ -1809,11 +2113,36 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
     }
     case ND_ADD:
     {
+        if (!expr->lhs || !expr->rhs)
+        {
+            diag_error_at(expr->src, expr->line, expr->col, "addition missing operand");
+            return 1;
+        }
+
+        Type *lhs_type = expr->lhs->type;
+        Type *rhs_type = expr->rhs->type;
+        bool lhs_is_ptr = lhs_type && lhs_type->kind == TY_PTR;
+        bool rhs_is_ptr = rhs_type && rhs_type->kind == TY_PTR;
+        CCValueType lhs_cc = ccb_type_for_expr(expr->lhs);
+        CCValueType rhs_cc = ccb_type_for_expr(expr->rhs);
+        bool lhs_is_int = ccb_value_type_is_integer(lhs_cc);
+        bool rhs_is_int = ccb_value_type_is_integer(rhs_cc);
+
+        if ((lhs_is_ptr && rhs_is_int) || (rhs_is_ptr && lhs_is_int))
+            return ccb_emit_pointer_add_like(fb, expr, true);
+
+        if (lhs_is_ptr || rhs_is_ptr)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "pointer addition requires exactly one pointer and one integer");
+            return 1;
+        }
+
         if (ccb_emit_expr_basic(fb, expr->lhs))
             return 1;
         if (ccb_emit_expr_basic(fb, expr->rhs))
             return 1;
-        CCValueType ty = map_type_to_cc(expr->type ? expr->type : (expr->lhs ? expr->lhs->type : NULL));
+        CCValueType ty = map_type_to_cc(expr->type ? expr->type : lhs_type);
         if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(ty)))
             return 1;
         return 0;
@@ -1851,11 +2180,39 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
     }
     case ND_SUB:
     {
+        if (!expr->lhs || !expr->rhs)
+        {
+            diag_error_at(expr->src, expr->line, expr->col, "subtraction missing operand");
+            return 1;
+        }
+
+        Type *lhs_type = expr->lhs->type;
+        Type *rhs_type = expr->rhs->type;
+        bool lhs_is_ptr = lhs_type && lhs_type->kind == TY_PTR;
+        bool rhs_is_ptr = rhs_type && rhs_type->kind == TY_PTR;
+        CCValueType lhs_cc = ccb_type_for_expr(expr->lhs);
+        CCValueType rhs_cc = ccb_type_for_expr(expr->rhs);
+        bool lhs_is_int = ccb_value_type_is_integer(lhs_cc);
+        bool rhs_is_int = ccb_value_type_is_integer(rhs_cc);
+
+        if (lhs_is_ptr && rhs_is_ptr)
+            return ccb_emit_pointer_difference(fb, expr);
+
+        if (lhs_is_ptr && rhs_is_int)
+            return ccb_emit_pointer_add_like(fb, expr, false);
+
+        if (rhs_is_ptr)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "cannot subtract a pointer from a non-pointer");
+            return 1;
+        }
+
         if (ccb_emit_expr_basic(fb, expr->lhs))
             return 1;
         if (ccb_emit_expr_basic(fb, expr->rhs))
             return 1;
-        CCValueType ty = map_type_to_cc(expr->type ? expr->type : (expr->lhs ? expr->lhs->type : NULL));
+        CCValueType ty = map_type_to_cc(expr->type ? expr->type : lhs_type);
         if (!string_list_appendf(&fb->body, "  binop sub %s", cc_type_name(ty)))
             return 1;
         return 0;
@@ -1911,22 +2268,40 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         }
 
         CCValueType val_ty = local->value_type;
-        if (!ccb_value_type_is_integer(val_ty))
+        bool is_ptr = (val_ty == CC_TYPE_PTR);
+        if (!ccb_value_type_is_integer(val_ty) && !is_ptr)
         {
             diag_error_at(expr->src, expr->line, expr->col,
-                          "%s only supported on integer locals",
+                          "%s only supported on integer or pointer locals",
                           expr->kind == ND_PREINC ? "pre-increment" : "pre-decrement");
             return 1;
         }
 
-        if (!ccb_emit_load_local(fb, local))
-            return 1;
-        if (!ccb_emit_const(&fb->body, val_ty, 1))
-            return 1;
-
+        size_t elem_size = is_ptr ? ccb_pointer_elem_size(local->type) : 1;
         const char *op = expr->kind == ND_PREINC ? "add" : "sub";
-        if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(val_ty)))
-            return 1;
+
+        if (is_ptr)
+        {
+            if (!ccb_emit_load_local(fb, local))
+                return 1;
+            if (ccb_emit_convert_between(fb, val_ty, CC_TYPE_I64, expr))
+                return 1;
+            if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(CC_TYPE_I64)))
+                return 1;
+            if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+                return 1;
+        }
+        else
+        {
+            if (!ccb_emit_load_local(fb, local))
+                return 1;
+            if (!ccb_emit_const(&fb->body, val_ty, 1))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(val_ty)))
+                return 1;
+        }
 
         if (!ccb_emit_store_local(fb, local))
             return 1;
@@ -1964,13 +2339,17 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         }
 
         CCValueType val_ty = local->value_type;
-        if (!ccb_value_type_is_integer(val_ty))
+        bool is_ptr = (val_ty == CC_TYPE_PTR);
+        if (!ccb_value_type_is_integer(val_ty) && !is_ptr)
         {
             diag_error_at(expr->src, expr->line, expr->col,
-                          "%s only supported on integer locals",
+                          "%s only supported on integer or pointer locals",
                           expr->kind == ND_POSTINC ? "post-increment" : "post-decrement");
             return 1;
         }
+
+        size_t elem_size = is_ptr ? ccb_pointer_elem_size(local->type) : 1;
+        const char *op = expr->kind == ND_POSTINC ? "add" : "sub";
 
         if (!ccb_emit_load_local(fb, local))
             return 1;
@@ -1989,12 +2368,24 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
 
         if (!ccb_emit_load_local(fb, local))
             return 1;
-        if (!ccb_emit_const(&fb->body, val_ty, 1))
-            return 1;
-
-        const char *op = expr->kind == ND_POSTINC ? "add" : "sub";
-        if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(val_ty)))
-            return 1;
+        if (is_ptr)
+        {
+            if (ccb_emit_convert_between(fb, val_ty, CC_TYPE_I64, expr))
+                return 1;
+            if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(CC_TYPE_I64)))
+                return 1;
+            if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+                return 1;
+        }
+        else
+        {
+            if (!ccb_emit_const(&fb->body, val_ty, 1))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(val_ty)))
+                return 1;
+        }
 
         if (!ccb_emit_store_local(fb, local))
             return 1;
@@ -2219,6 +2610,12 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         if (ccb_emit_index_address(fb, expr, &elem_ty, &elem_type))
             return 1;
 
+        if (elem_type && elem_type->kind == TY_STRUCT)
+        {
+            // Address of struct element is already on the stack
+            return 0;
+        }
+
         if (!ccb_emit_load_indirect(&fb->body, elem_ty))
             return 1;
 
@@ -2236,8 +2633,15 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
     case ND_MEMBER:
     {
         CCValueType field_ty = CC_TYPE_I32;
-        if (ccb_emit_member_address(fb, expr, &field_ty, NULL))
+        const Type *field_type = NULL;
+        if (ccb_emit_member_address(fb, expr, &field_ty, &field_type))
             return 1;
+
+        if (field_type && field_type->kind == TY_STRUCT)
+        {
+            // Struct fields are handled by address; caller will copy as needed
+            return 0;
+        }
 
         if (!ccb_emit_load_indirect(&fb->body, field_ty))
             return 1;
@@ -2426,6 +2830,45 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
                 return 1;
             }
 
+            if (local->is_address_only && type_is_address_only(local->type))
+            {
+                Type *ptr_ty = type_ptr(local->type);
+                CcbLocal *dst_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                if (!dst_ptr)
+                    return 1;
+                if (!ccb_emit_load_local(fb, local))
+                    return 1;
+                if (!ccb_emit_store_local(fb, dst_ptr))
+                    return 1;
+
+                if (ccb_emit_expr_basic(fb, expr->rhs))
+                    return 1;
+
+                CCValueType rhs_ty = ccb_type_for_expr(expr->rhs);
+                if (rhs_ty != CC_TYPE_PTR)
+                {
+                    if (ccb_emit_convert_between(fb, rhs_ty, CC_TYPE_PTR, expr->rhs))
+                        return 1;
+                }
+
+                CcbLocal *src_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                if (!src_ptr)
+                    return 1;
+                if (!ccb_emit_store_local(fb, src_ptr))
+                    return 1;
+
+                if (ccb_emit_struct_copy(fb, local->type, dst_ptr, src_ptr))
+                    return 1;
+
+                CCValueType result_ty = ccb_type_for_expr(expr);
+                if (result_ty != CC_TYPE_VOID)
+                {
+                    if (!ccb_emit_load_local(fb, local))
+                        return 1;
+                }
+                return 0;
+            }
+
             if (ccb_emit_expr_basic(fb, expr->rhs))
                 return 1;
             if (!ccb_emit_store_local(fb, local))
@@ -2445,6 +2888,43 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             const Type *elem_type = NULL;
             if (ccb_emit_index_address(fb, target, &elem_ty, &elem_type))
                 return 1;
+
+            if (type_is_address_only(elem_type))
+            {
+                Type *ptr_ty = type_ptr((Type *)elem_type);
+                CcbLocal *dst_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                if (!dst_ptr)
+                    return 1;
+                if (!ccb_emit_store_local(fb, dst_ptr))
+                    return 1;
+
+                if (ccb_emit_expr_basic(fb, expr->rhs))
+                    return 1;
+
+                CCValueType rhs_ty = ccb_type_for_expr(expr->rhs);
+                if (rhs_ty != CC_TYPE_PTR)
+                {
+                    if (ccb_emit_convert_between(fb, rhs_ty, CC_TYPE_PTR, expr->rhs))
+                        return 1;
+                }
+
+                CcbLocal *src_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                if (!src_ptr)
+                    return 1;
+                if (!ccb_emit_store_local(fb, src_ptr))
+                    return 1;
+
+                if (ccb_emit_struct_copy(fb, elem_type, dst_ptr, src_ptr))
+                    return 1;
+
+                CCValueType result_ty = ccb_type_for_expr(expr);
+                if (result_ty != CC_TYPE_VOID)
+                {
+                    if (!ccb_emit_load_local(fb, dst_ptr))
+                        return 1;
+                }
+                return 0;
+            }
 
             if (ccb_emit_expr_basic(fb, expr->rhs))
                 return 1;
@@ -2493,6 +2973,43 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             const Type *field_type = NULL;
             if (ccb_emit_member_address(fb, target, &field_ty, &field_type))
                 return 1;
+
+            if (type_is_address_only(field_type))
+            {
+                Type *ptr_ty = type_ptr((Type *)field_type);
+                CcbLocal *dst_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                if (!dst_ptr)
+                    return 1;
+                if (!ccb_emit_store_local(fb, dst_ptr))
+                    return 1;
+
+                if (ccb_emit_expr_basic(fb, expr->rhs))
+                    return 1;
+
+                CCValueType rhs_ty = ccb_type_for_expr(expr->rhs);
+                if (rhs_ty != CC_TYPE_PTR)
+                {
+                    if (ccb_emit_convert_between(fb, rhs_ty, CC_TYPE_PTR, expr->rhs))
+                        return 1;
+                }
+
+                CcbLocal *src_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                if (!src_ptr)
+                    return 1;
+                if (!ccb_emit_store_local(fb, src_ptr))
+                    return 1;
+
+                if (ccb_emit_struct_copy(fb, field_type, dst_ptr, src_ptr))
+                    return 1;
+
+                CCValueType result_ty = ccb_type_for_expr(expr);
+                if (result_ty != CC_TYPE_VOID)
+                {
+                    if (!ccb_emit_load_local(fb, dst_ptr))
+                        return 1;
+                }
+                return 0;
+            }
 
             if (ccb_emit_expr_basic(fb, expr->rhs))
                 return 1;

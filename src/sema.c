@@ -579,6 +579,12 @@ static int type_is_unsigned_int(Type *t)
     }
 }
 
+static int type_is_pointer(Type *t)
+{
+    t = canonicalize_type_deep(t);
+    return t && t->kind == TY_PTR;
+}
+
 static int64_t type_int_min(Type *t)
 {
     if (!t)
@@ -1123,26 +1129,82 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!type_equal(e->lhs->type, e->rhs->type))
+        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
+        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        int lhs_is_ptr = type_is_pointer(lhs_type);
+        int rhs_is_ptr = type_is_pointer(rhs_type);
+        if (lhs_is_ptr || rhs_is_ptr)
+        {
+            if (lhs_is_ptr && rhs_is_ptr)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "pointer addition requires an integer offset, not another pointer");
+                exit(1);
+            }
+            if (lhs_is_ptr && type_is_int(rhs_type))
+            {
+                e->type = lhs_type;
+                return;
+            }
+            if (rhs_is_ptr && type_is_int(lhs_type))
+            {
+                e->type = rhs_type;
+                return;
+            }
+            diag_error_at(e->src, e->line, e->col,
+                          "pointer addition requires exactly one pointer and one integer operand");
+            exit(1);
+        }
+        if (!type_equal(lhs_type, rhs_type))
         {
             diag_error_at(e->src, e->line, e->col,
                           "'+' requires both operands to have the same type");
             exit(1);
         }
-        e->type = e->lhs->type;
+        e->type = lhs_type;
         return;
     }
     if (e->kind == ND_SUB)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!type_equal(e->lhs->type, e->rhs->type))
+        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
+        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        int lhs_is_ptr = type_is_pointer(lhs_type);
+        int rhs_is_ptr = type_is_pointer(rhs_type);
+        if (lhs_is_ptr || rhs_is_ptr)
+        {
+            if (lhs_is_ptr && rhs_is_ptr)
+            {
+                if (!type_equal(lhs_type, rhs_type))
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "pointer subtraction requires both operands to point to the same type");
+                    exit(1);
+                }
+                e->type = &ty_i64;
+                return;
+            }
+            if (lhs_is_ptr && type_is_int(rhs_type))
+            {
+                e->type = lhs_type;
+                return;
+            }
+            diag_error_at(e->src, e->line, e->col,
+                          "pointer subtraction requires a pointer minus an integer or pointer minus pointer of the same type");
+            exit(1);
+        }
+        if (!type_equal(lhs_type, rhs_type))
         {
             diag_error_at(e->src, e->line, e->col,
                           "'-' requires both operands to have the same type");
             exit(1);
         }
-        e->type = e->lhs->type;
+        e->type = lhs_type;
         return;
     }
     if (e->kind == ND_MUL || e->kind == ND_DIV)
@@ -1258,8 +1320,22 @@ static void check_expr(SemaContext *sc, Node *e)
                           "subscripted value is not an array or pointer");
             exit(1);
         }
-        // For simplicity, treat as int in expressions (like char promotes to int)
-        e->type = &ty_i32;
+        // If the pointer points to a struct, result type is the struct type
+        Type *elem_type = canonicalize_type_deep(e->lhs->type->pointee);
+        if (elem_type && elem_type->kind == TY_STRUCT)
+        {
+            e->type = elem_type;
+        }
+        else if (elem_type && elem_type->kind == TY_CHAR)
+        {
+            // char* promotes to int for indexing
+            e->type = &ty_i32;
+        }
+        else
+        {
+            // Default: use pointee type
+            e->type = elem_type ? elem_type : &ty_i32;
+        }
         return;
     }
     if (e->kind == ND_ASSIGN)
@@ -1344,9 +1420,11 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         Type *t = scope_get_type(sc, e->lhs->var_ref);
-        if (!t || !type_is_int(t))
+        t = canonicalize_type_deep(t);
+        e->lhs->type = t;
+        if (!t || (!type_is_int(t) && !type_is_pointer(t)))
         {
-            diag_error_at(e->src, e->line, e->col, "++/-- requires integer variable");
+            diag_error_at(e->src, e->line, e->col, "++/-- requires integer or pointer variable");
             exit(1);
         }
         e->type = t;
