@@ -104,6 +104,8 @@ expose fun main() -> i32
 
     printf("Multiplication overflow test (200 * 200 = 64): %d\n", test_mul_overflow());
 
+    printf("Division test: 20 / -4 = %d\n", 20 / -4); // expect -5
+
     printf("Test hex output: %d in hex is %x\n", 0xFF, 0xFF);
 
     TC.SmallTest vari = {};
@@ -139,6 +141,8 @@ expose fun main() -> i32
     test_idk();
 
     printf("Raw thing: %d\n", rawthing(10)); // expect 466
+
+    printf("Exit code should be %d\n", ((vari.testVar as i32) + (another.smallValue as i32)));
 
     ret ((vari.testVar as i32) + (another.smallValue as i32)); // expect 45 + 123 = 168
 }

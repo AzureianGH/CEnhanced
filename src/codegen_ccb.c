@@ -1829,6 +1829,26 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         return 0;
     }
+    case ND_DIV:
+    {
+        if (ccb_emit_expr_basic(fb, expr->lhs))
+            return 1;
+        if (ccb_emit_expr_basic(fb, expr->rhs))
+            return 1;
+        CCValueType ty = map_type_to_cc(expr->type ? expr->type : (expr->lhs ? expr->lhs->type : NULL));
+        bool is_unsigned = ccb_value_type_is_integer(ty) && !ccb_value_type_is_signed(ty);
+        if (is_unsigned)
+        {
+            if (!string_list_appendf(&fb->body, "  binop div %s unsigned", cc_type_name(ty)))
+                return 1;
+        }
+        else
+        {
+            if (!string_list_appendf(&fb->body, "  binop div %s", cc_type_name(ty)))
+                return 1;
+        }
+        return 0;
+    }
     case ND_SUB:
     {
         if (ccb_emit_expr_basic(fb, expr->lhs))

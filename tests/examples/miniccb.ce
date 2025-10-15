@@ -1,16 +1,13 @@
 extend from "C" i32 printf(char *, _vaargs_);
 extend from "C" void *malloc(int);
 
-struct TestThing
-{
-    i32 a;
-    u8 b;
-};
 
 [EntryPoint]
 fun main() -> i32
 {
-    f32 val = (4 as f32);
-    printf("Size of TestThing: %d\n", sizeof(TestThing));
+    i32 a = 10;
+    printf("Size of i32: %d\n", sizeof(i32));
+    printf("Size of u8: %d\n", sizeof(u8));
+    printf("Value of a: %d\n", a);
     ret 0;
 }
