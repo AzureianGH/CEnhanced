@@ -176,6 +176,7 @@ static void scan_header_for_prototypes(const char *buf, int len,
                     Symbol s = (Symbol){0};
                     s.kind = SYM_FUNC;
                     s.name = nm;
+                    s.backend_name = s.name;
                     s.is_extern = 1;
                     s.abi = "C";
                     static Type ti32 = {.kind = TY_I32};

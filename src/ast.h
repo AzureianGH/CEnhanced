@@ -143,6 +143,7 @@ typedef struct ModulePath
     const char **parts;
     int part_count;
     const char *full_name;
+    const char *alias;
 } ModulePath;
 
 typedef enum
@@ -217,6 +218,25 @@ typedef struct Node
     Type **param_types;
     const char **param_names;
     int param_count;
+    int is_chancecode;
+    struct
+    {
+        char **lines;
+        int count;
+    } chancecode;
+    // Metadata overrides for backend emission
+    struct
+    {
+        char *func_line;          // overrides .func line when non-null
+        char *params_line;        // overrides .params line when non-null
+        char *locals_line;        // overrides .locals line when non-null
+        char *backend_name;       // alternate symbol name in generated code
+        char **param_type_names;  // parsed tokens from .params override
+        int param_type_count;     // number of parameter tokens from override
+        int declared_param_count; // parsed from .func params= value, or -1 when unspecified
+        int declared_local_count; // parsed from .func locals= value, or -1 when unspecified
+        char *ret_token;          // parsed from .func ret= value, if provided
+    } metadata;
     // For ND_STRING
     const char *str_data;
     int str_len;
@@ -234,6 +254,7 @@ typedef struct Node
     // For ND_VAR reference
     const char *var_ref;
     int is_noreturn;
+    int is_entrypoint;
     // For ND_MEMBER
     const char *field_name;
     int field_index;
@@ -357,6 +378,7 @@ typedef struct Symbol
 {
     SymKind kind;
     const char *name;
+    const char *backend_name;
     int is_extern;   // 1 if extern (extend from "C")
     const char *abi; // e.g., "C"
     FuncSig sig;

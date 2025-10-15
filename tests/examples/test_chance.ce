@@ -1,4 +1,10 @@
-module RandomThing;
+module Test.Chance;
+
+expose struct SmallTest
+{
+    i32 testVar;
+    u8 smallValue;
+};
 
 expose fun test_chance() -> i32
 {

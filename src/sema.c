@@ -96,6 +96,41 @@ static Type ty_f128 = {.kind = TY_F128};
 static Type ty_void = {.kind = TY_VOID};
 static Type ty_char = {.kind = TY_CHAR};
 
+static Type *metadata_token_to_type(const char *token)
+{
+    if (!token)
+        return NULL;
+    if (strcmp(token, "i1") == 0)
+        return &ty_i8;
+    if (strcmp(token, "i8") == 0)
+        return &ty_i8;
+    if (strcmp(token, "u8") == 0)
+        return &ty_u8;
+    if (strcmp(token, "i16") == 0)
+        return &ty_i16;
+    if (strcmp(token, "u16") == 0)
+        return &ty_u16;
+    if (strcmp(token, "i32") == 0)
+        return &ty_i32;
+    if (strcmp(token, "u32") == 0)
+        return &ty_u32;
+    if (strcmp(token, "i64") == 0)
+        return &ty_i64;
+    if (strcmp(token, "u64") == 0)
+        return &ty_u64;
+    if (strcmp(token, "f32") == 0)
+        return &ty_f32;
+    if (strcmp(token, "f64") == 0)
+        return &ty_f64;
+    if (strcmp(token, "f128") == 0)
+        return &ty_f128;
+    if (strcmp(token, "void") == 0)
+        return &ty_void;
+    if (strcmp(token, "char") == 0)
+        return &ty_char;
+    return NULL;
+}
+
 static char *make_qualified_name(const ModulePath *mod, const char *name)
 {
     if (!mod || mod->part_count == 0 || !mod->full_name || !name || !*name)
@@ -108,6 +143,95 @@ static char *make_qualified_name(const ModulePath *mod, const char *name)
     memcpy(res + base_len + 1, name, name_len);
     res[base_len + 1 + name_len] = '\0';
     return res;
+}
+
+static char *module_name_to_prefix(const char *module_full)
+{
+    if (!module_full || !*module_full)
+        return NULL;
+    size_t len = strlen(module_full);
+    char *copy = (char *)xmalloc(len + 1);
+    memcpy(copy, module_full, len + 1);
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (copy[i] == '.')
+            copy[i] = '_';
+    }
+    return copy;
+}
+
+static char *module_backend_name(const char *module_full, const char *fn_name)
+{
+    if (!module_full || !*module_full || !fn_name || !*fn_name)
+        return NULL;
+    char *prefix = module_name_to_prefix(module_full);
+    if (!prefix)
+        return NULL;
+    size_t prefix_len = strlen(prefix);
+    size_t fn_len = strlen(fn_name);
+    char *res = (char *)xmalloc(prefix_len + 1 + fn_len + 1);
+    memcpy(res, prefix, prefix_len);
+    res[prefix_len] = '_';
+    memcpy(res + prefix_len + 1, fn_name, fn_len);
+    res[prefix_len + 1 + fn_len] = '\0';
+    free(prefix);
+    return res;
+}
+
+static char *backend_from_qualified(const char *qualified_name)
+{
+    if (!qualified_name)
+        return NULL;
+    const char *dot = strrchr(qualified_name, '.');
+    if (!dot || dot == qualified_name || *(dot + 1) == '\0')
+        return xstrdup(qualified_name);
+    size_t module_len = (size_t)(dot - qualified_name);
+    char *module = (char *)xmalloc(module_len + 1);
+    memcpy(module, qualified_name, module_len);
+    module[module_len] = '\0';
+    const char *fn = dot + 1;
+    char *backend = module_backend_name(module, fn);
+    free(module);
+    if (!backend)
+        return xstrdup(qualified_name);
+    return backend;
+}
+
+static char *resolve_import_alias(const Node *unit, const char *call_name)
+{
+    if (!unit || unit->kind != ND_UNIT || !call_name)
+        return NULL;
+    const char *dot = strchr(call_name, '.');
+    if (!dot || dot == call_name)
+        return NULL;
+    size_t alias_len = (size_t)(dot - call_name);
+    const char *rest = dot + 1;
+    if (!rest || *rest == '\0')
+        return NULL;
+    if (unit->imports && unit->import_count > 0)
+    {
+        for (int i = 0; i < unit->import_count; ++i)
+        {
+            const ModulePath *imp = &unit->imports[i];
+            if (!imp)
+                continue;
+            if (imp->alias)
+            {
+                size_t alias_name_len = strlen(imp->alias);
+                if (alias_name_len == alias_len && strncmp(imp->alias, call_name, alias_len) == 0)
+                {
+                    size_t full_len = strlen(imp->full_name);
+                    size_t rest_len = strlen(rest);
+                    char *combined = (char *)xmalloc(full_len + 1 + rest_len + 1);
+                    memcpy(combined, imp->full_name, full_len);
+                    combined[full_len] = '.';
+                    memcpy(combined + full_len + 1, rest, rest_len + 1);
+                    return combined;
+                }
+            }
+        }
+    }
+    return NULL;
 }
 
 static int module_name_matches(const char *full, const char *candidate, size_t len)
@@ -132,6 +256,12 @@ static int unit_allows_module_call(const Node *unit, const char *qualified_name)
         for (int i = 0; i < unit->import_count; ++i)
         {
             const ModulePath *imp = &unit->imports[i];
+            if (imp->alias)
+            {
+                size_t alias_len = strlen(imp->alias);
+                if (alias_len == module_len && strncmp(imp->alias, qualified_name, module_len) == 0)
+                    return 1;
+            }
             if (module_name_matches(imp->full_name, qualified_name, module_len))
                 return 1;
         }
@@ -303,6 +433,88 @@ static int type_equal(Type *a, Type *b)
         return a == b;
     }
     return 1;
+}
+
+static void populate_symbol_from_function(Symbol *s, Node *fn)
+{
+    if (!s || !fn || fn->kind != ND_FUNC)
+        return;
+
+    s->kind = SYM_FUNC;
+    s->name = fn->name;
+    s->backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+    s->is_extern = 0;
+    s->abi = "C";
+    s->sig.is_varargs = 0;
+
+    Type *decl_ret = fn->ret_type ? fn->ret_type : &ty_i32;
+    if (fn->metadata.ret_token)
+    {
+        Type *meta_ret = metadata_token_to_type(fn->metadata.ret_token);
+        if (!meta_ret)
+        {
+            meta_ret = decl_ret;
+            diag_warning_at(fn->src, fn->line, fn->col,
+                            "unsupported metadata return type '%s'; using declared return type",
+                            fn->metadata.ret_token);
+        }
+        if (!type_equal(decl_ret, meta_ret))
+        {
+            char decl_buf[64];
+            char meta_buf[64];
+            describe_type(decl_ret, decl_buf, sizeof(decl_buf));
+            describe_type(meta_ret, meta_buf, sizeof(meta_buf));
+            diag_error_at(fn->src, fn->line, fn->col,
+                          "return type mismatch between declaration ('%s') and metadata ('%s')",
+                          decl_buf, meta_buf);
+            exit(1);
+        }
+        s->sig.ret = meta_ret;
+    }
+    else
+    {
+        s->sig.ret = decl_ret;
+    }
+
+    if (fn->metadata.params_line)
+    {
+        int count = fn->metadata.param_type_count;
+        s->sig.param_count = count;
+        if (count > 0)
+        {
+            Type **meta_params = (Type **)xcalloc((size_t)count, sizeof(Type *));
+            for (int i = 0; i < count; ++i)
+            {
+                const char *tok = (fn->metadata.param_type_names && i < count) ? fn->metadata.param_type_names[i] : NULL;
+                Type *meta_ty = metadata_token_to_type(tok);
+                if (!meta_ty)
+                {
+                    if (fn->param_types && i < fn->param_count)
+                        meta_ty = fn->param_types[i];
+                    diag_warning_at(fn->src, fn->line, fn->col,
+                                    "unsupported metadata parameter type '%s'; using declared type for parameter %d",
+                                    tok ? tok : "<null>", i + 1);
+                }
+                if (!meta_ty)
+                {
+                    diag_error_at(fn->src, fn->line, fn->col,
+                                  "unable to determine type for parameter %d", i + 1);
+                    exit(1);
+                }
+                meta_params[i] = meta_ty;
+            }
+            s->sig.params = meta_params;
+        }
+        else
+        {
+            s->sig.params = NULL;
+        }
+    }
+    else
+    {
+        s->sig.param_count = fn->param_count;
+        s->sig.params = fn->param_types;
+    }
 }
 
 static int struct_find_field(Type *st, const char *name)
@@ -1122,6 +1334,12 @@ static void check_expr(SemaContext *sc, Node *e)
     if (e->kind == ND_CALL)
     {
         // lookup symbol
+        if (sc->unit)
+        {
+            char *alias_resolved = resolve_import_alias(sc->unit, e->call_name);
+            if (alias_resolved)
+                e->call_name = alias_resolved;
+        }
         const Symbol *sym = symtab_get(sc->syms, e->call_name);
         if (!sym)
         {
@@ -1129,7 +1347,10 @@ static void check_expr(SemaContext *sc, Node *e)
             {
                 Symbol stub = {0};
                 stub.kind = SYM_FUNC;
-                stub.name = e->call_name;
+                stub.name = xstrdup(e->call_name);
+                stub.backend_name = backend_from_qualified(stub.name);
+                if (!stub.backend_name)
+                    stub.backend_name = stub.name;
                 stub.is_extern = 1;
                 stub.abi = "C";
                 stub.sig.ret = &ty_i32;
@@ -1151,9 +1372,57 @@ static void check_expr(SemaContext *sc, Node *e)
         {
             check_expr(sc, e->args[i]);
         }
-        e->type = sym->sig.ret;
-        if (sym->name)
-            e->call_name = sym->name;
+
+        int expected = sym->sig.param_count;
+        if (!sym->sig.is_varargs)
+        {
+            if (e->arg_count != expected)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "function '%s' expects %d argument(s) but %d provided",
+                              sym->name ? sym->name : e->call_name,
+                              expected, e->arg_count);
+                exit(1);
+            }
+        }
+        else if (e->arg_count < expected)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "function '%s' expects at least %d argument(s) before varargs",
+                          sym->name ? sym->name : e->call_name,
+                          expected);
+            exit(1);
+        }
+
+        int check_count = expected;
+        if (sym->sig.is_varargs && e->arg_count > expected)
+            check_count = expected;
+        if (!sym->sig.is_varargs && e->arg_count < check_count)
+            check_count = e->arg_count;
+
+        for (int i = 0; i < check_count; ++i)
+        {
+            Type *expected_ty = (sym->sig.params && i < expected) ? sym->sig.params[i] : NULL;
+            if (!expected_ty)
+                continue;
+            if (!can_assign(expected_ty, e->args[i]))
+            {
+                char want[64];
+                char got[64];
+                describe_type(expected_ty, want, sizeof(want));
+                describe_type(e->args[i]->type, got, sizeof(got));
+                diag_error_at(e->args[i]->src, e->args[i]->line, e->args[i]->col,
+                              "argument %d type mismatch: expected %s, got %s",
+                              i + 1, want, got);
+                exit(1);
+            }
+        }
+
+        Type *ret_type = sym->sig.ret ? sym->sig.ret : &ty_i32;
+        e->type = ret_type;
+        const char *backend = sym->backend_name ? sym->backend_name : sym->name;
+        if (backend)
+            e->call_name = backend;
         return;
     }
     if (e->kind == ND_COND)
@@ -1192,6 +1461,8 @@ static int sema_check_function(SemaContext *sc, Node *fn)
 {
     if (!fn->ret_type)
         fn->ret_type = &ty_i32;
+    if (fn->is_chancecode)
+        return 0;
     Node *body = fn->body;
     if (!body)
     {
@@ -1357,15 +1628,15 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         // single function case
         // add symbol so calls can resolve
         Symbol s = {0};
-        s.kind = SYM_FUNC;
-        s.name = unit->name;
-        s.is_extern = 0;
-        s.abi = "C";
-        s.sig.ret = unit->ret_type ? unit->ret_type : &ty_i32;
-        s.sig.params = NULL;
-        s.sig.param_count = 0;
-        s.sig.is_varargs = 0;
+        populate_symbol_from_function(&s, unit);
         symtab_add(sc->syms, s);
+        if (unit->metadata.backend_name && strcmp(unit->metadata.backend_name, unit->name) != 0)
+        {
+            Symbol backend_alias = s;
+            backend_alias.name = unit->metadata.backend_name;
+            backend_alias.backend_name = s.backend_name;
+            symtab_add(sc->syms, backend_alias);
+        }
         if (check_exposed_function_signature(unit))
             return 1;
         return sema_check_function(sc, unit);
@@ -1384,16 +1655,22 @@ int sema_check_unit(SemaContext *sc, Node *unit)
             diag_error("non-function in unit");
             return 1;
         }
+        if (unit->module_path.full_name && !fn->metadata.backend_name && !fn->is_entrypoint)
+        {
+            char *backend = module_backend_name(unit->module_path.full_name, fn->name);
+            if (backend)
+                fn->metadata.backend_name = backend;
+        }
         Symbol s = {0};
-        s.kind = SYM_FUNC;
-        s.name = fn->name;
-        s.is_extern = 0;
-        s.abi = "C";
-        s.sig.ret = fn->ret_type ? fn->ret_type : &ty_i32;
-        s.sig.params = NULL;
-        s.sig.param_count = 0;
-        s.sig.is_varargs = 0;
+        populate_symbol_from_function(&s, fn);
         symtab_add(sc->syms, s);
+        if (fn->metadata.backend_name && strcmp(fn->metadata.backend_name, fn->name) != 0)
+        {
+            Symbol backend_alias = s;
+            backend_alias.name = fn->metadata.backend_name;
+            backend_alias.backend_name = s.backend_name;
+            symtab_add(sc->syms, backend_alias);
+        }
         if (fn->is_exposed && unit->module_path.full_name)
         {
             char *qualified = make_qualified_name(&unit->module_path, fn->name);
@@ -1401,6 +1678,7 @@ int sema_check_unit(SemaContext *sc, Node *unit)
             {
                 Symbol alias = s;
                 alias.name = qualified;
+                alias.backend_name = s.backend_name;
                 symtab_add(sc->syms, alias);
             }
         }

@@ -3,12 +3,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 
 struct ModuleImport
 {
     char **parts;
     int part_count;
     char *full_name;
+    char *alias;
 };
 
 struct Parser
@@ -51,7 +53,538 @@ struct Parser
     int import_cap;
 };
 
+struct PendingAttr
+{
+    char *name;
+    char *value;
+    int line;
+    int col;
+};
+
 static Token expect(Parser *ps, TokenKind k, const char *what);
+static Node *new_node(NodeKind k);
+static Node *parse_expr(Parser *ps);
+static int attrs_contains(const struct PendingAttr *attrs, int count, const char *name)
+{
+    if (!attrs || count <= 0 || !name)
+        return 0;
+    for (int i = 0; i < count; ++i)
+    {
+        if (attrs[i].name && strcmp(attrs[i].name, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+static void chancecode_buffer_append(char **buffer, size_t *capacity, size_t *length, const char *text, size_t text_len);
+static void append_string(char ***arr, int *count, int *cap, char *value);
+static void parse_chancecode_body(Parser *ps, Node *fn);
+
+static char *dup_trimmed(const char *text)
+{
+    if (!text)
+        return NULL;
+    const char *start = text;
+    while (*start && isspace((unsigned char)*start))
+        start++;
+    const char *end = start + strlen(start);
+    while (end > start && isspace((unsigned char)*(end - 1)))
+        --end;
+    size_t len = (size_t)(end - start);
+    char *copy = (char *)xmalloc(len + 1);
+    if (len > 0)
+        memcpy(copy, start, len);
+    copy[len] = '\0';
+    return copy;
+}
+
+static int parse_nonnegative_int(const char *text, int *out_value)
+{
+    if (!text || !*text)
+        return 0;
+    int value = 0;
+    const char *p = text;
+    while (*p)
+    {
+        if (!isdigit((unsigned char)*p))
+            return 0;
+        value = value * 10 + (*p - '0');
+        p++;
+    }
+    if (out_value)
+        *out_value = value;
+    return 1;
+}
+
+static void pending_attr_cleanup(struct PendingAttr *attr)
+{
+    if (!attr)
+        return;
+    free(attr->name);
+    free(attr->value);
+    attr->name = NULL;
+    attr->value = NULL;
+    attr->line = 0;
+    attr->col = 0;
+}
+
+static void clear_pending_attrs(struct PendingAttr *attrs, int count)
+{
+    if (!attrs || count <= 0)
+        return;
+    for (int i = 0; i < count; ++i)
+        pending_attr_cleanup(&attrs[i]);
+}
+
+static struct PendingAttr parse_attribute(Parser *ps)
+{
+    struct PendingAttr attr = {0};
+    Token open = expect(ps, TK_LBRACKET, "[");
+    attr.line = open.line;
+    attr.col = open.col;
+
+    Token name_tok = expect(ps, TK_IDENT, "attribute name");
+    attr.name = (char *)xmalloc((size_t)name_tok.length + 1);
+    memcpy(attr.name, name_tok.lexeme, (size_t)name_tok.length);
+    attr.name[name_tok.length] = '\0';
+
+    Token maybe_paren = lexer_peek(ps->lx);
+    if (maybe_paren.kind == TK_LPAREN)
+    {
+        lexer_next(ps->lx);
+        Token arg = expect(ps, TK_STRING, "string literal");
+        if (arg.length < 2)
+        {
+            diag_error_at(lexer_source(ps->lx), arg.line, arg.col,
+                          "attribute requires string literal argument");
+            exit(1);
+        }
+        int val_len = arg.length - 2;
+        attr.value = (char *)xmalloc((size_t)val_len + 1);
+        if (val_len > 0)
+            memcpy(attr.value, arg.lexeme + 1, (size_t)val_len);
+        attr.value[val_len] = '\0';
+        expect(ps, TK_RPAREN, ")");
+    }
+    expect(ps, TK_RBRACKET, "]");
+    return attr;
+}
+
+static void chancecode_buffer_append(char **buffer, size_t *capacity, size_t *length, const char *text, size_t text_len)
+{
+    if (!buffer || !capacity || !length)
+        return;
+    size_t needed = *length + text_len + 1;
+    if (needed > *capacity)
+    {
+        size_t new_cap = *capacity ? (*capacity * 2) : 64;
+        while (needed > new_cap)
+            new_cap *= 2;
+        char *resized = (char *)realloc(*buffer, new_cap);
+        if (!resized)
+        {
+            diag_error("out of memory while recording ChanceCode body");
+            exit(1);
+        }
+        *buffer = resized;
+        *capacity = new_cap;
+    }
+    if (text_len > 0 && text)
+    {
+        memcpy(*buffer + *length, text, text_len);
+        *length += text_len;
+    }
+    (*buffer)[*length] = '\0';
+}
+
+static void parse_chancecode_body(Parser *ps, Node *fn)
+{
+    if (!ps || !fn)
+        return;
+
+    expect(ps, TK_LBRACE, "{");
+    char **lines = NULL;
+    int count = 0;
+    int cap = 0;
+
+    for (;;)
+    {
+        Token peek = lexer_peek(ps->lx);
+        if (peek.kind == TK_RBRACE)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
+        if (peek.kind == TK_EOF)
+        {
+            diag_error_at(lexer_source(ps->lx), peek.line, peek.col,
+                          "unterminated ChanceCode block");
+            exit(1);
+        }
+
+        char *line_buf = NULL;
+        size_t buf_cap = 0;
+        size_t buf_len = 0;
+        int saw_token = 0;
+    const char *prev_end = NULL;
+
+        while (1)
+        {
+            Token tok = lexer_peek(ps->lx);
+            if (tok.kind == TK_SEMI)
+            {
+                lexer_next(ps->lx);
+                break;
+            }
+            if (tok.kind == TK_RBRACE || tok.kind == TK_EOF)
+            {
+                diag_error_at(lexer_source(ps->lx), tok.line, tok.col,
+                              "ChanceCode statements must end with ';'");
+                free(line_buf);
+                exit(1);
+            }
+
+            tok = lexer_next(ps->lx);
+            if (prev_end)
+            {
+                size_t gap = (size_t)(tok.lexeme - prev_end);
+                if (gap > 0 && buf_len > 0)
+                {
+                    const char space = ' ';
+                    chancecode_buffer_append(&line_buf, &buf_cap, &buf_len, &space, 1);
+                }
+            }
+            chancecode_buffer_append(&line_buf, &buf_cap, &buf_len, tok.lexeme, (size_t)tok.length);
+            prev_end = tok.lexeme + tok.length;
+            saw_token = 1;
+        }
+
+        if (!saw_token)
+        {
+            free(line_buf);
+            continue;
+        }
+
+        char *trimmed = dup_trimmed(line_buf);
+        free(line_buf);
+        if (trimmed && *trimmed == '\0')
+        {
+            free(trimmed);
+            continue;
+        }
+        append_string(&lines, &count, &cap, trimmed);
+    }
+
+    fn->chancecode.lines = lines;
+    fn->chancecode.count = count;
+    fn->is_chancecode = 1;
+    fn->body = NULL;
+}
+
+static void apply_override_metadata(Parser *ps, Node *fn, const struct PendingAttr *attr)
+{
+    if (!fn || fn->kind != ND_FUNC || !attr || !attr->value)
+        return;
+
+    char *line = dup_trimmed(attr->value);
+    if (!line)
+        return;
+    const char *cursor = line;
+    if (strncmp(cursor, ".func", 5) == 0 && (cursor[5] == '\0' || isspace((unsigned char)cursor[5])))
+    {
+        if (fn->metadata.func_line)
+        {
+            diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                          "duplicate '.func' override metadata");
+            exit(1);
+        }
+        cursor += 5;
+        while (isspace((unsigned char)*cursor))
+            cursor++;
+        if (!*cursor)
+        {
+            diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                          "'.func' metadata requires function name");
+            exit(1);
+        }
+        const char *name_start = cursor;
+        while (*cursor && !isspace((unsigned char)*cursor))
+            cursor++;
+        size_t name_len = (size_t)(cursor - name_start);
+        if (name_len == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                          "'.func' metadata requires function name");
+            exit(1);
+        }
+        char *backend = (char *)xmalloc(name_len + 1);
+        memcpy(backend, name_start, name_len);
+        backend[name_len] = '\0';
+        fn->metadata.func_line = line;
+        fn->metadata.backend_name = backend;
+
+        fn->metadata.declared_param_count = -1;
+        fn->metadata.declared_local_count = -1;
+        free(fn->metadata.ret_token);
+        fn->metadata.ret_token = NULL;
+
+        while (*cursor)
+        {
+            while (isspace((unsigned char)*cursor))
+                cursor++;
+            if (!*cursor)
+                break;
+            const char *key_start = cursor;
+            while (*cursor && *cursor != '=' && !isspace((unsigned char)*cursor))
+                cursor++;
+            size_t key_len = (size_t)(cursor - key_start);
+            if (*cursor != '=')
+            {
+                while (*cursor && !isspace((unsigned char)*cursor))
+                    cursor++;
+                continue;
+            }
+            cursor++;
+            const char *value_start = cursor;
+            while (*cursor && !isspace((unsigned char)*cursor))
+                cursor++;
+            size_t value_len = (size_t)(cursor - value_start);
+            if (value_len == 0)
+                continue;
+
+            if (key_len == 3 && strncmp(key_start, "ret", 3) == 0)
+            {
+                char *ret = (char *)xmalloc(value_len + 1);
+                memcpy(ret, value_start, value_len);
+                ret[value_len] = '\0';
+                free(fn->metadata.ret_token);
+                fn->metadata.ret_token = ret;
+            }
+            else if (key_len == 6 && strncmp(key_start, "params", 6) == 0)
+            {
+                char buffer[32];
+                if (value_len >= sizeof(buffer))
+                {
+                    diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                                  "'.func' params value too large");
+                    exit(1);
+                }
+                memcpy(buffer, value_start, value_len);
+                buffer[value_len] = '\0';
+                int parsed = 0;
+                if (!parse_nonnegative_int(buffer, &parsed))
+                {
+                    diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                                  "'.func' params value must be non-negative integer");
+                    exit(1);
+                }
+                fn->metadata.declared_param_count = parsed;
+                if (parsed != fn->param_count)
+                {
+                    diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                                  "'.func' params value (%d) does not match function parameter count (%d)",
+                                  parsed, fn->param_count);
+                    exit(1);
+                }
+            }
+            else if (key_len == 6 && strncmp(key_start, "locals", 6) == 0)
+            {
+                char buffer[32];
+                if (value_len >= sizeof(buffer))
+                {
+                    diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                                  "'.func' locals value too large");
+                    exit(1);
+                }
+                memcpy(buffer, value_start, value_len);
+                buffer[value_len] = '\0';
+                int parsed = 0;
+                if (!parse_nonnegative_int(buffer, &parsed))
+                {
+                    diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                                  "'.func' locals value must be non-negative integer");
+                    exit(1);
+                }
+                fn->metadata.declared_local_count = parsed;
+            }
+        }
+        if (fn->metadata.declared_param_count == -1)
+            fn->metadata.declared_param_count = fn->param_count;
+        if (fn->metadata.declared_local_count == -1)
+            fn->metadata.declared_local_count = 0;
+        return;
+    }
+
+    if (strncmp(cursor, ".params", 7) == 0 && (cursor[7] == '\0' || isspace((unsigned char)cursor[7])))
+    {
+        if (fn->metadata.params_line)
+        {
+            diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                          "duplicate '.params' override metadata");
+            exit(1);
+        }
+        cursor += 7;
+        while (isspace((unsigned char)*cursor))
+            cursor++;
+        char **tokens = NULL;
+        int count = 0;
+        int cap = 0;
+        while (*cursor)
+        {
+            const char *start = cursor;
+            while (*cursor && !isspace((unsigned char)*cursor))
+                cursor++;
+            size_t len = (size_t)(cursor - start);
+            if (len > 0)
+            {
+                char *tok = (char *)xmalloc(len + 1);
+                memcpy(tok, start, len);
+                tok[len] = '\0';
+                if (count == cap)
+                {
+                    int new_cap = cap ? cap * 2 : 4;
+                    char **new_tokens = (char **)realloc(tokens, (size_t)new_cap * sizeof(char *));
+                    if (!new_tokens)
+                    {
+                        diag_error("out of memory while parsing .params metadata");
+                        exit(1);
+                    }
+                    tokens = new_tokens;
+                    cap = new_cap;
+                }
+                tokens[count++] = tok;
+            }
+            while (isspace((unsigned char)*cursor))
+                cursor++;
+        }
+        fn->metadata.params_line = line;
+        fn->metadata.param_type_names = tokens;
+        fn->metadata.param_type_count = count;
+        if (fn->param_count != count)
+        {
+            diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                          "'.params' metadata count (%d) does not match function parameter count (%d)",
+                          count, fn->param_count);
+            exit(1);
+        }
+        return;
+    }
+
+    if (strncmp(cursor, ".locals", 7) == 0 && (cursor[7] == '\0' || isspace((unsigned char)cursor[7])))
+    {
+        if (fn->metadata.locals_line)
+        {
+            diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                          "duplicate '.locals' override metadata");
+            exit(1);
+        }
+        fn->metadata.locals_line = line;
+        return;
+    }
+
+    diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                  "unknown override metadata directive '%s'", attr->value);
+    exit(1);
+}
+
+static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *attrs, int attr_count)
+{
+    if (!attrs || attr_count <= 0)
+        return;
+    for (int i = 0; i < attr_count; ++i)
+    {
+        struct PendingAttr *attr = &attrs[i];
+        if (!attr->name)
+            continue;
+        if (strcmp(attr->name, "OverrideMetadata") == 0)
+        {
+            apply_override_metadata(ps, fn, attr);
+        }
+        else if (strcmp(attr->name, "ChanceCode") == 0)
+        {
+            fn->is_chancecode = 1;
+        }
+        else if (strcmp(attr->name, "EntryPoint") == 0)
+        {
+            fn->is_entrypoint = 1;
+        }
+        else
+        {
+            diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                          "unknown attribute '%s'", attr->name);
+            exit(1);
+        }
+    }
+}
+
+static Node *parse_metadata_call(Parser *ps, Token open)
+{
+    Token name_tok = expect(ps, TK_IDENT, "metadata call directive");
+    if (!(name_tok.length == 12 && strncmp(name_tok.lexeme, "MetadataCall", 12) == 0))
+    {
+        diag_error_at(lexer_source(ps->lx), name_tok.line, name_tok.col,
+                      "unknown metadata expression '%.*s'", name_tok.length, name_tok.lexeme);
+        exit(1);
+    }
+
+    expect(ps, TK_LPAREN, "(");
+    Token target_tok = expect(ps, TK_STRING, "metadata call target");
+    if (target_tok.length < 2)
+    {
+        diag_error_at(lexer_source(ps->lx), target_tok.line, target_tok.col,
+                      "metadata call target must be a string literal");
+        exit(1);
+    }
+    int name_len = target_tok.length - 2;
+    char *target = (char *)xmalloc((size_t)name_len + 1);
+    if (name_len > 0)
+        memcpy(target, target_tok.lexeme + 1, (size_t)name_len);
+    target[name_len] = '\0';
+    expect(ps, TK_RPAREN, ")");
+    expect(ps, TK_RBRACKET, "]");
+
+    expect(ps, TK_LPAREN, "(");
+    Node **args = NULL;
+    int argc = 0;
+    int cap = 0;
+    Token peek = lexer_peek(ps->lx);
+    if (peek.kind != TK_RPAREN)
+    {
+        for (;;)
+        {
+            Node *arg = parse_expr(ps);
+            if (argc == cap)
+            {
+                int new_cap = cap ? cap * 2 : 4;
+                Node **resized = (Node **)realloc(args, (size_t)new_cap * sizeof(Node *));
+                if (!resized)
+                {
+                    diag_error("out of memory while parsing metadata call arguments");
+                    exit(1);
+                }
+                args = resized;
+                cap = new_cap;
+            }
+            args[argc++] = arg;
+            Token comma = lexer_peek(ps->lx);
+            if (comma.kind == TK_COMMA)
+            {
+                lexer_next(ps->lx);
+                continue;
+            }
+            break;
+        }
+    }
+    expect(ps, TK_RPAREN, ")");
+
+    Node *call = new_node(ND_CALL);
+    call->call_name = target;
+    call->args = args;
+    call->arg_count = argc;
+    call->line = open.line;
+    call->col = open.col;
+    call->src = lexer_source(ps->lx);
+    return call;
+}
 
 static void parse_extend_decl(Parser *ps, int leading_noreturn);
 
@@ -153,6 +686,39 @@ static char *join_parts_with_dot(char **parts, int count)
     return res;
 }
 
+static char *module_name_to_prefix(const char *full_name)
+{
+    if (!full_name || !*full_name)
+        return NULL;
+    size_t len = strlen(full_name);
+    char *copy = (char *)xmalloc(len + 1);
+    memcpy(copy, full_name, len + 1);
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (copy[i] == '.')
+            copy[i] = '_';
+    }
+    return copy;
+}
+
+static char *make_module_backend_name(const char *module_full, const char *fn_name)
+{
+    if (!module_full || !*module_full || !fn_name || !*fn_name)
+        return NULL;
+    char *prefix = module_name_to_prefix(module_full);
+    if (!prefix)
+        return NULL;
+    size_t prefix_len = strlen(prefix);
+    size_t fn_len = strlen(fn_name);
+    char *res = (char *)xmalloc(prefix_len + 1 + fn_len + 1);
+    memcpy(res, prefix, prefix_len);
+    res[prefix_len] = '_';
+    memcpy(res + prefix_len + 1, fn_name, fn_len);
+    res[prefix_len + 1 + fn_len] = '\0';
+    free(prefix);
+    return res;
+}
+
 static void parse_module_path(Parser *ps, char ***out_parts, int *out_count, char **out_full_name)
 {
     if (!ps)
@@ -210,6 +776,16 @@ static void parse_bring_decl(Parser *ps)
     int count = 0;
     char *full = NULL;
     parse_module_path(ps, &parts, &count, &full);
+    char *alias = NULL;
+    Token maybe_as = lexer_peek(ps->lx);
+    if (maybe_as.kind == TK_KW_AS)
+    {
+        lexer_next(ps->lx);
+        Token alias_tok = expect(ps, TK_IDENT, "module alias");
+        alias = (char *)xmalloc((size_t)alias_tok.length + 1);
+        memcpy(alias, alias_tok.lexeme, (size_t)alias_tok.length);
+        alias[alias_tok.length] = '\0';
+    }
     expect(ps, TK_SEMI, ";");
 
     if (ps->import_count == ps->import_cap)
@@ -225,6 +801,7 @@ static void parse_bring_decl(Parser *ps)
     ps->imports[ps->import_count].parts = parts;
     ps->imports[ps->import_count].part_count = count;
     ps->imports[ps->import_count].full_name = full;
+    ps->imports[ps->import_count].alias = alias;
     ps->import_count++;
 }
 
@@ -716,8 +1293,30 @@ static Node *parse_primary(Parser *ps)
         expect(ps, TK_RPAREN, ")");
         return inner;
     }
+    if (t.kind == TK_LBRACKET)
+    {
+        return parse_metadata_call(ps, t);
+    }
     if (t.kind == TK_IDENT)
     {
+        if (t.length == 4 && strncmp(t.lexeme, "true", 4) == 0)
+        {
+            Node *n = new_node(ND_INT);
+            n->int_val = 1;
+            n->line = t.line;
+            n->col = t.col;
+            n->src = lexer_source(ps->lx);
+            return n;
+        }
+        if (t.length == 5 && strncmp(t.lexeme, "false", 5) == 0)
+        {
+            Node *n = new_node(ND_INT);
+            n->int_val = 0;
+            n->line = t.line;
+            n->col = t.col;
+            n->src = lexer_source(ps->lx);
+            return n;
+        }
         // enum constant?
         int ev = 0;
         if (enum_const_get(ps, t.lexeme, t.length, &ev))
@@ -1606,7 +2205,7 @@ static Node *parse_for(Parser *ps)
 }
 
 
-static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed)
+static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_chancecode)
 {
     expect(ps, TK_KW_FUN, "fun");
     Token name = expect(ps, TK_IDENT, "identifier");
@@ -1654,14 +2253,12 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed)
                       "noreturn functions must return void");
         exit(1);
     }
-    Node *body = parse_block(ps);
     Node *fn = new_node(ND_FUNC);
     // duplicate function name to a stable C string
     char *nm = (char *)xmalloc((size_t)name.length + 1);
     memcpy(nm, name.lexeme, (size_t)name.length);
     nm[name.length] = '\0';
     fn->name = nm;
-    fn->body = body;
     fn->ret_type = rtype;
     fn->param_types = param_types;
     fn->param_names = param_names;
@@ -1671,6 +2268,18 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed)
     fn->src = lexer_source(ps->lx);
     fn->is_noreturn = is_noreturn;
     fn->is_exposed = is_exposed;
+    fn->metadata.declared_param_count = -1;
+    fn->metadata.declared_local_count = -1;
+    fn->metadata.ret_token = NULL;
+    fn->is_chancecode = is_chancecode ? 1 : 0;
+    if (is_chancecode)
+    {
+        parse_chancecode_body(ps, fn);
+    }
+    else
+    {
+        fn->body = parse_block(ps);
+    }
     return fn;
 }
 
@@ -1749,6 +2358,7 @@ static void parse_extend_decl(Parser *ps, int leading_noreturn)
         memcpy(nm, name.lexeme, (size_t)name.length);
         nm[name.length] = '\0';
         s.name = nm;
+    s.backend_name = s.name;
         s.is_extern = 1;
         s.abi = xstrdup("C");
         // Default to i32 if return type omitted (should not happen here),
@@ -1841,6 +2451,7 @@ static void parse_extend_decl(Parser *ps, int leading_noreturn)
     memcpy(nm, name.lexeme, (size_t)name.length);
     nm[name.length] = '\0';
     s.name = nm;
+    s.backend_name = s.name;
     s.is_extern = 1;
     if (abi.kind == TK_STRING)
     {
@@ -1895,22 +2506,64 @@ Node *parse_unit(Parser *ps)
 {
     Node **fns = NULL;
     int fn_count = 0, fn_cap = 0;
+    struct PendingAttr *attrs = NULL;
+    int attr_count = 0, attr_cap = 0;
 
     for (;;)
     {
         Token t = lexer_peek(ps->lx);
+
+        while (t.kind == TK_LBRACKET)
+        {
+            struct PendingAttr attr = parse_attribute(ps);
+            if (attr_count == attr_cap)
+            {
+                int new_cap = attr_cap ? attr_cap * 2 : 4;
+                struct PendingAttr *new_attrs = (struct PendingAttr *)realloc(attrs, (size_t)new_cap * sizeof(struct PendingAttr));
+                if (!new_attrs)
+                {
+                    diag_error("out of memory while recording attributes");
+                    exit(1);
+                }
+                attrs = new_attrs;
+                attr_cap = new_cap;
+            }
+            attrs[attr_count++] = attr;
+            t = lexer_peek(ps->lx);
+        }
+
         if (t.kind == TK_KW_MODULE)
         {
+            if (attr_count > 0)
+            {
+                diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
+                              "attributes are not supported on module declarations");
+                exit(1);
+            }
             parse_module_decl(ps);
             continue;
         }
         if (t.kind == TK_KW_BRING)
         {
+            if (attr_count > 0)
+            {
+                diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
+                              "attributes are not supported on bring declarations");
+                exit(1);
+            }
             parse_bring_decl(ps);
             continue;
         }
         if (t.kind == TK_EOF)
+        {
+            if (attr_count > 0)
+            {
+                diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
+                              "attribute without following declaration");
+                exit(1);
+            }
             break;
+        }
 
         int visibility = 0;
         Token vis_tok = {0};
@@ -1952,6 +2605,12 @@ Node *parse_unit(Parser *ps)
         }
         if (t.kind == TK_KW_ENUM)
         {
+            if (attr_count > 0)
+            {
+                diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
+                              "attributes are not supported on enum declarations");
+                exit(1);
+            }
             if (leading_noreturn)
             {
                 diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
@@ -1974,6 +2633,12 @@ Node *parse_unit(Parser *ps)
         }
         if (t.kind == TK_KW_ALIAS)
         {
+            if (attr_count > 0)
+            {
+                diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
+                              "attributes are not supported on alias declarations");
+                exit(1);
+            }
             if (leading_noreturn)
             {
                 diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
@@ -1985,7 +2650,11 @@ Node *parse_unit(Parser *ps)
         }
         if (t.kind == TK_KW_FUN)
         {
-            Node *fn = parse_function(ps, leading_noreturn, visibility);
+            int has_chancecode = attrs_contains(attrs, attr_count, "ChanceCode");
+            Node *fn = parse_function(ps, leading_noreturn, visibility, has_chancecode);
+            apply_function_attributes(ps, fn, attrs, attr_count);
+            clear_pending_attrs(attrs, attr_count);
+            attr_count = 0;
             if (fn_count == fn_cap)
             {
                 fn_cap = fn_cap ? fn_cap * 2 : 4;
@@ -1993,6 +2662,13 @@ Node *parse_unit(Parser *ps)
             }
             fns[fn_count++] = fn;
             continue;
+        }
+
+        if (attr_count > 0)
+        {
+            diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
+                          "attributes are only supported before function declarations");
+            exit(1);
         }
 
         diag_error_at(lexer_source(ps->lx), t.line, t.col,
@@ -2040,10 +2716,29 @@ Node *parse_unit(Parser *ps)
                 dst->part_count = imp->part_count;
             }
             dst->full_name = imp->full_name;
+            dst->alias = imp->alias;
         }
         u->imports = imports;
         u->import_count = ps->import_count;
     }
+
+    if (ps->module_full_name && fn_count > 0)
+    {
+        for (int i = 0; i < fn_count; ++i)
+        {
+            Node *fn = fns[i];
+            if (!fn || fn->kind != ND_FUNC)
+                continue;
+            if (fn->metadata.backend_name || fn->is_entrypoint)
+                continue;
+            char *backend = make_module_backend_name(ps->module_full_name, fn->name);
+            if (backend)
+                fn->metadata.backend_name = backend;
+        }
+    }
+
+    clear_pending_attrs(attrs, attr_count);
+    free(attrs);
 
     return u;
 }

@@ -1,6 +1,6 @@
-module Call_Printf.Program;
+module Test.Program;
 
-bring RandomThing;
+bring Test.Chance as TC;
 
 extend from "C" i32 printf(char *, _vaargs_);
 extend from "C" i32 write(int, char *, int);
@@ -9,6 +9,8 @@ extend from "C" void *malloc(int);
 extend from "C" void free(void *);
 extend from "C" void exit(int);
 extend from "C" int test();
+
+extend fun test_chance() -> i32;
 
 hide alias string = char*;
 hide alias ptr<T> = T*;
@@ -40,12 +42,9 @@ expose struct OtherElement
     AnElement* ptrToSmth;
 };
 
-hide struct SmallTest
-{
-    i32 testVar;
-    u8 smallValue;
-};
 
+
+[EntryPoint]
 expose fun main() -> i32
 {
     // allocate 128 bytes for input
@@ -97,7 +96,7 @@ expose fun main() -> i32
     i16 of = test_overflow();
     printf("Overflow test result (should be -25536): %d\n", of);
 
-    printf("Calling test_chance(): %d\n", RandomThing.test_chance());
+    printf("Calling test_chance(): %d\n", TC.test_chance());
 
     printf("Calling extended C function test(): %d\n", test());
 
@@ -107,16 +106,16 @@ expose fun main() -> i32
 
     printf("Test hex output: %d in hex is %x\n", 0xFF, 0xFF);
 
-    SmallTest vari = {};
+    TC.SmallTest vari = {};
     vari.smallValue = 3;
     vari.testVar = 44;
     
-    SmallTest another = {
+    TC.SmallTest another = {
         .smallValue = 123,
         .testVar = 333 
     };
 
-    SmallTest* test = &vari;
+    TC.SmallTest* test = &vari;
 
     Element elem = SetElement;
 
@@ -133,14 +132,20 @@ expose fun main() -> i32
     i32 b = 4 >> 1;
     printf("4 >> 1 = %d\n", b); // expect 2
 
-    printf("typeof() = %s with sizeof() = %d\n", typeof(SmallTest), sizeof(SmallTest));
+    printf("typeof() = %s with sizeof() = %d\n", typeof(TC.SmallTest), sizeof(TC.SmallTest));
+
+    [MetadataCall("differentsig")]();
+
+    test_idk();
+
+    printf("Raw thing: %d\n", rawthing(10)); // expect 466
 
     ret ((vari.testVar as i32) + (another.smallValue as i32)); // expect 45 + 123 = 168
 }
 
-hide fun construct_thing() -> SmallTest
+hide fun construct_thing() -> TC.SmallTest
 {
-    SmallTest thing = {};
+    TC.SmallTest thing = {};
     thing.smallValue = 5;
     thing.testVar = 10;
     ret thing;
@@ -188,4 +193,20 @@ hide fun test_mul_overflow() -> u8
     u8 a = 200;
     u8 b = 200;
     ret a * b; // expect overflow to 64 (200*200=40000 -> 40000 % 256 = 64)
+}
+
+[OverrideMetadata(".func differentsig ret=void params=0 locals=0")]
+hide fun test_idk() -> void
+{
+    printf("Hello from sigfunction!\n");
+    ret;
+}
+
+[ChanceCode]
+fun rawthing(i32 a) -> i32
+{
+    const i32 456;
+    load_param 0;
+    binop add i32;
+    ret;
 }
