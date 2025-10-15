@@ -119,6 +119,15 @@ expose fun main() -> i32
 
     TC.SmallTest* test = &vari;
 
+    // NATHAN - REMEMBER TO FIX THIS BUG
+    // WHAT IS THE BUG? THE BUG IS THAT UPON DEREFERENCING A POINTER TO A STRUCT,
+    // THE TYPECHECKER THINKS IT'S AN I32, NOT THE STRUCT TYPE.
+
+    printf("Type of deref test: %d\n", test[0]);
+
+    i32* testintptr = test as i32*;
+    printf("testVar via intptr: %p\n", testintptr);
+
     Element elem = Element.SetElement;
 
     test=>testVar = 45;
