@@ -1,11 +1,14 @@
 #include "ast.h"
 #include "includes.h"
+#include "cclib.h"
 #include "module_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <stdint.h>
+#include <stdarg.h>
 #ifdef _WIN32
 #include <process.h>
 #else
@@ -73,6 +76,7 @@ static void usage(const char *prog)
     fprintf(stderr, "  --chancecodec <path>\n");
     fprintf(stderr, "                    Override ChanceCode CLI executable path (default: auto-detect or PATH)\n");
     fprintf(stderr, "  -I <dir>          Add include search directory for #include <>\n");
+    fprintf(stderr, "  --library         Emit a .cclib library instead of compiling/linking\n");
 }
 
 static char *read_all(const char *path, int *out_len)
@@ -371,6 +375,1312 @@ static const char *target_os_to_option(TargetOS os)
     }
 }
 
+typedef struct LibraryFunction
+{
+    char *name;
+    char *backend_name;
+    char *return_spec;
+    char **param_specs;
+    int param_count;
+    int is_varargs;
+    int is_noreturn;
+    int is_exposed;
+} LibraryFunction;
+
+typedef struct LibraryGlobal
+{
+    char *name;
+    char *type_spec;
+    int is_const;
+} LibraryGlobal;
+
+typedef struct LibraryStruct
+{
+    char *name;
+    char **field_names;
+    char **field_specs;
+    uint32_t *field_offsets;
+    uint32_t field_count;
+    uint32_t size_bytes;
+    int is_exposed;
+} LibraryStruct;
+
+typedef struct LibraryEnum
+{
+    char *name;
+    char **value_names;
+    int32_t *values;
+    uint32_t value_count;
+    int is_exposed;
+} LibraryEnum;
+
+typedef struct LibraryModuleData
+{
+    char *module_name;
+    LibraryFunction *functions;
+    int function_count;
+    int function_cap;
+    LibraryGlobal *globals;
+    int global_count;
+    int global_cap;
+    LibraryStruct *structs;
+    int struct_count;
+    int struct_cap;
+    LibraryEnum *enums;
+    int enum_count;
+    int enum_cap;
+    char *ccb_path;
+    char *ccbin_path;
+    uint8_t *ccbin_data;
+    size_t ccbin_size;
+} LibraryModuleData;
+
+typedef struct LoadedLibraryFunction
+{
+    char *name;
+    char *backend_name;
+    char *qualified_name;
+    Type *return_type;
+    Type **param_types;
+    int param_count;
+    int is_varargs;
+    int is_noreturn;
+    int is_exposed;
+} LoadedLibraryFunction;
+
+typedef struct LoadedLibrary
+{
+    char *path;
+    CclibFile file;
+    Type **allocated_types;
+    int allocated_type_count;
+    int allocated_type_cap;
+    char **ccbin_temp_paths;
+} LoadedLibrary;
+
+static char *dup_string_or_null(const char *s)
+{
+    if (!s)
+        return NULL;
+    return xstrdup(s);
+}
+
+static char *format_string(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int needed = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (needed < 0)
+        return NULL;
+    size_t len = (size_t)needed;
+    char *buffer = (char *)xmalloc(len + 1);
+    va_start(ap, fmt);
+    vsnprintf(buffer, len + 1, fmt, ap);
+    va_end(ap);
+    return buffer;
+}
+
+static char *module_name_to_prefix_copy(const char *module_full)
+{
+    if (!module_full || !*module_full)
+        return NULL;
+    size_t len = strlen(module_full);
+    char *copy = (char *)xmalloc(len + 1);
+    memcpy(copy, module_full, len + 1);
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (copy[i] == '.')
+            copy[i] = '_';
+    }
+    return copy;
+}
+
+static char *make_backend_name_from_module(const char *module_full, const char *fn_name)
+{
+    if (!module_full || !fn_name)
+        return NULL;
+    char *prefix = module_name_to_prefix_copy(module_full);
+    if (!prefix)
+        return NULL;
+    char *result = format_string("%s_%s", prefix, fn_name);
+    free(prefix);
+    return result;
+}
+
+static char *make_qualified_function_name(const char *module_full, const char *fn_name)
+{
+    if (!module_full || !fn_name)
+        return NULL;
+    return format_string("%s.%s", module_full, fn_name);
+}
+
+static int read_file_bytes(const char *path, uint8_t **out_data, size_t *out_size)
+{
+    if (!path || !out_data || !out_size)
+        return 1;
+    *out_data = NULL;
+    *out_size = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return errno ? errno : EIO;
+    if (fseek(f, 0, SEEK_END) != 0)
+    {
+        int err = errno ? errno : EIO;
+        fclose(f);
+        return err;
+    }
+    long sz = ftell(f);
+    if (sz < 0)
+    {
+        int err = errno ? errno : EIO;
+        fclose(f);
+        return err;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0)
+    {
+        int err = errno ? errno : EIO;
+        fclose(f);
+        return err;
+    }
+    uint8_t *buf = (uint8_t *)malloc((size_t)sz);
+    if (!buf)
+    {
+        fclose(f);
+        return ENOMEM;
+    }
+    if (sz > 0)
+    {
+        size_t read = fread(buf, 1, (size_t)sz, f);
+        if (read != (size_t)sz)
+        {
+            int err = ferror(f) ? errno : EIO;
+            free(buf);
+            fclose(f);
+            return err ? err : EIO;
+        }
+    }
+    fclose(f);
+    *out_data = buf;
+    *out_size = (size_t)sz;
+    return 0;
+}
+
+static int write_file_bytes(const char *path, const uint8_t *data, size_t size)
+{
+    if (!path)
+        return EINVAL;
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return errno ? errno : EIO;
+    if (size > 0 && data)
+    {
+        size_t written = fwrite(data, 1, size, f);
+        if (written != size)
+        {
+            int err = ferror(f) ? errno : EIO;
+            fclose(f);
+            remove(path);
+            return err ? err : EIO;
+        }
+    }
+    if (fclose(f) != 0)
+    {
+        int err = errno ? errno : EIO;
+        remove(path);
+        return err;
+    }
+    return 0;
+}
+
+static char *type_to_spec(Type *ty);
+static Type *spec_to_type(const char *spec);
+
+static Type builtin_ty_i8 = {.kind = TY_I8};
+static Type builtin_ty_u8 = {.kind = TY_U8};
+static Type builtin_ty_i16 = {.kind = TY_I16};
+static Type builtin_ty_u16 = {.kind = TY_U16};
+static Type builtin_ty_i32 = {.kind = TY_I32};
+static Type builtin_ty_u32 = {.kind = TY_U32};
+static Type builtin_ty_i64 = {.kind = TY_I64};
+static Type builtin_ty_u64 = {.kind = TY_U64};
+static Type builtin_ty_f32 = {.kind = TY_F32};
+static Type builtin_ty_f64 = {.kind = TY_F64};
+static Type builtin_ty_f128 = {.kind = TY_F128};
+static Type builtin_ty_void = {.kind = TY_VOID};
+static Type builtin_ty_char = {.kind = TY_CHAR};
+
+static char *type_to_spec(Type *ty)
+{
+    if (!ty)
+        return xstrdup("void");
+
+    ty = module_registry_canonical_type(ty);
+    if (!ty)
+        return xstrdup("void");
+
+    switch (ty->kind)
+    {
+    case TY_I8:
+        return xstrdup("i8");
+    case TY_U8:
+        return xstrdup("u8");
+    case TY_I16:
+        return xstrdup("i16");
+    case TY_U16:
+        return xstrdup("u16");
+    case TY_I32:
+        return xstrdup("i32");
+    case TY_U32:
+        return xstrdup("u32");
+    case TY_I64:
+        return xstrdup("i64");
+    case TY_U64:
+        return xstrdup("u64");
+    case TY_F32:
+        return xstrdup("f32");
+    case TY_F64:
+        return xstrdup("f64");
+    case TY_F128:
+        return xstrdup("f128");
+    case TY_VOID:
+        return xstrdup("void");
+    case TY_CHAR:
+        return xstrdup("char");
+    case TY_PTR:
+    {
+        char *inner = type_to_spec(ty->pointee);
+        char *res = format_string("ptr(%s)", inner ? inner : "void");
+        free(inner);
+        return res;
+    }
+    case TY_STRUCT:
+    {
+        const char *module = module_registry_find_struct_module(ty);
+        const char *name = ty->struct_name ? ty->struct_name : "";
+        if (!module)
+            module = "";
+        return format_string("struct(%s,%s)", module, name);
+    }
+    case TY_IMPORT:
+    {
+        const char *module = ty->import_module ? ty->import_module : "";
+        const char *name = ty->import_type_name ? ty->import_type_name : "";
+        return format_string("import(%s,%s)", module, name);
+    }
+    default:
+        break;
+    }
+    return xstrdup("void");
+}
+
+static Type *spec_to_type(const char *spec)
+{
+    if (!spec || !*spec)
+        return &builtin_ty_void;
+
+    if (strcmp(spec, "i8") == 0)
+        return &builtin_ty_i8;
+    if (strcmp(spec, "u8") == 0)
+        return &builtin_ty_u8;
+    if (strcmp(spec, "i16") == 0)
+        return &builtin_ty_i16;
+    if (strcmp(spec, "u16") == 0)
+        return &builtin_ty_u16;
+    if (strcmp(spec, "i32") == 0)
+        return &builtin_ty_i32;
+    if (strcmp(spec, "u32") == 0)
+        return &builtin_ty_u32;
+    if (strcmp(spec, "i64") == 0)
+        return &builtin_ty_i64;
+    if (strcmp(spec, "u64") == 0)
+        return &builtin_ty_u64;
+    if (strcmp(spec, "f32") == 0)
+        return &builtin_ty_f32;
+    if (strcmp(spec, "f64") == 0)
+        return &builtin_ty_f64;
+    if (strcmp(spec, "f128") == 0)
+        return &builtin_ty_f128;
+    if (strcmp(spec, "void") == 0)
+        return &builtin_ty_void;
+    if (strcmp(spec, "char") == 0)
+        return &builtin_ty_char;
+
+    if (strncmp(spec, "ptr(", 4) == 0)
+    {
+        size_t len = strlen(spec);
+        if (len < 6 || spec[len - 1] != ')')
+            return &builtin_ty_void;
+        char *inner = (char *)xmalloc(len - 4);
+        memcpy(inner, spec + 4, len - 5);
+        inner[len - 5] = '\0';
+        Type *inner_type = spec_to_type(inner);
+        free(inner);
+        return type_ptr(inner_type);
+    }
+
+    if (strncmp(spec, "struct(", 7) == 0 || strncmp(spec, "import(", 7) == 0)
+    {
+        int is_import = (spec[0] == 'i');
+        const char *open = strchr(spec, '(');
+        const char *comma = open ? strchr(open + 1, ',') : NULL;
+        const char *close = comma ? strrchr(comma, ')') : NULL;
+        if (!open || !comma || !close || close <= comma)
+            return &builtin_ty_void;
+        size_t module_len = (size_t)(comma - (open + 1));
+        size_t name_len = (size_t)(close - (comma + 1));
+        char *module = (char *)xmalloc(module_len + 1);
+        memcpy(module, open + 1, module_len);
+        module[module_len] = '\0';
+        char *name = (char *)xmalloc(name_len + 1);
+        memcpy(name, comma + 1, name_len);
+        name[name_len] = '\0';
+        Type *resolved = NULL;
+        if (!is_import)
+            resolved = module_registry_lookup_struct(module, name);
+        if (resolved)
+        {
+            free(module);
+            free(name);
+            return resolved;
+        }
+        Type *imp = (Type *)xcalloc(1, sizeof(Type));
+        imp->kind = TY_IMPORT;
+        imp->import_module = module;
+        imp->import_type_name = name;
+        return imp;
+    }
+
+    return &builtin_ty_void;
+}
+
+static LibraryModuleData *find_or_add_module(LibraryModuleData **modules, int *module_count, int *module_cap, const char *module_name)
+{
+    if (!module_name || !*module_name)
+        return NULL;
+    for (int i = 0; i < *module_count; ++i)
+    {
+        if (strcmp((*modules)[i].module_name, module_name) == 0)
+            return &(*modules)[i];
+    }
+    if (*module_count == *module_cap)
+    {
+        int new_cap = *module_cap ? *module_cap * 2 : 4;
+        LibraryModuleData *grown = (LibraryModuleData *)realloc(*modules, (size_t)new_cap * sizeof(LibraryModuleData));
+        if (!grown)
+            return NULL;
+        memset(grown + *module_cap, 0, (size_t)(new_cap - *module_cap) * sizeof(LibraryModuleData));
+        *modules = grown;
+        *module_cap = new_cap;
+    }
+    LibraryModuleData *mod = &(*modules)[(*module_count)++];
+    memset(mod, 0, sizeof(*mod));
+    mod->module_name = xstrdup(module_name);
+    return mod;
+}
+
+static int append_library_function(LibraryModuleData *mod, const LibraryFunction *fn)
+{
+    if (!mod || !fn)
+        return 1;
+    if (mod->function_count == mod->function_cap)
+    {
+        int new_cap = mod->function_cap ? mod->function_cap * 2 : 4;
+        LibraryFunction *grown = (LibraryFunction *)realloc(mod->functions, (size_t)new_cap * sizeof(LibraryFunction));
+        if (!grown)
+            return 1;
+        mod->functions = grown;
+        mod->function_cap = new_cap;
+    }
+    mod->functions[mod->function_count++] = *fn;
+    return 0;
+}
+
+static int append_library_global(LibraryModuleData *mod, const LibraryGlobal *gl)
+{
+    if (!mod || !gl)
+        return 1;
+    if (mod->global_count == mod->global_cap)
+    {
+        int new_cap = mod->global_cap ? mod->global_cap * 2 : 4;
+        LibraryGlobal *grown = (LibraryGlobal *)realloc(mod->globals, (size_t)new_cap * sizeof(LibraryGlobal));
+        if (!grown)
+            return 1;
+        mod->globals = grown;
+        mod->global_cap = new_cap;
+    }
+    mod->globals[mod->global_count++] = *gl;
+    return 0;
+}
+
+static int append_library_struct(LibraryModuleData *mod, const LibraryStruct *st)
+{
+    if (!mod || !st)
+        return 1;
+    if (mod->struct_count == mod->struct_cap)
+    {
+        int new_cap = mod->struct_cap ? mod->struct_cap * 2 : 4;
+        LibraryStruct *grown = (LibraryStruct *)realloc(mod->structs, (size_t)new_cap * sizeof(LibraryStruct));
+        if (!grown)
+            return 1;
+        mod->structs = grown;
+        mod->struct_cap = new_cap;
+    }
+    mod->structs[mod->struct_count++] = *st;
+    return 0;
+}
+
+static int append_library_enum(LibraryModuleData *mod, const LibraryEnum *en)
+{
+    if (!mod || !en)
+        return 1;
+    if (mod->enum_count == mod->enum_cap)
+    {
+        int new_cap = mod->enum_cap ? mod->enum_cap * 2 : 4;
+        LibraryEnum *grown = (LibraryEnum *)realloc(mod->enums, (size_t)new_cap * sizeof(LibraryEnum));
+        if (!grown)
+            return 1;
+        mod->enums = grown;
+        mod->enum_cap = new_cap;
+    }
+    mod->enums[mod->enum_count++] = *en;
+    return 0;
+}
+
+static void free_library_function(LibraryFunction *fn)
+{
+    if (!fn)
+        return;
+    free(fn->name);
+    free(fn->backend_name);
+    free(fn->return_spec);
+    if (fn->param_specs)
+    {
+        for (int i = 0; i < fn->param_count; ++i)
+            free(fn->param_specs[i]);
+        free(fn->param_specs);
+    }
+    memset(fn, 0, sizeof(*fn));
+}
+
+static void free_library_global(LibraryGlobal *gl)
+{
+    if (!gl)
+        return;
+    free(gl->name);
+    free(gl->type_spec);
+    memset(gl, 0, sizeof(*gl));
+}
+
+static void free_library_struct(LibraryStruct *st)
+{
+    if (!st)
+        return;
+    free(st->name);
+    if (st->field_names)
+    {
+        for (uint32_t i = 0; i < st->field_count; ++i)
+            free(st->field_names[i]);
+        free(st->field_names);
+    }
+    if (st->field_specs)
+    {
+        for (uint32_t i = 0; i < st->field_count; ++i)
+            free(st->field_specs[i]);
+        free(st->field_specs);
+    }
+    free(st->field_offsets);
+    memset(st, 0, sizeof(*st));
+}
+
+static void free_library_enum(LibraryEnum *en)
+{
+    if (!en)
+        return;
+    free(en->name);
+    if (en->value_names)
+    {
+        for (uint32_t i = 0; i < en->value_count; ++i)
+            free(en->value_names[i]);
+        free(en->value_names);
+    }
+    free(en->values);
+    memset(en, 0, sizeof(*en));
+}
+
+static void free_library_module(LibraryModuleData *mod)
+{
+    if (!mod)
+        return;
+    free(mod->module_name);
+    for (int i = 0; i < mod->function_count; ++i)
+        free_library_function(&mod->functions[i]);
+    free(mod->functions);
+    for (int i = 0; i < mod->global_count; ++i)
+        free_library_global(&mod->globals[i]);
+    free(mod->globals);
+    for (int i = 0; i < mod->struct_count; ++i)
+        free_library_struct(&mod->structs[i]);
+    free(mod->structs);
+    for (int i = 0; i < mod->enum_count; ++i)
+        free_library_enum(&mod->enums[i]);
+    free(mod->enums);
+    free(mod->ccb_path);
+    free(mod->ccbin_path);
+    free(mod->ccbin_data);
+    memset(mod, 0, sizeof(*mod));
+}
+
+static void free_library_module_array(LibraryModuleData *mods, int count)
+{
+    if (!mods)
+        return;
+    for (int i = 0; i < count; ++i)
+        free_library_module(&mods[i]);
+    free(mods);
+}
+
+static int library_module_has_function(const LibraryModuleData *mod, const char *name)
+{
+    if (!mod || !name)
+        return 0;
+    for (int i = 0; i < mod->function_count; ++i)
+    {
+        if (mod->functions[i].name && strcmp(mod->functions[i].name, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int library_module_has_struct(const LibraryModuleData *mod, const char *name)
+{
+    if (!mod || !name)
+        return 0;
+    for (int i = 0; i < mod->struct_count; ++i)
+    {
+        if (mod->structs[i].name && strcmp(mod->structs[i].name, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int library_module_has_enum(const LibraryModuleData *mod, const char *name)
+{
+    if (!mod || !name)
+        return 0;
+    for (int i = 0; i < mod->enum_count; ++i)
+    {
+        if (mod->enums[i].name && strcmp(mod->enums[i].name, name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int collect_functions_from_unit(const Node *unit, LibraryModuleData *mod)
+{
+    if (!unit || unit->kind != ND_UNIT || !mod)
+        return 0;
+    for (int i = 0; i < unit->stmt_count; ++i)
+    {
+        const Node *fn = unit->stmts[i];
+        if (!fn || fn->kind != ND_FUNC)
+            continue;
+        if (!fn->is_exposed || !fn->name)
+            continue;
+        if (library_module_has_function(mod, fn->name))
+            continue;
+        LibraryFunction out = {0};
+        out.name = xstrdup(fn->name);
+        const char *backend = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+        out.backend_name = backend ? xstrdup(backend) : NULL;
+        Type *ret_ty = fn->ret_type ? fn->ret_type : type_i32();
+        out.return_spec = type_to_spec(ret_ty);
+        out.param_count = fn->param_count;
+        if (out.param_count > 0)
+        {
+            out.param_specs = (char **)xcalloc((size_t)out.param_count, sizeof(char *));
+            if (!out.param_specs)
+            {
+                free_library_function(&out);
+                return 1;
+            }
+            for (int pi = 0; pi < out.param_count; ++pi)
+            {
+                Type *pt = (fn->param_types && pi < fn->param_count) ? fn->param_types[pi] : NULL;
+                out.param_specs[pi] = type_to_spec(pt);
+                if (!out.param_specs[pi])
+                {
+                    free_library_function(&out);
+                    return 1;
+                }
+            }
+        }
+        out.is_varargs = 0;
+        out.is_noreturn = fn->is_noreturn;
+        out.is_exposed = fn->is_exposed;
+        if (append_library_function(mod, &out) != 0)
+        {
+            free_library_function(&out);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int collect_structs_for_module(const char *module_name, LibraryModuleData *mod)
+{
+    if (!module_name || !mod)
+        return 0;
+    int total = module_registry_struct_entry_count();
+    for (int i = 0; i < total; ++i)
+    {
+        const char *entry_module = module_registry_struct_entry_module(i);
+        if (!entry_module || strcmp(entry_module, module_name) != 0)
+            continue;
+        const char *struct_name = module_registry_struct_entry_name(i);
+        if (library_module_has_struct(mod, struct_name))
+            continue;
+        Type *ty = module_registry_struct_entry_type(i);
+        if (!ty)
+            continue;
+        LibraryStruct st = {0};
+        st.name = struct_name ? xstrdup(struct_name) : NULL;
+        int field_count = ty->strct.field_count;
+        if (field_count > 0)
+        {
+            st.field_names = (char **)xcalloc((size_t)field_count, sizeof(char *));
+            st.field_specs = (char **)xcalloc((size_t)field_count, sizeof(char *));
+            st.field_offsets = (uint32_t *)xcalloc((size_t)field_count, sizeof(uint32_t));
+            if (!st.field_names || !st.field_specs || !st.field_offsets)
+            {
+                free_library_struct(&st);
+                return 1;
+            }
+            for (int fi = 0; fi < field_count; ++fi)
+            {
+                const char *fname = (ty->strct.field_names && fi < field_count) ? ty->strct.field_names[fi] : NULL;
+                st.field_names[fi] = fname ? xstrdup(fname) : NULL;
+                Type *ftype = (ty->strct.field_types && fi < field_count) ? ty->strct.field_types[fi] : NULL;
+                st.field_specs[fi] = type_to_spec(ftype);
+                int offset = (ty->strct.field_offsets && fi < field_count) ? ty->strct.field_offsets[fi] : 0;
+                st.field_offsets[fi] = offset < 0 ? 0u : (uint32_t)offset;
+                if (!st.field_specs[fi])
+                {
+                    free_library_struct(&st);
+                    return 1;
+                }
+            }
+        }
+        st.field_count = (uint32_t)(field_count < 0 ? 0 : field_count);
+        st.size_bytes = ty->strct.size_bytes < 0 ? 0u : (uint32_t)ty->strct.size_bytes;
+        st.is_exposed = ty->is_exposed != 0;
+        if (append_library_struct(mod, &st) != 0)
+        {
+            free_library_struct(&st);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int collect_enums_for_module(const char *module_name, LibraryModuleData *mod)
+{
+    if (!module_name || !mod)
+        return 0;
+    int enum_total = module_registry_enum_entry_count();
+    int value_total = module_registry_enum_value_entry_count();
+    for (int i = 0; i < enum_total; ++i)
+    {
+        const char *entry_module = module_registry_enum_entry_module(i);
+        if (!entry_module || strcmp(entry_module, module_name) != 0)
+            continue;
+        const char *enum_name = module_registry_enum_entry_name(i);
+        if (library_module_has_enum(mod, enum_name))
+            continue;
+        LibraryEnum en = {0};
+        en.name = enum_name ? xstrdup(enum_name) : NULL;
+        int count = 0;
+        for (int vi = 0; vi < value_total; ++vi)
+        {
+            const char *value_module = module_registry_enum_value_entry_module(vi);
+            const char *value_enum = module_registry_enum_value_entry_enum(vi);
+            if (value_module && value_enum && strcmp(value_module, module_name) == 0 && strcmp(value_enum, enum_name) == 0)
+                ++count;
+        }
+        if (count > 0)
+        {
+            en.value_names = (char **)xcalloc((size_t)count, sizeof(char *));
+            en.values = (int32_t *)xcalloc((size_t)count, sizeof(int32_t));
+            if (!en.value_names || !en.values)
+            {
+                free_library_enum(&en);
+                return 1;
+            }
+            int idx = 0;
+            for (int vi = 0; vi < value_total; ++vi)
+            {
+                const char *value_module = module_registry_enum_value_entry_module(vi);
+                const char *value_enum = module_registry_enum_value_entry_enum(vi);
+                if (!value_module || !value_enum || strcmp(value_module, module_name) != 0 || strcmp(value_enum, enum_name) != 0)
+                    continue;
+                const char *value_name = module_registry_enum_value_entry_name(vi);
+                int value = module_registry_enum_value_entry_value(vi);
+                if (idx < count)
+                {
+                    en.value_names[idx] = value_name ? xstrdup(value_name) : NULL;
+                    en.values[idx] = (int32_t)value;
+                    ++idx;
+                }
+            }
+            en.value_count = (uint32_t)count;
+        }
+        en.is_exposed = 1;
+        if (append_library_enum(mod, &en) != 0)
+        {
+            free_library_enum(&en);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int collect_metadata_for_unit(const Node *unit, const char *ccb_path,
+                                     LibraryModuleData **modules,
+                                     int *module_count,
+                                     int *module_cap)
+{
+    if (!unit || unit->kind != ND_UNIT || !modules || !module_count || !module_cap)
+        return 0;
+    const char *module_name = unit->module_path.full_name;
+    if (!module_name || !*module_name)
+        return 0;
+    LibraryModuleData *mod = find_or_add_module(modules, module_count, module_cap, module_name);
+    if (!mod)
+        return 1;
+    if (!mod->ccb_path && ccb_path)
+        mod->ccb_path = xstrdup(ccb_path);
+    if (collect_functions_from_unit(unit, mod))
+        return 1;
+    if (collect_structs_for_module(module_name, mod))
+        return 1;
+    if (collect_enums_for_module(module_name, mod))
+        return 1;
+    return 0;
+}
+
+static int write_library_file(const char *path, LibraryModuleData *mods, int module_count)
+{
+    if (!path || !mods || module_count <= 0)
+        return EINVAL;
+
+    CclibModule *modules = (CclibModule *)xcalloc((size_t)module_count, sizeof(CclibModule));
+    if (!modules)
+        return ENOMEM;
+
+    CclibFile file = {0};
+    file.modules = modules;
+    file.module_count = (uint32_t)module_count;
+    file.format_version = 1;
+
+    int err = 0;
+
+    for (int i = 0; i < module_count && !err; ++i)
+    {
+        LibraryModuleData *src = &mods[i];
+        CclibModule *dst = &modules[i];
+        dst->module_name = src->module_name;
+
+        if (!src->ccbin_data)
+        {
+            err = EINVAL;
+            break;
+        }
+        if (src->ccbin_size > UINT32_MAX)
+        {
+            err = ERANGE;
+            break;
+        }
+
+        if (src->function_count > 0)
+        {
+            dst->functions = (CclibFunction *)xcalloc((size_t)src->function_count, sizeof(CclibFunction));
+            if (!dst->functions)
+            {
+                err = ENOMEM;
+                break;
+            }
+            for (int fi = 0; fi < src->function_count; ++fi)
+            {
+                LibraryFunction *lf = &src->functions[fi];
+                CclibFunction *cf = &dst->functions[fi];
+                cf->name = lf->name;
+                cf->backend_name = lf->backend_name;
+                cf->return_type = lf->return_spec;
+                cf->param_types = lf->param_specs;
+                cf->param_count = (uint32_t)(lf->param_count < 0 ? 0 : lf->param_count);
+                cf->is_varargs = (uint8_t)(lf->is_varargs ? 1 : 0);
+                cf->is_noreturn = (uint8_t)(lf->is_noreturn ? 1 : 0);
+                cf->is_exposed = (uint8_t)(lf->is_exposed ? 1 : 0);
+            }
+        }
+        dst->function_count = (uint32_t)(src->function_count < 0 ? 0 : src->function_count);
+
+        if (src->struct_count > 0)
+        {
+            dst->structs = (CclibStruct *)xcalloc((size_t)src->struct_count, sizeof(CclibStruct));
+            if (!dst->structs)
+            {
+                err = ENOMEM;
+                break;
+            }
+            for (int si = 0; si < src->struct_count; ++si)
+            {
+                LibraryStruct *ls = &src->structs[si];
+                CclibStruct *cs = &dst->structs[si];
+                cs->name = ls->name;
+                cs->field_names = ls->field_names;
+                cs->field_types = ls->field_specs;
+                cs->field_offsets = ls->field_offsets;
+                cs->field_count = ls->field_count;
+                cs->size_bytes = ls->size_bytes;
+                cs->is_exposed = (uint8_t)(ls->is_exposed ? 1 : 0);
+            }
+        }
+        dst->struct_count = (uint32_t)(src->struct_count < 0 ? 0 : src->struct_count);
+
+        if (src->enum_count > 0)
+        {
+            dst->enums = (CclibEnum *)xcalloc((size_t)src->enum_count, sizeof(CclibEnum));
+            if (!dst->enums)
+            {
+                err = ENOMEM;
+                break;
+            }
+            for (int ei = 0; ei < src->enum_count; ++ei)
+            {
+                LibraryEnum *le = &src->enums[ei];
+                CclibEnum *ce = &dst->enums[ei];
+                ce->name = le->name;
+                if (le->value_count > 0)
+                {
+                    ce->values = (CclibEnumValue *)xcalloc((size_t)le->value_count, sizeof(CclibEnumValue));
+                    if (!ce->values)
+                    {
+                        err = ENOMEM;
+                        break;
+                    }
+                    for (uint32_t vi = 0; vi < le->value_count; ++vi)
+                    {
+                        ce->values[vi].name = le->value_names ? le->value_names[vi] : NULL;
+                        ce->values[vi].value = le->values ? le->values[vi] : 0;
+                    }
+                }
+                ce->value_count = le->value_count;
+                ce->is_exposed = (uint8_t)(le->is_exposed ? 1 : 0);
+            }
+        }
+        dst->enum_count = (uint32_t)(src->enum_count < 0 ? 0 : src->enum_count);
+
+        if (src->global_count > 0)
+        {
+            dst->globals = (CclibGlobal *)xcalloc((size_t)src->global_count, sizeof(CclibGlobal));
+            if (!dst->globals)
+            {
+                err = ENOMEM;
+                break;
+            }
+            for (int gi = 0; gi < src->global_count; ++gi)
+            {
+                LibraryGlobal *lg = &src->globals[gi];
+                CclibGlobal *cg = &dst->globals[gi];
+                cg->name = lg->name;
+                cg->type_spec = lg->type_spec;
+                cg->is_const = (uint8_t)(lg->is_const ? 1 : 0);
+            }
+        }
+        dst->global_count = (uint32_t)(src->global_count < 0 ? 0 : src->global_count);
+
+        dst->ccbin_data = src->ccbin_data;
+        dst->ccbin_size = (uint32_t)src->ccbin_size;
+    }
+
+    if (!err)
+    {
+        err = cclib_write(path, &file);
+    }
+
+    for (int i = 0; i < module_count; ++i)
+    {
+        CclibModule *dst = &modules[i];
+        if (dst->functions)
+            free(dst->functions);
+        if (dst->structs)
+            free(dst->structs);
+        if (dst->enums)
+        {
+            for (uint32_t vi = 0; vi < dst->enum_count; ++vi)
+            {
+                if (dst->enums[vi].values)
+                    free(dst->enums[vi].values);
+            }
+            free(dst->enums);
+        }
+        if (dst->globals)
+            free(dst->globals);
+    }
+    free(modules);
+
+    return err;
+}
+
+static int loaded_library_add_type(LoadedLibrary *lib, Type *ty)
+{
+    if (!lib || !ty)
+        return 1;
+    if (lib->allocated_type_count == lib->allocated_type_cap)
+    {
+        int new_cap = lib->allocated_type_cap ? lib->allocated_type_cap * 2 : 8;
+        Type **grown = (Type **)realloc(lib->allocated_types, (size_t)new_cap * sizeof(Type *));
+        if (!grown)
+            return 1;
+        lib->allocated_types = grown;
+        lib->allocated_type_cap = new_cap;
+    }
+    lib->allocated_types[lib->allocated_type_count++] = ty;
+    return 0;
+}
+
+static void free_loaded_library_type(Type *ty)
+{
+    if (!ty)
+        return;
+    if (ty->kind == TY_STRUCT)
+    {
+        if (ty->strct.field_names)
+        {
+            char **names = (char **)ty->strct.field_names;
+            for (int i = 0; i < ty->strct.field_count; ++i)
+                free(names[i]);
+            free(names);
+        }
+        if (ty->strct.field_types)
+            free(ty->strct.field_types);
+        if (ty->strct.field_offsets)
+            free(ty->strct.field_offsets);
+        free((void *)ty->struct_name);
+    }
+    else if (ty->kind == TY_IMPORT)
+    {
+        free((void *)ty->import_module);
+        free((void *)ty->import_type_name);
+        // import_resolved is not owned
+    }
+    free(ty);
+}
+
+static void free_loaded_library_function(LoadedLibraryFunction *fn)
+{
+    if (!fn)
+        return;
+    free(fn->name);
+    free(fn->backend_name);
+    free(fn->qualified_name);
+    free(fn->param_types);
+    memset(fn, 0, sizeof(*fn));
+}
+
+static int append_loaded_function(LoadedLibraryFunction **funcs,
+                                  int *count,
+                                  int *cap,
+                                  const LoadedLibraryFunction *fn)
+{
+    if (!funcs || !count || !cap || !fn)
+        return 1;
+    if (*count == *cap)
+    {
+        int new_cap = *cap ? *cap * 2 : 8;
+        LoadedLibraryFunction *grown = (LoadedLibraryFunction *)realloc(*funcs, (size_t)new_cap * sizeof(LoadedLibraryFunction));
+        if (!grown)
+            return 1;
+        *funcs = grown;
+        *cap = new_cap;
+    }
+    (*funcs)[*count] = *fn;
+    (*count)++;
+    return 0;
+}
+
+static int register_structs_from_cclib_module(LoadedLibrary *lib, const char *module_name, const CclibModule *module)
+{
+    if (!lib || !module_name || !module)
+        return 0;
+    for (uint32_t si = 0; si < module->struct_count; ++si)
+    {
+        const CclibStruct *st = &module->structs[si];
+        if (!st->name)
+            continue;
+        Type *ty = (Type *)xcalloc(1, sizeof(Type));
+        if (!ty)
+            return 1;
+        ty->kind = TY_STRUCT;
+        ty->struct_name = xstrdup(st->name);
+        ty->is_exposed = st->is_exposed;
+        int field_count = (int)st->field_count;
+        ty->strct.field_count = field_count;
+        ty->strct.size_bytes = (int)st->size_bytes;
+        if (loaded_library_add_type(lib, ty))
+        {
+            free_loaded_library_type(ty);
+            return 1;
+        }
+        module_registry_register_struct(module_name, ty);
+        if (field_count > 0)
+        {
+            char **names = (char **)xcalloc((size_t)field_count, sizeof(char *));
+            Type **types = (Type **)xcalloc((size_t)field_count, sizeof(Type *));
+            int *offsets = (int *)xcalloc((size_t)field_count, sizeof(int));
+            if (!names || !types || !offsets)
+            {
+                free(names);
+                free(types);
+                free(offsets);
+                return 1;
+            }
+            for (int fi = 0; fi < field_count; ++fi)
+            {
+                names[fi] = st->field_names && fi < field_count && st->field_names[fi] ? xstrdup(st->field_names[fi]) : NULL;
+                const char *spec = (st->field_types && fi < field_count) ? st->field_types[fi] : NULL;
+                types[fi] = spec_to_type(spec);
+                offsets[fi] = (st->field_offsets && fi < field_count) ? (int)st->field_offsets[fi] : 0;
+            }
+            ty->strct.field_names = (const char **)names;
+            ty->strct.field_types = types;
+            ty->strct.field_offsets = offsets;
+        }
+    }
+    return 0;
+}
+
+static int register_enums_from_cclib_module(LoadedLibrary *lib, const char *module_name, const CclibModule *module)
+{
+    if (!lib || !module_name || !module)
+        return 0;
+    for (uint32_t ei = 0; ei < module->enum_count; ++ei)
+    {
+        const CclibEnum *en = &module->enums[ei];
+        if (!en->name)
+            continue;
+        Type *enum_type = (Type *)xcalloc(1, sizeof(Type));
+        if (!enum_type)
+            return 1;
+        enum_type->kind = TY_I32;
+        enum_type->is_exposed = en->is_exposed;
+        if (loaded_library_add_type(lib, enum_type))
+        {
+            free(enum_type);
+            return 1;
+        }
+        module_registry_register_enum(module_name, en->name, enum_type);
+        for (uint32_t vi = 0; vi < en->value_count; ++vi)
+        {
+            const char *value_name = en->values[vi].name;
+            int value = (int)en->values[vi].value;
+            if (value_name)
+                module_registry_register_enum_value(module_name, en->name, value_name, value);
+        }
+    }
+    return 0;
+}
+
+static int harvest_functions_from_cclib_module(const CclibModule *module,
+                                               const char *module_name,
+                                               LoadedLibraryFunction **out_funcs,
+                                               int *func_count,
+                                               int *func_cap)
+{
+    if (!module || !module_name || !out_funcs || !func_count || !func_cap)
+        return 0;
+    for (uint32_t fi = 0; fi < module->function_count; ++fi)
+    {
+        const CclibFunction *fn = &module->functions[fi];
+        if (!fn->name || !fn->is_exposed)
+            continue;
+        LoadedLibraryFunction lf = {0};
+        lf.name = xstrdup(fn->name);
+        char *qualified = make_qualified_function_name(module_name, fn->name);
+        lf.qualified_name = qualified;
+        const char *backend_src = fn->backend_name;
+        char *generated_backend = NULL;
+        if (!backend_src || !*backend_src)
+        {
+            generated_backend = make_backend_name_from_module(module_name, fn->name);
+            backend_src = generated_backend;
+        }
+        lf.backend_name = backend_src ? xstrdup(backend_src) : NULL;
+        free(generated_backend);
+        lf.return_type = spec_to_type(fn->return_type);
+        lf.param_count = (int)fn->param_count;
+        if (lf.param_count > 0)
+        {
+            lf.param_types = (Type **)xcalloc((size_t)lf.param_count, sizeof(Type *));
+            if (!lf.param_types)
+            {
+                free_loaded_library_function(&lf);
+                return 1;
+            }
+            for (int pi = 0; pi < lf.param_count; ++pi)
+            {
+                const char *ps = (fn->param_types && (uint32_t)pi < fn->param_count) ? fn->param_types[pi] : NULL;
+                lf.param_types[pi] = spec_to_type(ps);
+            }
+        }
+        lf.is_varargs = fn->is_varargs ? 1 : 0;
+        lf.is_noreturn = fn->is_noreturn ? 1 : 0;
+        lf.is_exposed = fn->is_exposed ? 1 : 0;
+        if (append_loaded_function(out_funcs, func_count, func_cap, &lf) != 0)
+        {
+            free_loaded_library_function(&lf);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void free_loaded_library(LoadedLibrary *lib)
+{
+    if (!lib)
+        return;
+    if (lib->ccbin_temp_paths)
+    {
+        for (uint32_t i = 0; i < lib->file.module_count; ++i)
+        {
+            if (lib->ccbin_temp_paths[i])
+            {
+                remove(lib->ccbin_temp_paths[i]);
+                free(lib->ccbin_temp_paths[i]);
+            }
+        }
+        free(lib->ccbin_temp_paths);
+    }
+    if (lib->allocated_types)
+    {
+        for (int i = 0; i < lib->allocated_type_count; ++i)
+            free_loaded_library_type(lib->allocated_types[i]);
+        free(lib->allocated_types);
+    }
+    cclib_free(&lib->file);
+    free(lib->path);
+    memset(lib, 0, sizeof(*lib));
+}
+
+static void symtab_add_library_functions(SymTable *syms,
+                                         const LoadedLibraryFunction *funcs,
+                                         int func_count)
+{
+    if (!syms || !funcs || func_count <= 0)
+        return;
+    for (int i = 0; i < func_count; ++i)
+    {
+        const LoadedLibraryFunction *lf = &funcs[i];
+        if (!lf->qualified_name)
+            continue;
+        Symbol sym = {0};
+        sym.kind = SYM_FUNC;
+        sym.name = lf->qualified_name;
+        sym.backend_name = lf->backend_name ? lf->backend_name : lf->qualified_name;
+        sym.is_extern = 1;
+        sym.abi = "C";
+        sym.sig.ret = lf->return_type ? lf->return_type : type_i32();
+        sym.sig.params = lf->param_types;
+        sym.sig.param_count = lf->param_count;
+        sym.sig.is_varargs = lf->is_varargs;
+        sym.is_noreturn = lf->is_noreturn;
+        symtab_add(syms, sym);
+    }
+}
+
+static int load_cclib_library(const char *path,
+                              LoadedLibrary **libs,
+                              int *lib_count,
+                              int *lib_cap,
+                              LoadedLibraryFunction **funcs,
+                              int *func_count,
+                              int *func_cap)
+{
+    if (!path || !libs || !lib_count || !lib_cap || !funcs || !func_count || !func_cap)
+        return EINVAL;
+
+    LoadedLibrary lib = {0};
+    lib.path = xstrdup(path);
+    int err = cclib_read(path, &lib.file);
+    if (err)
+    {
+        fprintf(stderr, "error: failed to read cclib '%s' (%s)\n", path, strerror(err));
+        free(lib.path);
+        return err;
+    }
+    if (lib.file.module_count > 0)
+    {
+        lib.ccbin_temp_paths = (char **)xcalloc(lib.file.module_count, sizeof(char *));
+        if (!lib.ccbin_temp_paths)
+        {
+            free_loaded_library(&lib);
+            return ENOMEM;
+        }
+    }
+
+    for (uint32_t mi = 0; mi < lib.file.module_count; ++mi)
+    {
+        const CclibModule *mod = &lib.file.modules[mi];
+        const char *module_name = mod->module_name;
+        if (!module_name)
+            continue;
+        if (register_structs_from_cclib_module(&lib, module_name, mod))
+        {
+            err = ENOMEM;
+            break;
+        }
+        if (register_enums_from_cclib_module(&lib, module_name, mod))
+        {
+            err = ENOMEM;
+            break;
+        }
+        if (harvest_functions_from_cclib_module(mod, module_name, funcs, func_count, func_cap))
+        {
+            err = ENOMEM;
+            break;
+        }
+    }
+
+    if (!err)
+    {
+        if (*lib_count == *lib_cap)
+        {
+            int new_cap = *lib_cap ? *lib_cap * 2 : 4;
+            LoadedLibrary *grown = (LoadedLibrary *)realloc(*libs, (size_t)new_cap * sizeof(LoadedLibrary));
+            if (!grown)
+                err = ENOMEM;
+            else
+            {
+                *libs = grown;
+                *lib_cap = new_cap;
+            }
+        }
+        if (!err)
+        {
+            (*libs)[*lib_count] = lib;
+            (*lib_count)++;
+        }
+    }
+
+    if (err)
+    {
+        free_loaded_library(&lib);
+    }
+
+    return err;
+}
+
 static int run_chancecodec_process(const char *cmd,
                                    const char *backend,
                                    int opt_level,
@@ -475,6 +1785,80 @@ static int run_chancecodec_process(const char *cmd,
 #endif
 }
 
+static int run_chancecodec_emit_ccbin(const char *cmd,
+                                      const char *ccb_path,
+                                      const char *ccbin_path,
+                                      int opt_level,
+                                      int *spawn_errno_out)
+{
+    if (spawn_errno_out)
+        *spawn_errno_out = 0;
+    if (!cmd || !ccb_path || !ccbin_path)
+    {
+        if (spawn_errno_out)
+            *spawn_errno_out = EINVAL;
+        return -1;
+    }
+#ifdef _WIN32
+    const char *args[8];
+    char optbuf[8];
+    int idx = 0;
+    args[idx++] = cmd;
+    if (opt_level > 0)
+    {
+        snprintf(optbuf, sizeof(optbuf), "-O%d", opt_level);
+        args[idx++] = optbuf;
+    }
+    args[idx++] = ccb_path;
+    args[idx++] = "--emit-ccbin";
+    args[idx++] = ccbin_path;
+    args[idx] = NULL;
+    intptr_t rc = _spawnvp(_P_WAIT, cmd, args);
+    if (rc == -1)
+    {
+        if (spawn_errno_out)
+            *spawn_errno_out = errno;
+        return -1;
+    }
+    return (int)rc;
+#else
+    char *args[8];
+    char optbuf[8];
+    int idx = 0;
+    args[idx++] = (char *)cmd;
+    if (opt_level > 0)
+    {
+        snprintf(optbuf, sizeof(optbuf), "-O%d", opt_level);
+        args[idx++] = optbuf;
+    }
+    args[idx++] = (char *)ccb_path;
+    args[idx++] = "--emit-ccbin";
+    args[idx++] = (char *)ccbin_path;
+    args[idx] = NULL;
+    pid_t pid = 0;
+    int rc = posix_spawnp(&pid, cmd, NULL, NULL, args, environ);
+    if (rc != 0)
+    {
+        if (spawn_errno_out)
+            *spawn_errno_out = rc;
+        errno = rc;
+        return -1;
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) == -1)
+    {
+        if (spawn_errno_out)
+            *spawn_errno_out = errno;
+        return -1;
+    }
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))
+        return 128 + WTERMSIG(status);
+    return -1;
+#endif
+}
+
 static int is_relocatable_obj(const char *path)
 {
     // Quick and permissive checks: ELF ET_REL, or COFF OBJ (not MZ/PE)
@@ -512,9 +1896,11 @@ int main(int argc, char **argv)
 #else
     const char *out = "a";
 #endif
+    int output_overridden = 0;
     int stop_after_asm = 0;
     int stop_after_ccb = 0;
     int no_link = 0; // -c / --no-link
+    int emit_library = 0;
     int freestanding = 0;
     int m32 = 0;
     int opt_level = 0;
@@ -537,6 +1923,8 @@ int main(int argc, char **argv)
     int ce_count = 0, ce_cap = 0;
     const char **ccb_inputs = NULL;
     int ccb_count = 0, ccb_cap = 0;
+    const char **cclib_inputs = NULL;
+    int cclib_count = 0, cclib_cap = 0;
     const char **obj_inputs = NULL;
     int obj_count = 0, obj_cap = 0;
     // include paths
@@ -546,6 +1934,16 @@ int main(int argc, char **argv)
     char exe_dir[1024] = {0};
     get_executable_dir(exe_dir, sizeof(exe_dir), argv[0]);
     chance_add_default_include_dirs(&include_dirs, &include_dir_count);
+
+    LibraryModuleData *library_modules = NULL;
+    int library_module_count = 0;
+    int library_module_cap = 0;
+    LoadedLibrary *loaded_libraries = NULL;
+    int loaded_library_count = 0;
+    int loaded_library_cap = 0;
+    LoadedLibraryFunction *loaded_library_functions = NULL;
+    int loaded_library_function_count = 0;
+    int loaded_library_function_cap = 0;
 
     for (int i = 1; i < argc; i++)
     {
@@ -566,6 +1964,7 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
         {
             out = argv[++i];
+            output_overridden = 1;
             continue;
         }
         if (strcmp(argv[i], "-S") == 0)
@@ -637,6 +2036,11 @@ int main(int argc, char **argv)
             chancecodec_cmd_override = argv[++i];
             continue;
         }
+        if (strcmp(argv[i], "--library") == 0)
+        {
+            emit_library = 1;
+            continue;
+        }
         if (strcmp(argv[i], "--freestanding") == 0)
         {
             freestanding = 1;
@@ -702,6 +2106,15 @@ int main(int argc, char **argv)
             }
             ccb_inputs[ccb_count++] = arg;
         }
+        else if (ends_with_icase(arg, ".cclib"))
+        {
+            if (cclib_count == cclib_cap)
+            {
+                cclib_cap = cclib_cap ? cclib_cap * 2 : 4;
+                cclib_inputs = (const char **)realloc((void *)cclib_inputs, sizeof(char *) * cclib_cap);
+            }
+            cclib_inputs[cclib_count++] = arg;
+        }
         else if (ends_with_icase(arg, ".o") || ends_with_icase(arg, ".obj"))
         {
             if (obj_count == obj_cap)
@@ -727,7 +2140,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "error: -S requires a backend selection (e.g., -x86)\n");
         return 2;
     }
-    if (target_arch == ARCH_NONE)
+    if (!emit_library && target_arch == ARCH_NONE)
     {
         if (!stop_after_ccb)
         {
@@ -750,6 +2163,48 @@ int main(int argc, char **argv)
         usage(argv[0]);
         return 2;
     }
+    if (emit_library)
+    {
+        if (stop_after_asm)
+        {
+            fprintf(stderr, "error: --library cannot be combined with -S\n");
+            return 2;
+        }
+        if (stop_after_ccb)
+        {
+            fprintf(stderr, "error: --library already stops after bytecode output\n");
+            return 2;
+        }
+        if (no_link)
+        {
+            fprintf(stderr, "error: --library is incompatible with -c/--no-link\n");
+            return 2;
+        }
+        if (target_arch != ARCH_NONE)
+        {
+            fprintf(stderr, "error: --library cannot be combined with backend selection (e.g., -x86)\n");
+            return 2;
+        }
+        if (ccb_count > 0 || obj_count > 0 || cclib_count > 0)
+        {
+            fprintf(stderr, "error: --library currently only accepts .ce inputs\n");
+            return 2;
+        }
+        if (ce_count == 0)
+        {
+            fprintf(stderr, "error: --library requires at least one .ce input\n");
+            return 2;
+        }
+        if (!output_overridden)
+        {
+            out = "a.cclib";
+        }
+        if (!ends_with_icase(out, ".cclib"))
+        {
+            fprintf(stderr, "error: --library output must end with .cclib\n");
+            return 2;
+        }
+    }
     if (m32)
     {
         fprintf(stderr, "Error: -m32 not implemented yet\n");
@@ -761,7 +2216,8 @@ int main(int argc, char **argv)
     const char *chancecodec_cmd_to_use = NULL;
     int chancecodec_uses_fallback = 0;
     int chancecodec_has_override = 0;
-    if (target_arch == ARCH_X86)
+    int needs_chancecodec = (target_arch == ARCH_X86) || emit_library;
+    if (needs_chancecodec)
     {
         if (chancecodec_cmd_override && *chancecodec_cmd_override)
         {
@@ -825,13 +2281,42 @@ int main(int argc, char **argv)
     }
 
     module_registry_reset();
+    int rc = 0;
+    if (!emit_library && cclib_count > 0)
+    {
+        for (int i = 0; i < cclib_count; ++i)
+        {
+            if (load_cclib_library(cclib_inputs[i], &loaded_libraries, &loaded_library_count, &loaded_library_cap,
+                                    &loaded_library_functions, &loaded_library_function_count, &loaded_library_function_cap))
+            {
+                rc = 1;
+                goto cleanup;
+            }
+        }
+    }
+
+    int library_codegen_units = 0;
+    if (!emit_library && loaded_library_count > 0)
+    {
+        for (int i = 0; i < loaded_library_count; ++i)
+        {
+            const LoadedLibrary *lib = &loaded_libraries[i];
+            if (!lib)
+                continue;
+            for (uint32_t mi = 0; mi < lib->file.module_count; ++mi)
+            {
+                const CclibModule *mod = &lib->file.modules[mi];
+                if (mod && mod->ccbin_data && mod->ccbin_size > 0)
+                    ++library_codegen_units;
+            }
+        }
+    }
+
     UnitCompile *units = NULL;
     if (ce_count > 0)
         units = (UnitCompile *)xcalloc((size_t)ce_count, sizeof(UnitCompile));
-
-    int rc = 0;
-    int skip_backend_outputs = stop_after_ccb || stop_after_asm;
-    int total_codegen_units = ce_count + ccb_count;
+    int skip_backend_outputs = stop_after_ccb || stop_after_asm || emit_library;
+    int total_codegen_units = ce_count + ccb_count + library_codegen_units;
     // Determine if we need a final link step combining multiple inputs
     int multi_link = (!no_link && !skip_backend_outputs && (obj_count > 0 || total_codegen_units > 1));
 
@@ -862,6 +2347,7 @@ int main(int argc, char **argv)
                                          include_dir_count, sc->syms);
         Node *unit = parse_unit(ps);
         parser_export_externs(ps, sc->syms);
+    symtab_add_library_functions(sc->syms, loaded_library_functions, loaded_library_function_count);
 
         units[fi].input_path = xstrdup(input);
         units[fi].src = src;
@@ -972,6 +2458,75 @@ int main(int argc, char **argv)
             {
                 if (codegen_ccb_resolve_module_path(&co, ccb_path, sizeof(ccb_path)))
                     rc = 1;
+            }
+
+            if (!rc && emit_library)
+            {
+                if (collect_metadata_for_unit(unit, ccb_path, &library_modules, &library_module_count, &library_module_cap))
+                {
+                    rc = 1;
+                }
+                else
+                {
+                    const char *module_name = unit->module_path.full_name;
+                    LibraryModuleData *libmod = module_name ? find_or_add_module(&library_modules, &library_module_count, &library_module_cap, module_name) : NULL;
+                    if (!libmod)
+                    {
+                        rc = 1;
+                    }
+                    else
+                    {
+                        char ccbin_dir[512];
+                        char ccbin_base[512];
+                        split_path(ccb_path, ccbin_dir, sizeof(ccbin_dir), ccbin_base, sizeof(ccbin_base));
+                        char ccbin_path[1024];
+                        build_path_with_ext(ccbin_dir, ccbin_base, ".ccbin", ccbin_path, sizeof(ccbin_path));
+                        if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
+                        {
+                            fprintf(stderr, "error: chancecodec executable not resolved (required for --library)\n");
+                            rc = 1;
+                        }
+                        else
+                        {
+                            int spawn_errno = 0;
+                            int ccbin_rc = run_chancecodec_emit_ccbin(chancecodec_cmd_to_use, ccb_path, ccbin_path, opt_level, &spawn_errno);
+                            if (ccbin_rc != 0)
+                            {
+                                if (ccbin_rc < 0)
+                                    fprintf(stderr, "failed to launch chancecodec '%s': %s\n", chancecodec_cmd_to_use, strerror(spawn_errno));
+                                else
+                                    fprintf(stderr, "chancecodec --emit-ccbin failed (rc=%d) for '%s'\n", ccbin_rc, ccb_path);
+                                rc = 1;
+                                remove(ccbin_path);
+                                remove(ccb_path);
+                            }
+                            else
+                            {
+                                uint8_t *ccbin_data = NULL;
+                                size_t ccbin_size = 0;
+                                int read_err = read_file_bytes(ccbin_path, &ccbin_data, &ccbin_size);
+                                if (read_err != 0)
+                                {
+                                    fprintf(stderr, "error: failed reading ccbin '%s' (%s)\n", ccbin_path, strerror(read_err));
+                                    rc = 1;
+                                    remove(ccbin_path);
+                                    remove(ccb_path);
+                                }
+                                else
+                                {
+                                    if (libmod->ccbin_data)
+                                        free(libmod->ccbin_data);
+                                    libmod->ccbin_data = ccbin_data;
+                                    libmod->ccbin_size = ccbin_size;
+                                    free(libmod->ccbin_path);
+                                    libmod->ccbin_path = NULL;
+                                }
+                                remove(ccbin_path);
+                                remove(ccb_path);
+                            }
+                        }
+                    }
+                }
             }
 
             if (!rc && target_arch == ARCH_X86 && !stop_after_ccb)
@@ -1126,9 +2681,11 @@ int main(int argc, char **argv)
         if (rc)
             break;
     }
-    for (int ci = 0; !rc && ci < ccb_count; ++ci)
+    if (!emit_library)
     {
-        const char *ccb_input = ccb_inputs[ci];
+        for (int ci = 0; !rc && ci < ccb_count; ++ci)
+        {
+            const char *ccb_input = ccb_inputs[ci];
         char dir[512], base[512];
         split_path(ccb_input, dir, sizeof(dir), base, sizeof(base));
 
@@ -1298,16 +2855,233 @@ int main(int argc, char **argv)
             single_obj_is_temp = obj_is_temp;
         }
 
-        if (((no_link && obj_override) || multi_link) && objOut[0] != '\0')
-        {
-            if (to_cnt == to_cap)
+            if (((no_link && obj_override) || multi_link) && objOut[0] != '\0')
             {
-                to_cap = to_cap ? to_cap * 2 : 8;
-                temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
+                if (to_cnt == to_cap)
+                {
+                    to_cap = to_cap ? to_cap * 2 : 8;
+                    temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
+                }
+                temp_objs[to_cnt++] = xstrdup(objOut);
             }
-            temp_objs[to_cnt++] = xstrdup(objOut);
         }
     }
+        if (!rc && !emit_library && target_arch == ARCH_X86 && !stop_after_ccb)
+        {
+            for (int li = 0; li < loaded_library_count && !rc; ++li)
+            {
+                LoadedLibrary *lib = &loaded_libraries[li];
+                for (uint32_t mi = 0; mi < lib->file.module_count && !rc; ++mi)
+                {
+                    const CclibModule *mod = &lib->file.modules[mi];
+                    if (!mod->ccbin_data || mod->ccbin_size == 0)
+                        continue;
+
+                    char lib_dir[512], lib_base[512];
+                    split_path(lib->path, lib_dir, sizeof(lib_dir), lib_base, sizeof(lib_base));
+                    char *prefix = module_name_to_prefix_copy(mod->module_name ? mod->module_name : "module");
+                    char base_component[512];
+                    if (prefix && *prefix)
+                        snprintf(base_component, sizeof(base_component), "%s_%s_%u", lib_base, prefix, (unsigned)mi);
+                    else
+                        snprintf(base_component, sizeof(base_component), "%s_module_%u", lib_base, (unsigned)mi);
+                    free(prefix);
+
+                    char ccbin_path[1024];
+                    build_path_with_ext(lib_dir, base_component, ".tmp.ccbin", ccbin_path, sizeof(ccbin_path));
+                    if (lib->ccbin_temp_paths)
+                    {
+                        free(lib->ccbin_temp_paths[mi]);
+                        lib->ccbin_temp_paths[mi] = xstrdup(ccbin_path);
+                    }
+                    int write_err = write_file_bytes(ccbin_path, mod->ccbin_data, mod->ccbin_size);
+                    if (write_err != 0)
+                    {
+                        fprintf(stderr, "error: failed to materialize ccbin '%s' (%s)\n", ccbin_path, strerror(write_err));
+                        rc = 1;
+                        break;
+                    }
+
+                    char asm_path[1024];
+                    build_path_with_ext(lib_dir, base_component, ".S", asm_path, sizeof(asm_path));
+                    if (stop_after_asm && ends_with_icase(out, ".s"))
+                        snprintf(asm_path, sizeof(asm_path), "%s", out);
+
+                    char objOut[1024] = {0};
+                    int obj_is_temp = 0;
+                    int need_obj = (!stop_after_ccb && !stop_after_asm) && (no_link || multi_link || target_arch != ARCH_NONE);
+                    if (need_obj)
+                    {
+                        if (no_link && obj_override)
+                        {
+                            build_path_with_ext(lib_dir, base_component,
+    #ifdef _WIN32
+                                                ".co.tmp.obj"
+    #else
+                                                ".co.tmp.o"
+    #endif
+                                                ,
+                                                objOut, sizeof(objOut));
+                        }
+                        else if (no_link)
+                        {
+                            build_path_with_ext(lib_dir, base_component,
+    #ifdef _WIN32
+                                                ".obj"
+    #else
+                                                ".o"
+    #endif
+                                                ,
+                                                objOut, sizeof(objOut));
+                        }
+                        else if (multi_link)
+                        {
+                            build_path_with_ext(lib_dir, base_component,
+    #ifdef _WIN32
+                                                ".co.tmp.obj"
+    #else
+                                                ".co.tmp.o"
+    #endif
+                                                ,
+                                                objOut, sizeof(objOut));
+                            obj_is_temp = 1;
+                        }
+                        else
+                        {
+                            build_path_with_ext(lib_dir, base_component,
+    #ifdef _WIN32
+                                                ".tmp.obj"
+    #else
+                                                ".tmp.o"
+    #endif
+                                                ,
+                                                objOut, sizeof(objOut));
+                            obj_is_temp = 1;
+                        }
+                    }
+
+                    const char *backend = chancecode_backend ? chancecode_backend : "x86-gas";
+                    const char *target_os_option = target_os_to_option(target_os);
+                    char display_cmd[4096];
+                    if (opt_level > 0)
+                    {
+                        if (target_os_option)
+                            snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s -O%d --output \"%s\" --option target-os=%s \"%s\"",
+                                     chancecodec_cmd_to_use, backend, opt_level, asm_path, target_os_option, ccbin_path);
+                        else
+                            snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
+                                     chancecodec_cmd_to_use, backend, opt_level, asm_path, ccbin_path);
+                    }
+                    else
+                    {
+                        if (target_os_option)
+                            snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s --output \"%s\" --option target-os=%s \"%s\"",
+                                     chancecodec_cmd_to_use, backend, asm_path, target_os_option, ccbin_path);
+                        else
+                            snprintf(display_cmd, sizeof(display_cmd), "\"%s\" --backend %s --output \"%s\" \"%s\"",
+                                     chancecodec_cmd_to_use, backend, asm_path, ccbin_path);
+                    }
+
+                    int spawn_errno = 0;
+                    int chance_rc = run_chancecodec_process(chancecodec_cmd_to_use, backend, opt_level, asm_path, ccbin_path, target_os_option, &spawn_errno);
+                    if (chance_rc != 0)
+                    {
+                        if (chance_rc < 0)
+                            fprintf(stderr, "failed to launch chancecodec '%s': %s\n", chancecodec_cmd_to_use, strerror(spawn_errno));
+                        else
+                            fprintf(stderr, "chancecodec failed (rc=%d): %s\n", chance_rc, display_cmd);
+                        if (!chancecodec_has_override && chancecodec_uses_fallback)
+                            fprintf(stderr, "hint: use --chancecodec <path> or set CHANCECODEC_CMD to point at the ChanceCode CLI executable\n");
+                        rc = 1;
+                        break;
+                    }
+
+                    if (!stop_after_ccb && !stop_after_asm)
+                    {
+                        if (!need_obj)
+                        {
+                            fprintf(stderr, "internal error: object output expected but path missing\n");
+                            rc = 1;
+                            break;
+                        }
+
+                        char cc_cmd[4096];
+                        size_t pos = (size_t)snprintf(cc_cmd, sizeof(cc_cmd), "cc -c \"%s\" -o \"%s\"", asm_path, objOut);
+                        if (pos >= sizeof(cc_cmd))
+                        {
+                            fprintf(stderr, "command buffer exhausted for cc invocation\n");
+                            rc = 1;
+                            break;
+                        }
+                        if (freestanding)
+                            strncat(cc_cmd, " -ffreestanding -nostdlib", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+    #ifdef _WIN32
+                        strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+    #endif
+                        if (opt_level > 0)
+                        {
+                            char optbuf[8];
+                            snprintf(optbuf, sizeof(optbuf), " -O%d", opt_level);
+                            strncat(cc_cmd, optbuf, sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+                        }
+                        int cc_rc = system(cc_cmd);
+                        if (cc_rc != 0)
+                        {
+                            fprintf(stderr, "assembler failed (rc=%d): %s\n", cc_rc, cc_cmd);
+                            rc = 1;
+                            break;
+                        }
+                    }
+
+                    if (!stop_after_asm)
+                        remove(asm_path);
+
+                    if (!stop_after_ccb && !stop_after_asm && !no_link && !multi_link)
+                    {
+                        snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
+                        have_single_obj = 1;
+                        single_obj_is_temp = obj_is_temp;
+                    }
+
+                    if (((no_link && obj_override) || multi_link) && objOut[0] != '\0')
+                    {
+                        if (to_cnt == to_cap)
+                        {
+                            to_cap = to_cap ? to_cap * 2 : 8;
+                            temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
+                        }
+                        temp_objs[to_cnt++] = xstrdup(objOut);
+                    }
+
+                    remove(ccbin_path);
+                    if (lib->ccbin_temp_paths)
+                    {
+                        free(lib->ccbin_temp_paths[mi]);
+                        lib->ccbin_temp_paths[mi] = NULL;
+                    }
+                }
+            }
+        }
+
+    if (!rc && emit_library)
+    {
+        if (library_module_count == 0)
+        {
+            fprintf(stderr, "error: --library did not collect any modules\n");
+            rc = 1;
+        }
+        else
+        {
+            int werr = write_library_file(out, library_modules, library_module_count);
+            if (werr != 0)
+            {
+                fprintf(stderr, "error: failed to write library '%s' (%s)\n", out, strerror(werr));
+                rc = 1;
+            }
+        }
+        goto cleanup;
+    }
+
     if (!rc && multi_link)
     {
         // Final link of temps + provided objects into an executable
@@ -1456,8 +3230,22 @@ cleanup:
     for (int i = 0; i < include_dir_count; i++)
         free(include_dirs[i]);
     free(include_dirs);
+    free_library_module_array(library_modules, library_module_count);
+    if (loaded_library_functions)
+    {
+        for (int i = 0; i < loaded_library_function_count; ++i)
+            free_loaded_library_function(&loaded_library_functions[i]);
+        free(loaded_library_functions);
+    }
+    if (loaded_libraries)
+    {
+        for (int i = 0; i < loaded_library_count; ++i)
+            free_loaded_library(&loaded_libraries[i]);
+        free(loaded_libraries);
+    }
     free((void *)ce_inputs);
     free((void *)ccb_inputs);
+    free((void *)cclib_inputs);
     free((void *)obj_inputs);
     return rc;
 fail:

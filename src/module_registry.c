@@ -256,3 +256,88 @@ const char *module_registry_find_struct_module(const Type *type)
     }
     return NULL;
 }
+
+int module_registry_struct_entry_count(void)
+{
+    return struct_count;
+}
+
+const char *module_registry_struct_entry_module(int index)
+{
+    if (index < 0 || index >= struct_count)
+        return NULL;
+    return struct_entries[index].module_full;
+}
+
+const char *module_registry_struct_entry_name(int index)
+{
+    if (index < 0 || index >= struct_count)
+        return NULL;
+    return struct_entries[index].name;
+}
+
+Type *module_registry_struct_entry_type(int index)
+{
+    if (index < 0 || index >= struct_count)
+        return NULL;
+    return struct_entries[index].type;
+}
+
+int module_registry_enum_entry_count(void)
+{
+    return enum_count;
+}
+
+const char *module_registry_enum_entry_module(int index)
+{
+    if (index < 0 || index >= enum_count)
+        return NULL;
+    return enum_entries[index].module_full;
+}
+
+const char *module_registry_enum_entry_name(int index)
+{
+    if (index < 0 || index >= enum_count)
+        return NULL;
+    return enum_entries[index].name;
+}
+
+Type *module_registry_enum_entry_type(int index)
+{
+    if (index < 0 || index >= enum_count)
+        return NULL;
+    return enum_entries[index].type;
+}
+
+int module_registry_enum_value_entry_count(void)
+{
+    return enum_value_count;
+}
+
+const char *module_registry_enum_value_entry_module(int index)
+{
+    if (index < 0 || index >= enum_value_count)
+        return NULL;
+    return enum_value_entries[index].module_full;
+}
+
+const char *module_registry_enum_value_entry_enum(int index)
+{
+    if (index < 0 || index >= enum_value_count)
+        return NULL;
+    return enum_value_entries[index].enum_name;
+}
+
+const char *module_registry_enum_value_entry_name(int index)
+{
+    if (index < 0 || index >= enum_value_count)
+        return NULL;
+    return enum_value_entries[index].value_name;
+}
+
+int module_registry_enum_value_entry_value(int index)
+{
+    if (index < 0 || index >= enum_value_count)
+        return 0;
+    return enum_value_entries[index].value;
+}
