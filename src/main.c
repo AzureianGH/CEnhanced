@@ -9,8 +9,10 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <ctype.h>
 #ifdef _WIN32
 #include <process.h>
+#include <direct.h>
 #else
 #include <spawn.h>
 #include <sys/wait.h>
@@ -29,6 +31,12 @@ extern char **environ;
 #define CHANCE_PATH_SEP '/'
 #define CHANCECODEC_EXT ""
 #endif
+
+typedef enum
+{
+    ARCH_NONE = 0,
+    ARCH_X86
+} TargetArch;
 
 static const char *default_chancecodec_name =
 #ifdef _WIN32
@@ -61,6 +69,8 @@ int sema_check_unit(SemaContext *sc, Node *unit);
 static void usage(const char *prog)
 {
     fprintf(stderr, "Usage: %s [options] input.ce [more.ce ...]\n", prog);
+    fprintf(stderr, "       %s [options] project.ceproj\n", prog);
+    fprintf(stderr, "       %s new <template> [name]\n", prog);
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -o <file>         Output executable path (default a.exe)\n");
     fprintf(stderr, "  -S                Emit pseudo-asm alongside exe (.S)\n");
@@ -373,6 +383,622 @@ static const char *target_os_to_option(TargetOS os)
     default:
         return NULL;
     }
+}
+
+static int equals_icase(const char *a, const char *b)
+{
+    if (!a || !b)
+        return 0;
+    while (*a && *b)
+    {
+        unsigned char ca = (unsigned char)*a;
+        unsigned char cb = (unsigned char)*b;
+        if (tolower(ca) != tolower(cb))
+            return 0;
+        ++a;
+        ++b;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+static void trim_whitespace_inplace(char *text)
+{
+    if (!text)
+        return;
+    char *start = text;
+    while (*start && isspace((unsigned char)*start))
+        ++start;
+    char *end = start + strlen(start);
+    while (end > start && isspace((unsigned char)*(end - 1)))
+        --end;
+    size_t len = (size_t)(end - start);
+    if (start != text && len > 0)
+        memmove(text, start, len);
+    else if (start != text && len == 0)
+        memmove(text, start, 1);
+    text[len] = '\0';
+}
+
+static int parse_bool_value(const char *text, int *out)
+{
+    if (!text || !out)
+        return -1;
+    if (equals_icase(text, "true") || equals_icase(text, "1") || equals_icase(text, "yes") || equals_icase(text, "on"))
+    {
+        *out = 1;
+        return 0;
+    }
+    if (equals_icase(text, "false") || equals_icase(text, "0") || equals_icase(text, "no") || equals_icase(text, "off"))
+    {
+        *out = 0;
+        return 0;
+    }
+    return -1;
+}
+
+static int is_path_absolute_simple(const char *path)
+{
+    if (!path || !*path)
+        return 0;
+#ifdef _WIN32
+    if ((strlen(path) >= 2) && path[1] == ':' && ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')))
+        return 1;
+    if (path[0] == '\\' && path[1] == '\\')
+        return 1;
+#endif
+    return path[0] == '/';
+}
+
+static void resolve_project_relative_path(char *dst, size_t dstsz, const char *base_dir, const char *rel)
+{
+    if (!dst || dstsz == 0)
+        return;
+    dst[0] = '\0';
+    if (!rel)
+        return;
+    if (is_path_absolute_simple(rel) || !base_dir || !*base_dir)
+    {
+        snprintf(dst, dstsz, "%s", rel);
+        return;
+    }
+    size_t base_len = strlen(base_dir);
+    int needs_sep = 1;
+    if (base_len > 0)
+    {
+        char last = base_dir[base_len - 1];
+        if (last == '/' || last == '\\')
+            needs_sep = 0;
+    }
+    if (needs_sep)
+        snprintf(dst, dstsz, "%s%c%s", base_dir, CHANCE_PATH_SEP, rel);
+    else
+        snprintf(dst, dstsz, "%s%s", base_dir, rel);
+}
+
+typedef struct
+{
+    const char ***items;
+    int *count;
+    int *cap;
+    char ***owned_items;
+    int *owned_count;
+    int *owned_cap;
+} ProjectInputList;
+
+static int push_input_entry(const char *value, ProjectInputList list, int make_copy)
+{
+    if (!value || !list.items || !list.count || !list.cap || !list.owned_items || !list.owned_count || !list.owned_cap)
+        return -1;
+    const char **arr = *list.items;
+    if (*list.count == *list.cap)
+    {
+        int new_cap = *list.cap ? (*list.cap * 2) : 8;
+        const char **new_arr = (const char **)realloc((void *)arr, sizeof(char *) * (size_t)new_cap);
+        if (!new_arr)
+        {
+            fprintf(stderr, "error: out of memory while growing project input list\n");
+            return -1;
+        }
+        *list.items = new_arr;
+        arr = new_arr;
+        *list.cap = new_cap;
+    }
+    const char *stored = value;
+    if (make_copy)
+    {
+        char *dup = xstrdup(value);
+        char **owned = *list.owned_items;
+        if (*list.owned_count == *list.owned_cap)
+        {
+            int new_cap = *list.owned_cap ? (*list.owned_cap * 2) : 8;
+            char **new_owned = (char **)realloc(owned, sizeof(char *) * (size_t)new_cap);
+            if (!new_owned)
+            {
+                fprintf(stderr, "error: out of memory while growing project-owned strings\n");
+                free(dup);
+                return -1;
+            }
+            *list.owned_items = new_owned;
+            owned = new_owned;
+            *list.owned_cap = new_cap;
+        }
+        owned[*list.owned_count] = dup;
+        (*list.owned_count)++;
+        stored = dup;
+    }
+    arr[*list.count] = stored;
+    (*list.count)++;
+    return 0;
+}
+
+static int add_file_list_entries(const char *value, const char *project_dir,
+                                 ProjectInputList list)
+{
+    if (!value)
+        return 0;
+    const char *cursor = value;
+    while (*cursor)
+    {
+        while (*cursor == ';' || *cursor == ',' || isspace((unsigned char)*cursor))
+            ++cursor;
+        if (!*cursor)
+            break;
+        const char *start = cursor;
+        while (*cursor && *cursor != ';' && *cursor != ',')
+            ++cursor;
+        const char *end = cursor;
+        while (end > start && isspace((unsigned char)*(end - 1)))
+            --end;
+        while (start < end && isspace((unsigned char)*start))
+            ++start;
+        if (end > start)
+        {
+            size_t len = (size_t)(end - start);
+            char token[1024];
+            if (len >= sizeof(token))
+                len = sizeof(token) - 1;
+            memcpy(token, start, len);
+            token[len] = '\0';
+            char resolved[1024];
+            resolve_project_relative_path(resolved, sizeof(resolved), project_dir, token);
+            if (push_input_entry(resolved, list, 1) != 0)
+                return -1;
+        }
+        if (*cursor == ';' || *cursor == ',')
+            ++cursor;
+    }
+    return 0;
+}
+
+static int add_include_dir_list(const char *value, const char *project_dir,
+                                char ***include_dirs, int *include_dir_count)
+{
+    if (!value || !include_dirs || !include_dir_count)
+        return 0;
+    const char *cursor = value;
+    while (*cursor)
+    {
+        while (*cursor == ';' || *cursor == ',' || isspace((unsigned char)*cursor))
+            ++cursor;
+        if (!*cursor)
+            break;
+        const char *start = cursor;
+        while (*cursor && *cursor != ';' && *cursor != ',')
+            ++cursor;
+        const char *end = cursor;
+        while (end > start && isspace((unsigned char)*(end - 1)))
+            --end;
+        while (start < end && isspace((unsigned char)*start))
+            ++start;
+        if (end > start)
+        {
+            size_t len = (size_t)(end - start);
+            char token[1024];
+            if (len >= sizeof(token))
+                len = sizeof(token) - 1;
+            memcpy(token, start, len);
+            token[len] = '\0';
+            char resolved[1024];
+            resolve_project_relative_path(resolved, sizeof(resolved), project_dir, token);
+            chance_add_include_dir(include_dirs, include_dir_count, resolved);
+        }
+        if (*cursor == ';' || *cursor == ',')
+            ++cursor;
+    }
+    return 0;
+}
+
+static void strip_utf8_bom(char *text)
+{
+    if (!text)
+        return;
+    unsigned char *u = (unsigned char *)text;
+    if (u[0] == 0xEF && u[1] == 0xBB && u[2] == 0xBF)
+        memmove(text, text + 3, strlen(text + 3) + 1);
+}
+
+static int parse_ceproj_file(const char *proj_path,
+                             ProjectInputList ce_list,
+                             ProjectInputList ccb_list,
+                             ProjectInputList cclib_list,
+                             ProjectInputList obj_list,
+                             char ***include_dirs, int *include_dir_count,
+                             int *output_overridden, const char **out, char **project_output_alloc,
+                             TargetArch *target_arch, const char **chancecode_backend,
+                             int *stop_after_ccb, int *stop_after_asm, int *emit_library,
+                             int *no_link, int *freestanding, TargetOS *target_os)
+{
+    FILE *f = fopen(proj_path, "rb");
+    if (!f)
+    {
+        fprintf(stderr, "error: failed to open project file '%s': %s\n", proj_path, strerror(errno));
+        return -1;
+    }
+    char project_dir[1024] = {0};
+    if (parent_directory(proj_path, project_dir, sizeof(project_dir)) != 0)
+        project_dir[0] = '\0';
+
+    char line[2048];
+    int lineno = 0;
+    int rc = 0;
+    while (fgets(line, sizeof(line), f))
+    {
+        lineno++;
+        char work[2048];
+        snprintf(work, sizeof(work), "%s", line);
+        trim_whitespace_inplace(work);
+        if (lineno == 1)
+            strip_utf8_bom(work);
+        if (!work[0])
+            continue;
+        if (work[0] == '#' || work[0] == ';')
+            continue;
+        if (work[0] == '/' && work[1] == '/')
+            continue;
+        if (work[0] == '[')
+            continue;
+        char *eq = strchr(work, '=');
+        if (!eq)
+        {
+            fprintf(stderr, "error: expected key=value in '%s' (line %d)\n", proj_path, lineno);
+            rc = -1;
+            break;
+        }
+        *eq = '\0';
+        char *key = work;
+        char *value = eq + 1;
+        trim_whitespace_inplace(key);
+        trim_whitespace_inplace(value);
+        if (!key[0])
+            continue;
+        for (char *p = key; *p; ++p)
+            *p = (char)tolower((unsigned char)*p);
+        char value_buf[2048];
+        strip_wrapping_quotes(value, value_buf, sizeof(value_buf));
+        trim_whitespace_inplace(value_buf);
+        if (strcmp(key, "ce") == 0 || strcmp(key, "source") == 0)
+        {
+            if (add_file_list_entries(value_buf, project_dir, ce_list) != 0)
+            {
+                rc = -1;
+                break;
+            }
+        }
+        else if (strcmp(key, "ccb") == 0)
+        {
+            if (add_file_list_entries(value_buf, project_dir, ccb_list) != 0)
+            {
+                rc = -1;
+                break;
+            }
+        }
+        else if (strcmp(key, "cclib") == 0 || strcmp(key, "library") == 0)
+        {
+            if (add_file_list_entries(value_buf, project_dir, cclib_list) != 0)
+            {
+                rc = -1;
+                break;
+            }
+        }
+        else if (strcmp(key, "obj") == 0 || strcmp(key, "object") == 0)
+        {
+            if (add_file_list_entries(value_buf, project_dir, obj_list) != 0)
+            {
+                rc = -1;
+                break;
+            }
+        }
+        else if (strcmp(key, "include") == 0 || strcmp(key, "includedir") == 0)
+        {
+            if (add_include_dir_list(value_buf, project_dir, include_dirs, include_dir_count) != 0)
+            {
+                rc = -1;
+                break;
+            }
+        }
+        else if (strcmp(key, "output") == 0)
+        {
+            if (!out || !project_output_alloc || !output_overridden)
+                continue;
+            char resolved[1024];
+            resolve_project_relative_path(resolved, sizeof(resolved), project_dir, value_buf);
+            if (*project_output_alloc)
+            {
+                free(*project_output_alloc);
+                *project_output_alloc = NULL;
+            }
+            *project_output_alloc = xstrdup(resolved);
+            *out = *project_output_alloc;
+            *output_overridden = 1;
+        }
+        else if (strcmp(key, "backend") == 0)
+        {
+            if (equals_icase(value_buf, "x86"))
+            {
+                if (target_arch)
+                    *target_arch = ARCH_X86;
+                if (chancecode_backend)
+                    *chancecode_backend = "x86-gas";
+            }
+            else if (equals_icase(value_buf, "none"))
+            {
+                if (target_arch)
+                    *target_arch = ARCH_NONE;
+                if (chancecode_backend)
+                    *chancecode_backend = NULL;
+            }
+            else
+            {
+                fprintf(stderr, "error: unknown backend '%s' in '%s' (line %d)\n", value_buf, proj_path, lineno);
+                rc = -1;
+                break;
+            }
+        }
+        else if (strcmp(key, "type") == 0)
+        {
+            if (equals_icase(value_buf, "library"))
+            {
+                if (emit_library)
+                    *emit_library = 1;
+            }
+        }
+        else if (strcmp(key, "stop_after") == 0 || strcmp(key, "stopafter") == 0)
+        {
+            if ((!stop_after_asm || !*stop_after_asm) && (!stop_after_ccb || !*stop_after_ccb))
+            {
+                if (equals_icase(value_buf, "ccb"))
+                {
+                    if (stop_after_ccb)
+                        *stop_after_ccb = 1;
+                }
+                else if (equals_icase(value_buf, "asm"))
+                {
+                    if (stop_after_asm)
+                        *stop_after_asm = 1;
+                }
+            }
+        }
+        else if (strcmp(key, "no_link") == 0 || strcmp(key, "nolink") == 0)
+        {
+            int val = 0;
+            if (parse_bool_value(value_buf, &val) != 0)
+            {
+                fprintf(stderr, "error: expected boolean for no_link in '%s' (line %d)\n", proj_path, lineno);
+                rc = -1;
+                break;
+            }
+            if (no_link)
+                *no_link = val;
+        }
+        else if (strcmp(key, "freestanding") == 0)
+        {
+            int val = 0;
+            if (parse_bool_value(value_buf, &val) != 0)
+            {
+                fprintf(stderr, "error: expected boolean for freestanding in '%s' (line %d)\n", proj_path, lineno);
+                rc = -1;
+                break;
+            }
+            if (freestanding)
+                *freestanding = val;
+        }
+        else if (strcmp(key, "target_os") == 0 || strcmp(key, "targetos") == 0)
+        {
+            if (equals_icase(value_buf, "windows"))
+            {
+                if (target_os)
+                    *target_os = OS_WINDOWS;
+            }
+            else if (equals_icase(value_buf, "linux"))
+            {
+                if (target_os)
+                    *target_os = OS_LINUX;
+            }
+            else
+            {
+                fprintf(stderr, "error: unknown target_os '%s' in '%s' (line %d)\n", value_buf, proj_path, lineno);
+                rc = -1;
+                break;
+            }
+        }
+        else
+        {
+            fprintf(stderr, "warning: ignoring unrecognized key '%s' in '%s' (line %d)\n", key, proj_path, lineno);
+        }
+    }
+    fclose(f);
+    return rc;
+}
+
+static int path_has_separator(const char *name)
+{
+    if (!name)
+        return 0;
+    for (const char *p = name; *p; ++p)
+    {
+        if (*p == '/' || *p == '\\')
+            return 1;
+    }
+    return 0;
+}
+
+static int create_directory_checked(const char *path, int fail_if_exists)
+{
+    if (!path || !*path)
+        return -1;
+    struct stat st;
+    if (stat(path, &st) == 0)
+    {
+#if defined(S_ISDIR)
+        int is_dir = S_ISDIR(st.st_mode) != 0;
+#else
+        int is_dir = (st.st_mode & _S_IFDIR) != 0;
+#endif
+        if (!is_dir)
+        {
+            fprintf(stderr, "error: path '%s' already exists and is not a directory\n", path);
+            return -1;
+        }
+        if (fail_if_exists)
+        {
+            fprintf(stderr, "error: directory '%s' already exists\n", path);
+            return -1;
+        }
+        return 0;
+    }
+#ifdef _WIN32
+    if (_mkdir(path) != 0)
+#else
+    if (mkdir(path, 0777) != 0)
+#endif
+    {
+        if (!fail_if_exists && errno == EEXIST)
+            return 0;
+        fprintf(stderr, "error: failed to create directory '%s': %s\n", path, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static int write_text_file(const char *path, const char *content)
+{
+    if (!path || !content)
+        return -1;
+    FILE *f = fopen(path, "wb");
+    if (!f)
+    {
+        fprintf(stderr, "error: failed to write '%s': %s\n", path, strerror(errno));
+        return -1;
+    }
+    size_t len = strlen(content);
+    if (fwrite(content, 1, len, f) != len)
+    {
+        fprintf(stderr, "error: failed to write '%s': %s\n", path, strerror(errno));
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    return 0;
+}
+
+static int handle_new_command(int argc, char **argv)
+{
+    if (argc < 2)
+    {
+        fprintf(stderr, "Usage: chancec new <Template> [ProjectName]\n");
+        return 2;
+    }
+    if (!equals_icase(argv[0], "new"))
+    {
+        fprintf(stderr, "error: internal new-command usage mismatch\n");
+        return 2;
+    }
+    const char *template_name = argv[1];
+    if (equals_icase(template_name, "--help") || equals_icase(template_name, "-h"))
+    {
+        fprintf(stderr, "Usage: chancec new Console [ProjectName]\n");
+        fprintf(stderr, "Creates a new Chance project in a directory matching the project name.\n");
+        return 0;
+    }
+    if (!equals_icase(template_name, "console"))
+    {
+        fprintf(stderr, "error: unknown template '%s'. Supported templates: Console\n", template_name);
+        return 2;
+    }
+    if (argc > 3)
+    {
+        fprintf(stderr, "error: too many arguments for 'chancec new'. Usage: chancec new Console [ProjectName]\n");
+        return 2;
+    }
+    const char *project_name = (argc >= 3 && argv[2] && argv[2][0]) ? argv[2] : "ConsoleApp";
+    if (strcmp(project_name, ".") == 0 || strcmp(project_name, "..") == 0)
+    {
+        fprintf(stderr, "error: project name '%s' is not allowed\n", project_name);
+        return 2;
+    }
+    if (path_has_separator(project_name))
+    {
+        fprintf(stderr, "error: project name '%s' must not contain path separators\n", project_name);
+        return 2;
+    }
+    char project_dir[1024];
+    snprintf(project_dir, sizeof(project_dir), "%s", project_name);
+    if (create_directory_checked(project_dir, 1) != 0)
+        return 1;
+
+    char src_dir[1024];
+    snprintf(src_dir, sizeof(src_dir), "%s%csrc", project_dir, CHANCE_PATH_SEP);
+    if (create_directory_checked(src_dir, 0) != 0)
+        return 1;
+
+    char project_base[256];
+    split_path(project_name, NULL, 0, project_base, sizeof(project_base));
+    if (!project_base[0])
+        snprintf(project_base, sizeof(project_base), "%s", project_name);
+
+#ifdef _WIN32
+    char output_name[256];
+    snprintf(output_name, sizeof(output_name), "%s.exe", project_base);
+#else
+    char output_name[256];
+    snprintf(output_name, sizeof(output_name), "%s", project_base);
+#endif
+
+    char ceproj_path[1024];
+    snprintf(ceproj_path, sizeof(ceproj_path), "%s%c%s.ceproj", project_dir, CHANCE_PATH_SEP, project_base);
+    char main_ce_path[1024];
+    snprintf(main_ce_path, sizeof(main_ce_path), "%s%cmain.ce", src_dir, CHANCE_PATH_SEP);
+
+    char ceproj_content[1024];
+    snprintf(ceproj_content, sizeof(ceproj_content),
+             "# Chance project definition\n"
+             "name=%s\n"
+             "type=Console\n"
+             "backend=x86\n"
+             "output=%s\n"
+             "ce=src/main.ce\n",
+             project_base, output_name);
+
+    char main_ce_content[1024];
+    snprintf(main_ce_content, sizeof(main_ce_content),
+             "module %s;\n\n"
+             "extend from \"C\" i32 printf(char *, _vaargs_);\n\n"
+             "[EntryPoint]\n"
+             "expose fun main() -> i32\n"
+             "{\n"
+             "    printf(\"Hello from %s!\\n\");\n"
+             "    ret 0;\n"
+             "}\n",
+             project_base, project_base);
+
+    if (write_text_file(ceproj_path, ceproj_content) != 0)
+        return 1;
+    if (write_text_file(main_ce_path, main_ce_content) != 0)
+        return 1;
+
+    printf("Created Chance console project '%s' in %s\n", project_base, project_dir);
+    printf("Next steps:\n  1. cd %s\n  2. chancec %s.ceproj\n", project_dir, project_base);
+    return 0;
 }
 
 typedef struct LibraryFunction
@@ -1891,6 +2517,8 @@ static int is_relocatable_obj(const char *path)
 
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && equals_icase(argv[1], "new"))
+        return handle_new_command(argc - 1, argv + 1);
 #ifdef _WIN32
     const char *out = "a.exe";
 #else
@@ -1905,11 +2533,6 @@ int main(int argc, char **argv)
     int m32 = 0;
     int opt_level = 0;
     AsmSyntax asm_syntax = ASM_INTEL;
-    typedef enum
-    {
-        ARCH_NONE = 0,
-        ARCH_X86
-    } TargetArch;
     TargetArch target_arch = ARCH_NONE;
     const char *chancecode_backend = NULL;
     const char *chancecodec_cmd_override = NULL;
@@ -1927,6 +2550,14 @@ int main(int argc, char **argv)
     int cclib_count = 0, cclib_cap = 0;
     const char **obj_inputs = NULL;
     int obj_count = 0, obj_cap = 0;
+    char **owned_ce_inputs = NULL;
+    int owned_ce_count = 0, owned_ce_cap = 0;
+    char **owned_ccb_inputs = NULL;
+    int owned_ccb_count = 0, owned_ccb_cap = 0;
+    char **owned_cclib_inputs = NULL;
+    int owned_cclib_count = 0, owned_cclib_cap = 0;
+    char **owned_obj_inputs = NULL;
+    int owned_obj_count = 0, owned_obj_cap = 0;
     // include paths
     char **include_dirs = NULL;
     int include_dir_count = 0;
@@ -1944,6 +2575,7 @@ int main(int argc, char **argv)
     LoadedLibraryFunction *loaded_library_functions = NULL;
     int loaded_library_function_count = 0;
     int loaded_library_function_cap = 0;
+    char *project_output_alloc = NULL;
 
     for (int i = 1; i < argc; i++)
     {
@@ -2088,6 +2720,22 @@ int main(int argc, char **argv)
         }
         // classify input
         const char *arg = argv[i];
+        if (ends_with_icase(arg, ".ceproj"))
+        {
+            ProjectInputList ce_list = {&ce_inputs, &ce_count, &ce_cap, &owned_ce_inputs, &owned_ce_count, &owned_ce_cap};
+            ProjectInputList ccb_list = {&ccb_inputs, &ccb_count, &ccb_cap, &owned_ccb_inputs, &owned_ccb_count, &owned_ccb_cap};
+            ProjectInputList cclib_list = {&cclib_inputs, &cclib_count, &cclib_cap, &owned_cclib_inputs, &owned_cclib_count, &owned_cclib_cap};
+            ProjectInputList obj_list = {&obj_inputs, &obj_count, &obj_cap, &owned_obj_inputs, &owned_obj_count, &owned_obj_cap};
+            int perr = parse_ceproj_file(arg, ce_list, ccb_list, cclib_list, obj_list,
+                                         &include_dirs, &include_dir_count,
+                                         &output_overridden, &out, &project_output_alloc,
+                                         &target_arch, &chancecode_backend,
+                                         &stop_after_ccb, &stop_after_asm, &emit_library,
+                                         &no_link, &freestanding, &target_os);
+            if (perr != 0)
+                return 2;
+            continue;
+        }
         if (ends_with_icase(arg, ".ce"))
         {
             if (ce_count == ce_cap)
@@ -3243,6 +3891,32 @@ cleanup:
             free_loaded_library(&loaded_libraries[i]);
         free(loaded_libraries);
     }
+    if (owned_ce_inputs)
+    {
+        for (int i = 0; i < owned_ce_count; ++i)
+            free(owned_ce_inputs[i]);
+        free(owned_ce_inputs);
+    }
+    if (owned_ccb_inputs)
+    {
+        for (int i = 0; i < owned_ccb_count; ++i)
+            free(owned_ccb_inputs[i]);
+        free(owned_ccb_inputs);
+    }
+    if (owned_cclib_inputs)
+    {
+        for (int i = 0; i < owned_cclib_count; ++i)
+            free(owned_cclib_inputs[i]);
+        free(owned_cclib_inputs);
+    }
+    if (owned_obj_inputs)
+    {
+        for (int i = 0; i < owned_obj_count; ++i)
+            free(owned_obj_inputs[i]);
+        free(owned_obj_inputs);
+    }
+    if (project_output_alloc)
+        free(project_output_alloc);
     free((void *)ce_inputs);
     free((void *)ccb_inputs);
     free((void *)cclib_inputs);

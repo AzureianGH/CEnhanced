@@ -1,6 +1,7 @@
 module Test.Program;
 
 bring Test.Chance as TC;
+bring LibTest as LT;
 
 extend from "C" i32 printf(char *, _vaargs_);
 extend from "C" i32 write(int, char *, int);
@@ -161,6 +162,8 @@ expose fun main() -> i32
     test_idk();
 
     printf("Raw thing: %d\n", rawthing(10)); // expect 466
+
+    printf("Result from LibTest: %d\n", LT.test_fun(41));
 
     printf("Exit code should be %d\n", ((vari.testVar as i32) + (another.smallValue as i32)));
 
