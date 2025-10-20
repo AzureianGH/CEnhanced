@@ -2,6 +2,9 @@ module Test.Program;
 
 bring Test.Chance as TC;
 bring LibTest as LT;
+bring LibTest.Another;
+
+bring Std as Std;
 
 extend from "C" i32 printf(char *, _vaargs_);
 extend from "C" i32 write(int, char *, int);
@@ -49,7 +52,7 @@ expose struct OtherElement
 expose fun main() -> i32
 {
     // allocate 128 bytes for input
-    ptr<void> buf = malloc(128);
+    ptr<void> buf = Std.Memory.Allocate(128);
 
     // prompt the user
     write(1, "What's your name? > ", 20);
@@ -91,7 +94,7 @@ expose fun main() -> i32
     }
 
     printf("Freeing memory...\n");
-    free(buf);
+    Std.Memory.Deallocate(buf as void*);
 
     // Test overflow behavior
     i16 of = test_overflow();
@@ -129,13 +132,14 @@ expose fun main() -> i32
     i32** testintpp = &testintp;
     printf("Ptrptr deref: %d\n", testintpp[0][0]); // expect 123
 
-    TC.SmallTest* addptr = malloc(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
+    TC.SmallTest* addptr = Std.Memory.Allocate(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
     addptr[0] = construct_thing();
     addptr[1] = another;
 
     printf("addptr[0].smallValue = %d\n", (*addptr).smallValue); // expect 5
     printf("addptr[1].smallValue = %d\n", (*(addptr + 1 * 2 / 2)).smallValue); // expect 123, optimized constant folding
 
+    Std.Memory.Deallocate(addptr as void*);
 
     i32* testintptr = test as i32*;
     printf("testVar via intptr: %p\n", testintptr);
@@ -164,6 +168,8 @@ expose fun main() -> i32
     printf("Raw thing: %d\n", rawthing(10)); // expect 466
 
     printf("Result from LibTest: %d\n", LT.test_fun(41));
+
+    printf("Result from LibTest.Another: %d\n", LibTest.Another.other_test_fun(50)); // Will be 60
 
     printf("Exit code should be %d\n", ((vari.testVar as i32) + (another.smallValue as i32)));
 

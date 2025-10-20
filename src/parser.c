@@ -1049,6 +1049,30 @@ static int type_sizeof_simple(Type *ty)
     }
 }
 
+static int module_path_followed_by_call(Parser *ps)
+{
+    if (!ps || !ps->lx)
+        return 0;
+    Token next = lexer_peek_n(ps->lx, 1);
+    if (next.kind != TK_DOT)
+        return 0;
+    int offset = 1;
+    for (;;)
+    {
+        offset++;
+        Token ident = lexer_peek_n(ps->lx, offset);
+        if (ident.kind != TK_IDENT)
+            return 0;
+        offset++;
+        Token after = lexer_peek_n(ps->lx, offset);
+        if (after.kind == TK_DOT)
+            continue;
+        if (after.kind == TK_LPAREN)
+            return 1;
+        return 0;
+    }
+}
+
 static int is_type_start(Parser *ps, Token t)
 {
     switch (t.kind)
@@ -1088,9 +1112,17 @@ static int is_type_start(Parser *ps, Token t)
         if (alias_find(ps, t.lexeme, t.length) >= 0 || named_type_find(ps, t.lexeme, t.length) >= 0)
             return 1;
         if (parser_find_import_by_alias(ps, t.lexeme, t.length))
+        {
+            if (module_path_followed_by_call(ps))
+                return 0;
             return 1;
+        }
         if (parser_find_import_by_parts(ps, &t, 1))
+        {
+            if (module_path_followed_by_call(ps))
+                return 0;
             return 1;
+        }
     }
     return 0;
 }

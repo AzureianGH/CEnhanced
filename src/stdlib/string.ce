@@ -1,0 +1,89 @@
+module Std.String;
+
+expose fun strcmp(char* str1, char* str2) -> i32
+{
+    i32 idx = 0;
+    char* c1 = str1;
+    char* c2 = str2;
+    while (c1[idx] != 0 && c2[idx] != 0)
+    {
+        if (c1[idx] != c2[idx])
+        {
+            ret (c1[idx] as i32) - (c2[idx] as i32);
+        }
+        idx++;
+    }
+    ret (c1[idx] as i32) - (c2[idx] as i32);
+}
+
+expose fun strlen(char* str) -> i32
+{
+    i32 len = 0;
+    while (str[len] != 0)
+    {
+        len++;
+    }
+    ret len;
+}
+
+expose fun strcpy(char* dest, char* src) -> char*
+{
+    i32 idx = 0;
+    while (src[idx] != 0)
+    {
+        dest[idx] = src[idx];
+        idx++;
+    }
+    dest[idx] = 0; // Null-terminate
+    ret dest;
+}
+
+expose fun strcat(char* dest, char* src) -> char*
+{
+    i32 dest_len = strlen(dest);
+    i32 idx = 0;
+    while (src[idx] != 0)
+    {
+        dest[dest_len + idx] = src[idx];
+        idx++;
+    }
+    dest[dest_len + idx] = 0; // Null-terminate
+    ret dest;
+}
+
+expose fun strchr(char* str, char ch) -> char*
+{
+    i32 idx = 0;
+    while (str[idx] != 0)
+    {
+        if (str[idx] == ch)
+        {
+            ret &str[idx];
+        }
+        idx++;
+    }
+    ret 0 as char*;
+}
+
+expose fun strstr(char* haystack, char* needle) -> char*
+{
+    i32 hlen = strlen(haystack);
+    i32 nlen = strlen(needle);
+    if (nlen == 0)
+    {
+        ret haystack;
+    }
+    for (i32 i = 0; i <= hlen - nlen; i++)
+    {
+        i32 j = 0;
+        while (j < nlen && haystack[i + j] == needle[j])
+        {
+            j++;
+        }
+        if (j == nlen)
+        {
+            ret &haystack[i];
+        }
+    }
+    ret 0 as char*;
+}

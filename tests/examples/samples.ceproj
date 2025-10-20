@@ -3,5 +3,5 @@ type=Console
 backend=x86
 output=build\SampleTests.exe
 ce=call_printf.ce, test_chance.ce
-cclib=libtest.cclib
+cclib=libtest.cclib, stdlib.cclib
 obj=test_win.o

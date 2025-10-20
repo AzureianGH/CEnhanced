@@ -710,4 +710,25 @@ Token lexer_peek(Lexer *lx)
     return lx->lookahead;
 }
 
+Token lexer_peek_n(Lexer *lx, int n)
+{
+    if (!lx)
+    {
+        Token eof = {0};
+        eof.kind = TK_EOF;
+        return eof;
+    }
+    if (n <= 0)
+        return lexer_peek(lx);
+
+    Lexer snapshot = *lx;
+    Token tok = lexer_peek(&snapshot);
+    for (int i = 0; i < n; ++i)
+    {
+        tok = lexer_next(&snapshot);
+        tok = lexer_peek(&snapshot);
+    }
+    return tok;
+}
+
 const SourceBuffer *lexer_source(Lexer *lx) { return lx ? &lx->src : NULL; }

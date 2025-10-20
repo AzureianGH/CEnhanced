@@ -285,6 +285,7 @@ Lexer *lexer_create(SourceBuffer src);
 void lexer_destroy(Lexer *lx);
 Token lexer_next(Lexer *lx);
 Token lexer_peek(Lexer *lx);
+Token lexer_peek_n(Lexer *lx, int n);
 // Accessor for diagnostics: returns the source buffer associated with this
 // lexer
 const SourceBuffer *lexer_source(Lexer *lx);
