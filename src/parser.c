@@ -1462,6 +1462,16 @@ static Node *parse_primary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (t.kind == TK_FLOAT)
+    {
+        Node *n = new_node(ND_FLOAT);
+        n->float_val = t.float_val;
+        n->type = t.float_is_f32 ? type_f32() : type_f64();
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     if (t.kind == TK_STRING)
     {
         Node *n = new_node(ND_STRING);

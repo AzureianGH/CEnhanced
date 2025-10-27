@@ -49,11 +49,15 @@ void ast_free(Node *n)
 // --- Simple type helpers (keep minimal for now) ---
 static Type TY_I32_SINGLETON = {.kind = TY_I32};
 static Type TY_I64_SINGLETON = {.kind = TY_I64};
+static Type TY_F32_SINGLETON = {.kind = TY_F32};
+static Type TY_F64_SINGLETON = {.kind = TY_F64};
 static Type TY_VOID_SINGLETON = {.kind = TY_VOID};
 static Type TY_CHAR_SINGLETON = {.kind = TY_CHAR};
 
 Type *type_i32(void) { return &TY_I32_SINGLETON; }
 Type *type_i64(void) { return &TY_I64_SINGLETON; }
+Type *type_f32(void) { return &TY_F32_SINGLETON; }
+Type *type_f64(void) { return &TY_F64_SINGLETON; }
 Type *type_void(void) { return &TY_VOID_SINGLETON; }
 Type *type_char(void) { return &TY_CHAR_SINGLETON; }
 
@@ -84,6 +88,8 @@ const char *node_kind_name(NodeKind kind)
     {
     case ND_INT:
         return "integer literal";
+    case ND_FLOAT:
+        return "floating-point literal";
     case ND_ADD:
         return "addition expression";
     case ND_MUL:

@@ -52,7 +52,9 @@ expose struct OtherElement
 expose fun main() -> i32
 {
     // allocate 128 bytes for input
-    ptr<void> buf = Std.Memory.Allocate(128);
+    ptr<void> buf = Std.Memory.alloc(128);
+
+    Std.Memory.memset(buf, 0, 128);
 
     // prompt the user
     write(1, "What's your name? > ", 20);
@@ -80,7 +82,7 @@ expose fun main() -> i32
     // print greeting
     printf("Hello, %s!\n", str);
 
-    printf("String length: %d\n", strlen(str));
+    printf("String length: %d\n", Std.String.strlen(str));
 
     string cmp_target = "CHance";
 
@@ -94,7 +96,7 @@ expose fun main() -> i32
     }
 
     printf("Freeing memory...\n");
-    Std.Memory.Deallocate(buf as void*);
+    Std.Memory.dealloc(buf as void*);
 
     // Test overflow behavior
     i16 of = test_overflow();
@@ -132,14 +134,14 @@ expose fun main() -> i32
     i32** testintpp = &testintp;
     printf("Ptrptr deref: %d\n", testintpp[0][0]); // expect 123
 
-    TC.SmallTest* addptr = Std.Memory.Allocate(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
+    TC.SmallTest* addptr = Std.Memory.alloc(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
     addptr[0] = construct_thing();
     addptr[1] = another;
 
     printf("addptr[0].smallValue = %d\n", (*addptr).smallValue); // expect 5
     printf("addptr[1].smallValue = %d\n", (*(addptr + 1 * 2 / 2)).smallValue); // expect 123, optimized constant folding
 
-    Std.Memory.Deallocate(addptr as void*);
+    Std.Memory.dealloc(addptr as void*);
 
     i32* testintptr = test as i32*;
     printf("testVar via intptr: %p\n", testintptr);
@@ -170,6 +172,15 @@ expose fun main() -> i32
     printf("Result from LibTest: %d\n", LT.test_fun(41));
 
     printf("Result from LibTest.Another: %d\n", LibTest.Another.other_test_fun(50)); // Will be 60
+
+    f32 floatval = 3.14f;
+    f64 doubleval = 1.23456789;
+    i32 ac = 4;
+
+    printf("Multiple varargs test:\n");
+    printf("Int value: %d, Hex value: %x, Char: %c\n", ac, ac, ac + 60); // Should print: 4, 4, 'D'
+
+    printf("Float value: %f, Double value: %.9lf, Int: %d\n", floatval, doubleval + (floatval as f64), ac); // Should print: 1.23456789 + 3.14 = 4.37456789
 
     printf("Exit code should be %d\n", ((vari.testVar as i32) + (another.smallValue as i32)));
 

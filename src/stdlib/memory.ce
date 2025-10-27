@@ -109,17 +109,17 @@ expose fun bcopy(void* src, void* dest, i32 n) -> void*
     ret memmove(dest, src, n);
 }
 
-expose fun Allocate(i32 size) -> void*
+expose fun alloc(i32 size) -> void*
 {
     ret malloc(size);
 }
 
-expose fun Deallocate(void* ptr) -> void
+expose fun dealloc(void* ptr) -> void
 {
     free(ptr);
 }
 
-expose fun Reallocate(void* ptr, i32 new_size) -> void*
+expose fun realloc(void* ptr, i32 new_size) -> void*
 {
     void* new_ptr = malloc(new_size);
     if (new_ptr == 0 as void*)
@@ -131,7 +131,7 @@ expose fun Reallocate(void* ptr, i32 new_size) -> void*
     ret new_ptr;
 }
 
-expose fun CleanAllocate(i32 num, i32 size) -> void*
+expose fun cleanalloc(i32 num, i32 size) -> void*
 {
     i32 total_size = num * size;
     void* ptr = malloc(total_size);
@@ -143,7 +143,7 @@ expose fun CleanAllocate(i32 num, i32 size) -> void*
     ret ptr;
 }
 
-expose fun Swap(void* ptr1, void* ptr2, i32 size) -> void
+expose fun swap(void* ptr1, void* ptr2, i32 size) -> void
 {
     u8* p1 = ptr1 as u8*;
     u8* p2 = ptr2 as u8*;

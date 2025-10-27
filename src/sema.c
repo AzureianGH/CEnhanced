@@ -868,6 +868,8 @@ static const char *nodekind_name(NodeKind k)
     {
     case ND_INT:
         return "ND_INT";
+    case ND_FLOAT:
+        return "ND_FLOAT";
     case ND_ADD:
         return "ND_ADD";
     case ND_RET:
@@ -931,6 +933,12 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         if (!e->type)
             e->type = &ty_i32;
+        return;
+    }
+    if (e->kind == ND_FLOAT)
+    {
+        if (!e->type)
+            e->type = &ty_f64;
         return;
     }
     if (e->kind == ND_STRING)

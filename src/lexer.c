@@ -41,6 +41,8 @@ static Token make_tok(Lexer *lx, TokenKind k, const char *start, int len)
     t.lexeme = start;
     t.length = len;
     t.int_val = 0;
+    t.float_val = 0.0;
+    t.float_is_f32 = 0;
     t.line = lx->line;
     t.col = lx->col - len;
     return t;
@@ -288,6 +290,10 @@ static void skip_ws_and_comments(Lexer *lx)
 static Token lex_number(Lexer *lx)
 {
     int start = lx->idx;
+    int literal_end = start;
+    int has_fraction = 0;
+    int has_exponent = 0;
+    int is_prefixed = 0;
     // Check for base prefixes: 0x, 0b, 0o, 0d
     if (peekc(lx) == '0' && lx->idx + 1 < lx->src.length)
     {
@@ -306,6 +312,7 @@ static Token lex_number(Lexer *lx)
             // consume '0' and prefix char
             getc2(lx);
             getc2(lx);
+            is_prefixed = 1;
             long long v = 0;
             int any = 0;
             for (;;)
@@ -335,12 +342,85 @@ static Token lex_number(Lexer *lx)
     // Default: decimal without prefix
     while (isdigit((unsigned char)peekc(lx)))
         getc2(lx);
-    int len = lx->idx - start;
-    Token t = make_tok(lx, TK_INT, lx->src.src + start, len);
-    long long v = 0;
-    for (int i = 0; i < len; i++)
+
+    // Fractional part
+    if (!is_prefixed && peekc(lx) == '.' && lx->idx + 1 < lx->src.length &&
+        isdigit((unsigned char)lx->src.src[lx->idx + 1]))
     {
-        v = v * 10 + (lx->src.src[start + i] - '0');
+        has_fraction = 1;
+        getc2(lx); // consume '.'
+        while (isdigit((unsigned char)peekc(lx)))
+            getc2(lx);
+    }
+
+    // Exponent part
+    if (!is_prefixed)
+    {
+        int exp_idx = lx->idx;
+        char c = peekc(lx);
+        if (c == 'e' || c == 'E')
+        {
+            int lookahead = lx->idx + 1;
+            if (lookahead < lx->src.length)
+            {
+                char sign = lx->src.src[lookahead];
+                if (sign == '+' || sign == '-')
+                    lookahead++;
+                if (lookahead < lx->src.length && isdigit((unsigned char)lx->src.src[lookahead]))
+                {
+                    has_exponent = 1;
+                    getc2(lx); // consume 'e' or 'E'
+                    if (sign == '+' || sign == '-')
+                        getc2(lx);
+                    while (isdigit((unsigned char)peekc(lx)))
+                        getc2(lx);
+                }
+            }
+            if (!has_exponent)
+            {
+                int rollback = lx->idx - exp_idx;
+                lx->idx = exp_idx;
+                lx->col -= rollback;
+            }
+        }
+    }
+
+    literal_end = lx->idx;
+    int saw_suffix_f = 0;
+    if (!is_prefixed)
+    {
+        char suffix = peekc(lx);
+        if (suffix == 'f' || suffix == 'F')
+        {
+            saw_suffix_f = 1;
+            getc2(lx);
+        }
+    }
+
+    int token_len = lx->idx - start;
+    Token t;
+    if (has_fraction || has_exponent || saw_suffix_f)
+    {
+        t = make_tok(lx, TK_FLOAT, lx->src.src + start, token_len);
+        t.float_is_f32 = saw_suffix_f;
+        size_t raw_len = (size_t)(literal_end - start);
+        char buffer[256];
+        size_t copy_len = raw_len < sizeof(buffer) - 1 ? raw_len : sizeof(buffer) - 1;
+        if (copy_len > 0)
+            memcpy(buffer, lx->src.src + start, copy_len);
+        buffer[copy_len] = '\0';
+        t.float_val = strtod(buffer, NULL);
+        if (t.float_is_f32)
+            t.float_val = (double)(float)t.float_val;
+        return t;
+    }
+
+    // Integer literal fall-back
+    t = make_tok(lx, TK_INT, lx->src.src + start, token_len);
+    long long v = 0;
+    for (int i = start; i < literal_end; i++)
+    {
+        v = v * 10 + (lx->src.src[i] - '0');
     }
     t.int_val = v;
     return t;

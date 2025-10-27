@@ -91,6 +91,7 @@ typedef enum
     TK_COLON,      // :
     TK_ACCESS,     // =>
     TK_DOT,        // .
+    TK_FLOAT,      // floating-point literal
 } TokenKind;
 
 typedef struct
@@ -99,6 +100,8 @@ typedef struct
     const char *lexeme; // pointer into buffer
     int length;
     int64_t int_val;
+    double float_val;
+    int float_is_f32;
     int line;
     int col;
 } Token;
@@ -153,6 +156,7 @@ typedef struct ModulePath
 typedef enum
 {
     ND_INT,
+    ND_FLOAT,
     ND_ADD,
     ND_MUL,
     ND_DIV,
@@ -208,6 +212,7 @@ typedef struct Node
     struct Node *lhs;
     struct Node *rhs;
     int64_t int_val; // for ND_INT
+    double float_val; // for ND_FLOAT
     // Source location for diagnostics
     int line;
     int col;
@@ -307,6 +312,8 @@ const struct Symbol *parser_get_externs(const Parser *ps, int *count);
 void ast_free(Node *n);
 Type *type_i32(void);
 Type *type_i64(void);
+Type *type_f32(void);
+Type *type_f64(void);
 Type *type_void(void);
 Type *type_char(void);
 Type *type_ptr(Type *to);

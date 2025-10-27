@@ -867,6 +867,8 @@ static CCValueType ccb_type_for_expr(const Node *expr)
         return CC_TYPE_PTR;
     case ND_INT:
         return CC_TYPE_I32;
+    case ND_FLOAT:
+        return expr->type ? map_type_to_cc(expr->type) : CC_TYPE_F64;
     case ND_VAR:
         return CC_TYPE_I32;
     case ND_ASSIGN:
@@ -1271,6 +1273,36 @@ static char *ccb_escape_string_literal(const char *data, int len)
     return out;
 }
 
+static bool ccb_emit_const_float(StringList *body, CCValueType ty, double value)
+{
+    if (!body)
+        return false;
+
+    char literal[64];
+    if (ty == CC_TYPE_F32)
+    {
+        float fv = (float)value;
+        snprintf(literal, sizeof(literal), "%.9g", fv);
+    }
+    else
+    {
+        snprintf(literal, sizeof(literal), "%.17g", value);
+    }
+
+    if (strcspn(literal, ".eE") == strlen(literal))
+    {
+        size_t len = strlen(literal);
+        if (len + 2 < sizeof(literal))
+        {
+            literal[len] = '.';
+            literal[len + 1] = '0';
+            literal[len + 2] = '\0';
+        }
+    }
+
+    return string_list_appendf(body, "  const %s %s", cc_type_name(ty), literal);
+}
+
 static bool ccb_emit_const(StringList *body, CCValueType ty, int64_t value)
 {
     return string_list_appendf(body, "  const %s %lld", cc_type_name(ty), (long long)value);
@@ -1282,6 +1314,8 @@ static bool ccb_emit_const_zero(StringList *body, CCValueType ty)
         return false;
     if (ty == CC_TYPE_PTR)
         return string_list_append(body, "  const ptr null");
+    if (ccb_value_type_is_float(ty))
+        return ccb_emit_const_float(body, ty, 0.0);
     return string_list_appendf(body, "  const %s 0", cc_type_name(ty));
 }
 
@@ -2108,6 +2142,16 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
     {
         CCValueType ty = map_type_to_cc(expr->type);
         if (!ccb_emit_const(&fb->body, ty, expr->int_val))
+            return 1;
+        return 0;
+    }
+    case ND_FLOAT:
+    {
+        CCValueType ty = map_type_to_cc(expr->type);
+        double value = expr->float_val;
+        if (ty == CC_TYPE_F32)
+            value = (double)(float)value;
+        if (!ccb_emit_const_float(&fb->body, ty, value))
             return 1;
         return 0;
     }
