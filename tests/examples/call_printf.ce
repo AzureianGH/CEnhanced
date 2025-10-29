@@ -175,10 +175,12 @@ expose fun main() -> i32
 
     f32 floatval = 3.14f;
     f64 doubleval = 1.23456789;
+    f32* floatptr = &floatval;
+    floatptr[0] = 6.28f;
     i32 ac = 4;
 
     printf("Multiple varargs test:\n");
-    printf("Int value: %d, Hex value: %x, Char: %c\n", ac, ac, ac + 60); // Should print: 4, 4, 'D'
+    printf("Int value: %d, Hex value: %x, Char: %c\n", ac, ac, ac + 60); // Should print: 4, 4, '@'
 
     printf("Float value: %f, Double value: %.9lf, Int: %d\n", floatval, doubleval + (floatval as f64), ac); // Should print: 1.23456789 + 3.14 = 4.37456789
 
