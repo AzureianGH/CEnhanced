@@ -3007,6 +3007,16 @@ int main(int argc, char **argv)
     if (rc)
         goto cleanup;
 
+    for (int target = 0; target < ce_count; ++target)
+    {
+        for (int source = 0; source < ce_count; ++source)
+        {
+            if (target == source)
+                continue;
+            sema_register_foreign_unit_symbols(units[target].sc, units[source].unit);
+        }
+    }
+
     for (int fi = 0; fi < ce_count && rc == 0; ++fi)
     {
         UnitCompile *uc = &units[fi];

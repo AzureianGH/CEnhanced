@@ -415,5 +415,6 @@ SemaContext *sema_create(void);
 void sema_destroy(SemaContext *sc);
 // returns 0 on success, non-zero on error (prints diagnostics)
 int sema_check_unit(SemaContext *sc, Node *unit);
+void sema_register_foreign_unit_symbols(SemaContext *sc, Node *unit);
 
 #endif // CHANCE_AST_H

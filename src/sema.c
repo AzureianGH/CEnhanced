@@ -285,7 +285,7 @@ static int type_is_int(Type *t)
 {
     return t && (t->kind == TY_I8 || t->kind == TY_U8 || t->kind == TY_I16 ||
                  t->kind == TY_U16 || t->kind == TY_I32 || t->kind == TY_U32 ||
-                 t->kind == TY_I64 || t->kind == TY_U64);
+                 t->kind == TY_I64 || t->kind == TY_U64 || t->kind == TY_CHAR);
 }
 
 static int type_is_builtin(const Type *t)
@@ -528,6 +528,87 @@ static void populate_symbol_from_function(Symbol *s, Node *fn)
     {
         s->sig.param_count = fn->param_count;
         s->sig.params = fn->param_types;
+    }
+}
+
+static void sema_register_function_local(SemaContext *sc, Node *unit_node, Node *fn)
+{
+    if (!sc || !sc->syms || !fn || fn->kind != ND_FUNC)
+        return;
+
+    const char *module_full = NULL;
+    if (unit_node && unit_node->kind == ND_UNIT)
+        module_full = unit_node->module_path.full_name;
+
+    if (module_full && !fn->metadata.backend_name && !fn->is_entrypoint)
+    {
+        char *backend = module_backend_name(module_full, fn->name);
+        if (backend)
+            fn->metadata.backend_name = backend;
+    }
+
+    Symbol s = {0};
+    populate_symbol_from_function(&s, fn);
+    symtab_add(sc->syms, s);
+
+    if (fn->metadata.backend_name && strcmp(fn->metadata.backend_name, fn->name) != 0)
+    {
+        Symbol backend_alias = s;
+        backend_alias.name = fn->metadata.backend_name;
+        backend_alias.backend_name = s.backend_name;
+        symtab_add(sc->syms, backend_alias);
+    }
+
+    if (fn->is_exposed && module_full)
+    {
+        char *qualified = make_qualified_name(&unit_node->module_path, fn->name);
+        if (qualified)
+        {
+            Symbol alias = s;
+            alias.name = qualified;
+            alias.backend_name = s.backend_name;
+            symtab_add(sc->syms, alias);
+        }
+    }
+}
+
+static void sema_register_function_foreign(SemaContext *sc, const Node *unit_node, Node *fn)
+{
+    if (!sc || !sc->syms || !unit_node || unit_node->kind != ND_UNIT || !fn || fn->kind != ND_FUNC)
+        return;
+    if (!fn->is_exposed)
+        return;
+
+    const char *module_full = unit_node->module_path.full_name;
+    if (!module_full || !*module_full)
+        return;
+
+    if (!fn->metadata.backend_name && !fn->is_entrypoint)
+    {
+        char *backend = module_backend_name(module_full, fn->name);
+        if (backend)
+            fn->metadata.backend_name = backend;
+    }
+
+    Symbol s = {0};
+    populate_symbol_from_function(&s, fn);
+    s.is_extern = 1;
+
+    if (fn->metadata.backend_name && strcmp(fn->metadata.backend_name, fn->name) != 0)
+    {
+        Symbol backend_alias = s;
+        backend_alias.name = fn->metadata.backend_name;
+        backend_alias.backend_name = s.backend_name;
+        symtab_add(sc->syms, backend_alias);
+    }
+
+    char *qualified = make_qualified_name(&unit_node->module_path, fn->name);
+    if (qualified)
+    {
+        Symbol alias = s;
+        alias.name = qualified;
+        alias.backend_name = s.backend_name;
+        symtab_add(sc->syms, alias);
     }
 }
 
@@ -1452,26 +1533,16 @@ static void check_expr(SemaContext *sc, Node *e)
         {
             if (unit_allows_module_call(sc->unit, e->call_name))
             {
-                Symbol stub = {0};
-                stub.kind = SYM_FUNC;
-                stub.name = xstrdup(e->call_name);
-                stub.backend_name = backend_from_qualified(stub.name);
-                if (!stub.backend_name)
-                    stub.backend_name = stub.name;
-                stub.is_extern = 1;
-                stub.abi = "C";
-                stub.sig.ret = &ty_i32;
-                stub.sig.params = NULL;
-                stub.sig.param_count = 0;
-                stub.sig.is_varargs = 1;
-                symtab_add(sc->syms, stub);
-                sym = symtab_get(sc->syms, e->call_name);
+                diag_error_at(e->src, e->line, e->col,
+                              "missing metadata for function '%s'",
+                              e->call_name);
             }
-        }
-        if (!sym)
-        {
-            diag_error_at(e->src, e->line, e->col, "unknown function '%s'",
-                          e->call_name);
+            else
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "unknown function '%s'",
+                              e->call_name);
+            }
             exit(1);
         }
         // check args types minimally
@@ -1564,6 +1635,135 @@ static void check_expr(SemaContext *sc, Node *e)
     exit(1);
 }
 
+static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *found_ret);
+
+static int sema_check_block(SemaContext *sc, Node *block, Node *fn, int *found_ret, int push_scope)
+{
+    if (!block)
+        return 0;
+    if (block->kind != ND_BLOCK)
+        return sema_check_statement(sc, block, fn, found_ret);
+    if (push_scope)
+        scope_push(sc);
+    for (int i = 0; i < block->stmt_count; ++i)
+    {
+        Node *stmt = block->stmts[i];
+        if (sema_check_statement(sc, stmt, fn, found_ret))
+        {
+            if (push_scope)
+                scope_pop(sc);
+            return 1;
+        }
+    }
+    if (push_scope)
+        scope_pop(sc);
+    return 0;
+}
+
+static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *found_ret)
+{
+    if (!stmt)
+        return 0;
+    switch (stmt->kind)
+    {
+    case ND_BLOCK:
+        return sema_check_block(sc, stmt, fn, found_ret, 1);
+    case ND_VAR_DECL:
+    {
+        if (scope_find(sc, stmt->var_name))
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col, "redeclaration of '%s'",
+                          stmt->var_name);
+            return 1;
+        }
+        stmt->var_type = canonicalize_type_deep(stmt->var_type);
+        scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const);
+        if (stmt->rhs)
+        {
+            if (stmt->rhs->kind == ND_INIT_LIST)
+            {
+                check_initializer_for_type(sc, stmt->rhs, stmt->var_type);
+            }
+            else
+            {
+                check_expr(sc, stmt->rhs);
+                if (stmt->var_type && !can_assign(stmt->var_type, stmt->rhs))
+                {
+                    diag_error_at(stmt->rhs->src, stmt->rhs->line, stmt->rhs->col,
+                                  "cannot initialize '%s' with incompatible type",
+                                  stmt->var_name);
+                    return 1;
+                }
+                if (stmt->var_type)
+                    stmt->rhs->type = stmt->var_type;
+            }
+        }
+        return 0;
+    }
+    case ND_EXPR_STMT:
+        if (stmt->lhs)
+            check_expr(sc, stmt->lhs);
+        return 0;
+    case ND_IF:
+        if (stmt->lhs)
+            check_expr(sc, stmt->lhs);
+        if (stmt->rhs && sema_check_statement(sc, stmt->rhs, fn, found_ret))
+            return 1;
+        if (stmt->body && sema_check_statement(sc, stmt->body, fn, found_ret))
+            return 1;
+        return 0;
+    case ND_WHILE:
+        if (stmt->lhs)
+        {
+            check_expr(sc, stmt->lhs);
+            if (!type_is_int(stmt->lhs->type))
+            {
+                diag_error_at(stmt->lhs->src, stmt->lhs->line, stmt->lhs->col,
+                              "while condition must be integer");
+                return 1;
+            }
+        }
+        if (stmt->rhs && sema_check_statement(sc, stmt->rhs, fn, found_ret))
+            return 1;
+        return 0;
+    case ND_RET:
+        if (fn->ret_type && fn->ret_type->kind == TY_VOID)
+        {
+            if (stmt->lhs)
+            {
+                diag_error_at(stmt->src, stmt->line, stmt->col,
+                              "cannot return a value from a void function");
+                return 1;
+            }
+        }
+        else
+        {
+            if (!stmt->lhs)
+            {
+                diag_error_at(stmt->src, stmt->line, stmt->col,
+                              "non-void function must return a value");
+                return 1;
+            }
+            check_expr(sc, stmt->lhs);
+            stmt->type = stmt->lhs->type;
+            Type *decl = fn->ret_type ? fn->ret_type : &ty_i32;
+            if (!type_equal(stmt->type, decl))
+            {
+                diag_error_at(stmt->src, stmt->line, stmt->col,
+                              "return type mismatch: returning %d but function returns %d",
+                              stmt->type ? stmt->type->kind : -1,
+                              decl ? decl->kind : -1);
+                return 1;
+            }
+        }
+        if (found_ret)
+            *found_ret = 1;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 static int sema_check_function(SemaContext *sc, Node *fn)
 {
     if (!fn->ret_type)
@@ -1576,152 +1776,27 @@ static int sema_check_function(SemaContext *sc, Node *fn)
         diag_error_at(fn->src, fn->line, fn->col, "missing function body");
         return 1;
     }
-    // bind parameters in a new scope
     scope_push(sc);
     for (int i = 0; i < fn->param_count; i++)
     {
         fn->param_types[i] = canonicalize_type_deep(fn->param_types[i]);
         scope_add(sc, fn->param_names[i], fn->param_types[i], 0);
     }
-    Node *ret = NULL;
-    if (body->kind == ND_RET)
-    {
-        ret = body;
-    }
-    else if (body->kind == ND_BLOCK)
-    {
-        for (int i = 0; i < body->stmt_count; i++)
-        {
-            Node *s = body->stmts[i];
-            if (s->kind == ND_RET)
-            {
-                ret = s;
-                break;
-            }
-            if (s->kind == ND_VAR_DECL)
-            {
-                if (scope_find(sc, s->var_name))
-                {
-                    diag_error_at(s->src, s->line, s->col, "redeclaration of '%s'",
-                                  s->var_name);
-                    scope_pop(sc);
-                    return 1;
-                }
-                s->var_type = canonicalize_type_deep(s->var_type);
-                scope_add(sc, s->var_name, s->var_type, s->var_is_const);
-                if (s->rhs)
-                {
-                    if (s->rhs->kind == ND_INIT_LIST)
-                    {
-                        check_initializer_for_type(sc, s->rhs, s->var_type);
-                    }
-                    else
-                    {
-                        check_expr(sc, s->rhs);
-                        if (s->var_type && !can_assign(s->var_type, s->rhs))
-                        {
-                            diag_error_at(s->rhs->src, s->rhs->line, s->rhs->col,
-                                          "cannot initialize '%s' with incompatible type",
-                                          s->var_name);
-                            scope_pop(sc);
-                            return 1;
-                        }
-                        if (s->var_type)
-                            s->rhs->type = s->var_type;
-                    }
-                }
-            }
-            else if (s->kind == ND_EXPR_STMT)
-            {
-                if (s->lhs)
-                    check_expr(sc, s->lhs);
-            }
-            else if (s->kind == ND_IF)
-            { /* minimal: type-check cond */
-                check_expr(sc, s->lhs);
-            }
-            else if (s->kind == ND_WHILE)
-            {
-                check_expr(sc, s->lhs);
-            }
-        }
-        // For void functions, no explicit return is required.
-        if (!ret && (!fn->ret_type || fn->ret_type->kind != TY_VOID))
-        {
-            diag_error_at(fn->src, fn->line, fn->col,
-                          "function body must contain a return statement");
-            scope_pop(sc);
-            return 1;
-        }
-    }
+    int has_return = 0;
+    int rc;
+    if (body->kind == ND_BLOCK)
+        rc = sema_check_block(sc, body, fn, &has_return, 0);
     else
+        rc = sema_check_statement(sc, body, fn, &has_return);
+    scope_pop(sc);
+    if (rc)
+        return rc;
+    if ((!fn->ret_type || fn->ret_type->kind != TY_VOID) && !has_return)
     {
-        // support while-loops in blocks or as top-level stmt
-        if (body->kind == ND_WHILE)
-        {
-            check_expr(sc, body->lhs);
-            if (!type_is_int(body->lhs->type))
-            {
-                diag_error_at(body->lhs->src, body->lhs->line, body->lhs->col,
-                              "while condition must be integer");
-                return 1;
-            }
-            // recursively allow body
-            if (body->rhs && body->rhs->kind == ND_BLOCK)
-            {
-                for (int i = 0; i < body->rhs->stmt_count;
-                     i++)
-                { /* minimal: ensure expressions type-check */
-                    Node *s = body->rhs->stmts[i];
-                    if (s->kind == ND_EXPR_STMT)
-                        check_expr(sc, s->lhs);
-                }
-            }
-            diag_error_at(fn->src, fn->line, fn->col,
-                          "function body must contain a return statement");
-            scope_pop(sc);
-            return 1;
-        }
-        diag_error_at(fn->src, fn->line, fn->col, "unsupported function body kind");
+        diag_error_at(fn->src, fn->line, fn->col,
+                      "function body must contain a return statement");
         return 1;
     }
-    if (ret)
-    {
-        if (fn->ret_type && fn->ret_type->kind == TY_VOID)
-        {
-            // In void functions, allow bare 'ret;' but forbid returning a value
-            if (ret->lhs)
-            {
-                diag_error_at(ret->src, ret->line, ret->col,
-                              "cannot return a value from a void function");
-                return 1;
-            }
-        }
-        else
-        {
-            if (!ret->lhs)
-            {
-                diag_error_at(ret->src, ret->line, ret->col,
-                              "non-void function must return a value");
-                return 1;
-            }
-            Node *e = ret->lhs;
-            check_expr(sc, e);
-            ret->type = e->type;
-            // Enforce that the returned expression type matches the function's
-            // declared return type (including pointers). If a cast was used,
-            // 'e->type' should already be the cast target.
-            Type *decl = fn->ret_type ? fn->ret_type : &ty_i32;
-            if (!type_equal(ret->type, decl))
-            {
-                diag_error_at(ret->src, ret->line, ret->col,
-                              "return type mismatch: returning %d but function returns %d",
-                              ret->type ? ret->type->kind : -1, decl ? decl->kind : -1);
-                return 1;
-            }
-        }
-    }
-    scope_pop(sc);
     return 0;
 }
 
@@ -1738,16 +1813,7 @@ int sema_check_unit(SemaContext *sc, Node *unit)
     {
         // single function case
         // add symbol so calls can resolve
-        Symbol s = {0};
-        populate_symbol_from_function(&s, unit);
-        symtab_add(sc->syms, s);
-        if (unit->metadata.backend_name && strcmp(unit->metadata.backend_name, unit->name) != 0)
-        {
-            Symbol backend_alias = s;
-            backend_alias.name = unit->metadata.backend_name;
-            backend_alias.backend_name = s.backend_name;
-            symtab_add(sc->syms, backend_alias);
-        }
+        sema_register_function_local(sc, NULL, unit);
         if (check_exposed_function_signature(unit))
             return 1;
         return sema_check_function(sc, unit);
@@ -1766,33 +1832,7 @@ int sema_check_unit(SemaContext *sc, Node *unit)
             diag_error("non-function in unit");
             return 1;
         }
-        if (unit->module_path.full_name && !fn->metadata.backend_name && !fn->is_entrypoint)
-        {
-            char *backend = module_backend_name(unit->module_path.full_name, fn->name);
-            if (backend)
-                fn->metadata.backend_name = backend;
-        }
-        Symbol s = {0};
-        populate_symbol_from_function(&s, fn);
-        symtab_add(sc->syms, s);
-        if (fn->metadata.backend_name && strcmp(fn->metadata.backend_name, fn->name) != 0)
-        {
-            Symbol backend_alias = s;
-            backend_alias.name = fn->metadata.backend_name;
-            backend_alias.backend_name = s.backend_name;
-            symtab_add(sc->syms, backend_alias);
-        }
-        if (fn->is_exposed && unit->module_path.full_name)
-        {
-            char *qualified = make_qualified_name(&unit->module_path, fn->name);
-            if (qualified)
-            {
-                Symbol alias = s;
-                alias.name = qualified;
-                alias.backend_name = s.backend_name;
-                symtab_add(sc->syms, alias);
-            }
-        }
+        sema_register_function_local(sc, unit, fn);
     }
     // Second pass: type-check bodies
     for (int i = 0; i < unit->stmt_count; i++)
@@ -1805,6 +1845,28 @@ int sema_check_unit(SemaContext *sc, Node *unit)
     }
     sc->unit = previous_unit;
     return 0;
+}
+
+void sema_register_foreign_unit_symbols(SemaContext *sc, Node *unit)
+{
+    if (!sc || !unit)
+        return;
+
+    if (unit->kind == ND_UNIT)
+    {
+        for (int i = 0; i < unit->stmt_count; ++i)
+        {
+            Node *fn = unit->stmts[i];
+            if (fn && fn->kind == ND_FUNC)
+                sema_register_function_foreign(sc, unit, fn);
+        }
+        return;
+    }
+
+    if (unit->kind == ND_FUNC)
+    {
+        sema_register_function_foreign(sc, NULL, unit);
+    }
 }
 
 // Simple constant evaluation for current subset

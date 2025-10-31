@@ -1,0 +1,30 @@
+ccbytecode 2
+
+.func LibTest_test_fun ret=i32 params=1 locals=0
+.params i32
+  load_param 0
+  const i32 1
+  binop add i32
+  ret
+.endfunc
+.func LibTest_other_fun ret=ptr params=0 locals=3
+.locals ptr i32 u8
+  stack_alloc 5 8
+  store_local 0
+  load_local 0
+  const i32 10
+  store_local 1
+  load_local 1
+  store_indirect i32
+  load_local 0
+  convert bitcast ptr i64
+  const i64 4
+  binop add i64
+  convert bitcast i64 ptr
+  const u8 20
+  store_local 2
+  load_local 2
+  store_indirect u8
+  load_local 0
+  ret
+.endfunc

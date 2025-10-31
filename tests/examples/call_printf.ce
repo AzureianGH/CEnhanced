@@ -47,6 +47,19 @@ expose struct OtherElement
 };
 
 
+hide fun assert(i64 condition, string messageFail, string messagePass) -> void
+{
+    if (condition == 0)
+    {
+        printf("FAIL: %s\n", messageFail);
+        abort();
+    }
+    else
+    {
+        printf("PASSED: %s\n", messagePass);
+    }
+    ret;
+}
 
 [EntryPoint]
 expose fun main() -> i32
@@ -54,7 +67,22 @@ expose fun main() -> i32
     // allocate 128 bytes for input
     ptr<void> buf = Std.Memory.alloc(128);
 
+    if (true)
+    {
+        ptr<void> aaaa = Std.Memory.alloc(128);
+        Std.Memory.dealloc(aaaa);
+    }
+
+    assert(true, "Memory allocation failed", "Memory allocation succeeded");
+
     Std.Memory.memset(buf, 0, 128);
+
+    assert(true, "Memory memset failed", "Memory memset succeeded");
+
+    if (true)
+    {
+        assert(true, "Initial assertions failed", "Initial assertions succeeded");
+    }
 
     // prompt the user
     write(1, "What's your name? > ", 20);
@@ -63,8 +91,11 @@ expose fun main() -> i32
     i32 len = read(0, buf as char *, 127);
 
     // test printwrapper result
-    i32 printed = printwrapper();
-    printf("Read %d bytes (printwrapper printed %d chars)\n", len, printed);
+    if (true)
+    {
+        i32 printed = printwrapper();
+        printf("Read %d bytes (printwrapper printed %d chars)\n", len, printed);
+    }
 
     // null-terminate the string safely
     string str = buf as string;
