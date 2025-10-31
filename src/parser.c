@@ -2740,8 +2740,9 @@ void parser_destroy(Parser *ps)
 
 Node *parse_unit(Parser *ps)
 {
-    Node **fns = NULL;
-    int fn_count = 0, fn_cap = 0;
+    Node **decls = NULL;
+    int decl_count = 0, decl_cap = 0;
+    int fn_count = 0;
     struct PendingAttr *attrs = NULL;
     int attr_count = 0, attr_cap = 0;
 
@@ -2891,12 +2892,70 @@ Node *parse_unit(Parser *ps)
             apply_function_attributes(ps, fn, attrs, attr_count);
             clear_pending_attrs(attrs, attr_count);
             attr_count = 0;
-            if (fn_count == fn_cap)
+            if (decl_count == decl_cap)
             {
-                fn_cap = fn_cap ? fn_cap * 2 : 4;
-                fns = (Node **)realloc(fns, sizeof(Node *) * fn_cap);
+                decl_cap = decl_cap ? decl_cap * 2 : 4;
+                decls = (Node **)realloc(decls, sizeof(Node *) * decl_cap);
             }
-            fns[fn_count++] = fn;
+            decls[decl_count++] = fn;
+            fn_count++;
+            continue;
+        }
+
+        if (t.kind == TK_KW_CONSTANT || is_type_start(ps, t))
+        {
+            if (attr_count > 0)
+            {
+                diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
+                              "attributes are not supported on global variable declarations");
+                exit(1);
+            }
+            if (leading_noreturn)
+            {
+                diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
+                              "'noreturn' is only valid before functions or extern declarations");
+                exit(1);
+            }
+
+            int is_const = 0;
+            if (t.kind == TK_KW_CONSTANT)
+            {
+                lexer_next(ps->lx);
+                is_const = 1;
+                t = lexer_peek(ps->lx);
+            }
+
+            Type *ty = parse_type_spec(ps);
+            Token name = expect(ps, TK_IDENT, "identifier");
+
+            Node *decl = new_node(ND_VAR_DECL);
+            char *nm = (char *)xmalloc((size_t)name.length + 1);
+            memcpy(nm, name.lexeme, (size_t)name.length);
+            nm[name.length] = '\0';
+            decl->var_name = nm;
+            decl->var_type = ty;
+            decl->var_is_const = is_const;
+            decl->var_is_global = 1;
+            decl->is_exposed = visibility;
+            decl->line = name.line;
+            decl->col = name.col;
+            decl->src = lexer_source(ps->lx);
+
+            Token next_tok = lexer_peek(ps->lx);
+            if (next_tok.kind == TK_ASSIGN)
+            {
+                lexer_next(ps->lx);
+                decl->rhs = parse_initializer(ps);
+            }
+
+            expect(ps, TK_SEMI, ";");
+
+            if (decl_count == decl_cap)
+            {
+                decl_cap = decl_cap ? decl_cap * 2 : 4;
+                decls = (Node **)realloc(decls, sizeof(Node *) * decl_cap);
+            }
+            decls[decl_count++] = decl;
             continue;
         }
 
@@ -2920,8 +2979,8 @@ Node *parse_unit(Parser *ps)
 
     Node *u = (Node *)xcalloc(1, sizeof(Node));
     u->kind = ND_UNIT;
-    u->stmts = fns;
-    u->stmt_count = fn_count;
+    u->stmts = decls;
+    u->stmt_count = decl_count;
     u->src = lexer_source(ps->lx);
     u->line = 1;
     u->col = 1;
@@ -2960,9 +3019,9 @@ Node *parse_unit(Parser *ps)
 
     if (ps->module_full_name && fn_count > 0)
     {
-        for (int i = 0; i < fn_count; ++i)
+        for (int i = 0; i < decl_count; ++i)
         {
-            Node *fn = fns[i];
+            Node *fn = decls[i];
             if (!fn || fn->kind != ND_FUNC)
                 continue;
             if (fn->metadata.backend_name || fn->is_entrypoint)

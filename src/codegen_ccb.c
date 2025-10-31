@@ -2137,6 +2137,111 @@ static bool ccb_emit_store_local(CcbFunctionBuilder *fb, const CcbLocal *local)
     return string_list_appendf(&fb->body, "  store_local %d", local->index);
 }
 
+static bool ccb_emit_load_global(StringList *body, const char *name)
+{
+    if (!body || !name || !*name)
+        return false;
+    return string_list_appendf(body, "  load_global %s", name);
+}
+
+static bool ccb_emit_store_global(StringList *body, const char *name)
+{
+    if (!body || !name || !*name)
+        return false;
+    return string_list_appendf(body, "  store_global %s", name);
+}
+
+static bool ccb_emit_addr_global(StringList *body, const char *name)
+{
+    if (!body || !name || !*name)
+        return false;
+    return string_list_appendf(body, "  addr_global %s", name);
+}
+
+static int ccb_emit_global_incdec(CcbFunctionBuilder *fb, const Node *expr, bool is_increment, bool is_prefix)
+{
+    if (!fb || !expr || !expr->lhs || !expr->lhs->var_ref)
+    {
+        diag_error_at(expr ? expr->src : NULL, expr ? expr->line : 0, expr ? expr->col : 0,
+                      "malformed global %s operation",
+                      is_increment ? "increment" : "decrement");
+        return 1;
+    }
+
+    const Node *target = expr->lhs;
+    const char *name = target->var_ref;
+    const Type *target_type = target->type ? target->type : expr->type;
+    CCValueType val_ty = map_type_to_cc(target_type);
+    bool is_ptr = (val_ty == CC_TYPE_PTR);
+
+    if (!is_ptr && !ccb_value_type_is_integer(val_ty))
+    {
+        diag_error_at(expr->src, expr->line, expr->col,
+                      "%s is only supported on integer or pointer globals",
+                      is_increment ? "increment" : "decrement");
+        return 1;
+    }
+
+    CcbLocal *temp = NULL;
+    if (!is_prefix)
+    {
+        temp = ccb_local_add(fb, NULL, (Type *)target_type, false, false);
+        if (!temp)
+            return 1;
+    }
+
+    if (!ccb_emit_load_global(&fb->body, name))
+        return 1;
+
+    if (!is_prefix)
+    {
+        if (!ccb_emit_store_local(fb, temp))
+            return 1;
+        if (!ccb_emit_load_local(fb, temp))
+            return 1;
+    }
+
+    if (is_ptr)
+    {
+        if (ccb_emit_convert_between(fb, val_ty, CC_TYPE_I64, expr))
+            return 1;
+        size_t elem_size = ccb_pointer_elem_size(target_type);
+        if (elem_size == 0)
+            elem_size = 1;
+        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+            return 1;
+        const char *op = is_increment ? "add" : "sub";
+        if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(CC_TYPE_I64)))
+            return 1;
+        if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+            return 1;
+    }
+    else
+    {
+        if (!ccb_emit_const(&fb->body, val_ty, 1))
+            return 1;
+        const char *op = is_increment ? "add" : "sub";
+        if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(val_ty)))
+            return 1;
+    }
+
+    if (!ccb_emit_store_global(&fb->body, name))
+        return 1;
+
+    if (is_prefix)
+    {
+        if (!ccb_emit_load_global(&fb->body, name))
+            return 1;
+    }
+    else if (temp)
+    {
+        if (!ccb_emit_load_local(fb, temp))
+            return 1;
+    }
+
+    return 0;
+}
+
 static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
 {
     if (!fb || !expr)
@@ -2335,6 +2440,11 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         CcbLocal *local = ccb_local_lookup(fb, target->var_ref);
         if (!local)
         {
+            if (target->var_is_global)
+            {
+                bool is_increment = (expr->kind == ND_PREINC);
+                return ccb_emit_global_incdec(fb, expr, is_increment, true);
+            }
             diag_error_at(target->src, target->line, target->col,
                           "unknown local '%s'", target->var_ref);
             return 1;
@@ -2406,6 +2516,11 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         CcbLocal *local = ccb_local_lookup(fb, target->var_ref);
         if (!local)
         {
+            if (target->var_is_global)
+            {
+                bool is_increment = (expr->kind == ND_POSTINC);
+                return ccb_emit_global_incdec(fb, expr, is_increment, false);
+            }
             diag_error_at(target->src, target->line, target->col,
                           "unknown local '%s'", target->var_ref);
             return 1;
@@ -2870,6 +2985,20 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         CcbLocal *local = ccb_local_lookup(fb, expr->var_ref);
         if (!local)
         {
+            if (expr->var_is_global)
+            {
+                if (type_is_address_only(expr->type))
+                {
+                    if (!ccb_emit_addr_global(&fb->body, expr->var_ref))
+                        return 1;
+                }
+                else
+                {
+                    if (!ccb_emit_load_global(&fb->body, expr->var_ref))
+                        return 1;
+                }
+                return 0;
+            }
             diag_error_at(expr->src, expr->line, expr->col,
                           "unknown local '%s'", expr->var_ref);
             return 1;
@@ -2951,6 +3080,62 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             CcbLocal *local = ccb_local_lookup(fb, target->var_ref);
             if (!local)
             {
+                if (target->var_is_global)
+                {
+                    if (type_is_address_only(target->type))
+                    {
+                        Type *ptr_ty = type_ptr((Type *)target->type);
+                        CcbLocal *dst_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                        if (!dst_ptr)
+                            return 1;
+                        if (!ccb_emit_addr_global(&fb->body, target->var_ref))
+                            return 1;
+                        if (!ccb_emit_store_local(fb, dst_ptr))
+                            return 1;
+
+                        if (ccb_emit_expr_basic(fb, expr->rhs))
+                            return 1;
+
+                        CCValueType rhs_ty = ccb_type_for_expr(expr->rhs);
+                        if (rhs_ty != CC_TYPE_PTR)
+                        {
+                            if (ccb_emit_convert_between(fb, rhs_ty, CC_TYPE_PTR, expr->rhs))
+                                return 1;
+                        }
+
+                        CcbLocal *src_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                        if (!src_ptr)
+                            return 1;
+                        if (!ccb_emit_store_local(fb, src_ptr))
+                            return 1;
+
+                        if (ccb_emit_struct_copy(fb, target->type, dst_ptr, src_ptr))
+                            return 1;
+
+                        CCValueType result_ty = ccb_type_for_expr(expr);
+                        if (result_ty != CC_TYPE_VOID)
+                        {
+                            if (!ccb_emit_addr_global(&fb->body, target->var_ref))
+                                return 1;
+                        }
+                        return 0;
+                    }
+
+                    if (ccb_emit_expr_basic(fb, expr->rhs))
+                        return 1;
+
+                    if (!ccb_emit_store_global(&fb->body, target->var_ref))
+                        return 1;
+
+                    CCValueType result_ty = ccb_type_for_expr(expr);
+                    if (result_ty != CC_TYPE_VOID)
+                    {
+                        if (!ccb_emit_load_global(&fb->body, target->var_ref))
+                            return 1;
+                    }
+                    return 0;
+                }
+
                 diag_error_at(target->src, target->line, target->col,
                               "unknown local '%s'", target->var_ref);
                 return 1;
@@ -3543,6 +3728,135 @@ static bool ccb_append_locals_line(CcbModule *mod, const CcbFunctionBuilder *fb)
     return appended;
 }
 
+static bool ccb_format_global_initializer(const Node *expr, const Type *ty, char *buffer, size_t bufsz)
+{
+    if (!buffer || bufsz == 0)
+        return false;
+
+    if (!expr)
+    {
+        if (ty && ty->kind == TY_PTR)
+            snprintf(buffer, bufsz, "null");
+        else
+            snprintf(buffer, bufsz, "0");
+        return true;
+    }
+
+    switch (expr->kind)
+    {
+    case ND_INIT_LIST:
+        if (expr->init.is_zero)
+        {
+            if (ty && ty->kind == TY_PTR)
+                snprintf(buffer, bufsz, "null");
+            else
+                snprintf(buffer, bufsz, "0");
+            return true;
+        }
+        return false;
+    case ND_NULL:
+        snprintf(buffer, bufsz, "null");
+        return true;
+    case ND_INT:
+        if (ty && ty->kind == TY_PTR && expr->int_val == 0)
+        {
+            snprintf(buffer, bufsz, "null");
+            return true;
+        }
+        snprintf(buffer, bufsz, "%lld", (long long)expr->int_val);
+        return true;
+    case ND_FLOAT:
+    {
+        double value = expr->float_val;
+        if (ty && ty->kind == TY_F32)
+            value = (double)(float)value;
+        snprintf(buffer, bufsz, "%.17g", value);
+        return true;
+    }
+    case ND_NEG:
+    {
+        const Node *inner = expr->lhs;
+        while (inner && inner->kind == ND_CAST)
+            inner = inner->lhs;
+        if (!inner)
+            return false;
+        if (inner->kind == ND_INT)
+        {
+            long long value = -(inner->int_val);
+            snprintf(buffer, bufsz, "%lld", value);
+            return true;
+        }
+        if (inner->kind == ND_FLOAT)
+        {
+            double value = -(inner->float_val);
+            if (ty && ty->kind == TY_F32)
+                value = (double)(float)value;
+            snprintf(buffer, bufsz, "%.17g", value);
+            return true;
+        }
+        return false;
+    }
+    case ND_CAST:
+        return ccb_format_global_initializer(expr->lhs, ty, buffer, bufsz);
+    default:
+        return false;
+    }
+}
+
+static int ccb_module_append_global(CcbModule *mod, const Node *decl)
+{
+    if (!mod || !decl || decl->kind != ND_VAR_DECL || !decl->var_is_global)
+        return 1;
+
+    const char *name = decl->metadata.backend_name ? decl->metadata.backend_name : decl->var_name;
+    if (!name || !*name)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "global variable missing backend name");
+        return 1;
+    }
+
+    if (decl->var_type && decl->var_type->kind == TY_STRUCT)
+    {
+        int size_bytes = decl->var_type->strct.size_bytes;
+        if (size_bytes <= 0)
+        {
+            diag_error_at(decl->src, decl->line, decl->col,
+                          "struct global '%s' has unknown size", decl->var_name);
+            return 1;
+        }
+
+        int align_bytes = 8;
+        if (!ccb_module_appendf(mod, ".global %s type=%s size=%d align=%d%s",
+                                name, cc_type_name(CC_TYPE_U8), size_bytes, align_bytes,
+                                decl->var_is_const ? " const" : ""))
+            return 1;
+        return 0;
+    }
+
+    CCValueType cc_ty = map_type_to_cc(decl->var_type);
+    if (cc_ty == CC_TYPE_VOID)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "global '%s' cannot have void storage", decl->var_name);
+        return 1;
+    }
+
+    char init_buf[128];
+    if (!ccb_format_global_initializer(decl->rhs, decl->var_type, init_buf, sizeof(init_buf)))
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "unsupported initializer for global '%s'", decl->var_name);
+        return 1;
+    }
+
+    const char *const_attr = decl->var_is_const ? " const" : "";
+    if (!ccb_module_appendf(mod, ".global %s type=%s init=%s%s", name, cc_type_name(cc_ty), init_buf, const_attr))
+        return 1;
+
+    return 0;
+}
+
 static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const CodegenOptions *opts)
 {
     (void)opts;
@@ -3941,7 +4255,21 @@ int codegen_ccb_write_module(const Node *unit, const CodegenOptions *opts)
         {
             for (int i = 0; !rc && i < unit->stmt_count; ++i)
             {
-                if (ccb_function_emit_basic(&mod, unit->stmts[i], opts))
+                const Node *decl = unit->stmts[i];
+                if (!decl)
+                    continue;
+                if (decl->kind == ND_VAR_DECL && decl->var_is_global)
+                {
+                    if (ccb_module_append_global(&mod, decl))
+                        rc = 1;
+                }
+            }
+            for (int i = 0; !rc && i < unit->stmt_count; ++i)
+            {
+                const Node *decl = unit->stmts[i];
+                if (!decl || decl->kind != ND_FUNC)
+                    continue;
+                if (ccb_function_emit_basic(&mod, decl, opts))
                     rc = 1;
             }
         }

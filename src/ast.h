@@ -262,6 +262,7 @@ typedef struct Node
     const char *var_name;
     Type *var_type;
     int var_is_const; // for ND_VAR_DECL
+    int var_is_global; // set on declarations/references that live at global scope
     // For ND_BLOCK
     struct Node **stmts;
     int stmt_count;
@@ -383,7 +384,8 @@ void diag_reset(void);
 // Semantic analysis (type checking) and symbols
 typedef enum
 {
-    SYM_FUNC
+    SYM_FUNC,
+    SYM_GLOBAL
 } SymKind;
 typedef struct FuncSig
 {
@@ -401,6 +403,8 @@ typedef struct Symbol
     const char *abi; // e.g., "C"
     FuncSig sig;
     int is_noreturn;
+    Type *var_type;  // valid when kind == SYM_GLOBAL
+    int is_const;    // valid when kind == SYM_GLOBAL
 } Symbol;
 
 typedef struct SymTable SymTable;

@@ -552,6 +552,27 @@ static void populate_symbol_from_function(Symbol *s, Node *fn)
     }
 }
 
+static void populate_symbol_from_global(Symbol *s, Node *decl)
+{
+    if (!s || !decl || decl->kind != ND_VAR_DECL)
+        return;
+
+    s->kind = SYM_GLOBAL;
+    s->name = decl->var_name;
+    s->backend_name = (decl->metadata.backend_name && decl->metadata.backend_name[0])
+                          ? decl->metadata.backend_name
+                          : decl->var_name;
+    s->is_extern = 0;
+    s->abi = "C";
+    s->sig.ret = NULL;
+    s->sig.params = NULL;
+    s->sig.param_count = 0;
+    s->sig.is_varargs = 0;
+    s->is_noreturn = 0;
+    s->var_type = decl->var_type;
+    s->is_const = decl->var_is_const;
+}
+
 static void sema_register_function_local(SemaContext *sc, Node *unit_node, Node *fn)
 {
     if (!sc || !sc->syms || !fn || fn->kind != ND_FUNC)
@@ -588,6 +609,63 @@ static void sema_register_function_local(SemaContext *sc, Node *unit_node, Node 
             Symbol alias = s;
             alias.name = qualified;
             alias.backend_name = s.backend_name;
+            symtab_add(sc->syms, alias);
+        }
+    }
+}
+
+static void sema_register_global_local(SemaContext *sc, Node *unit_node, Node *decl)
+{
+    if (!sc || !sc->syms || !decl || decl->kind != ND_VAR_DECL || !decl->var_is_global)
+        return;
+
+    const char *module_full = NULL;
+    if (unit_node && unit_node->kind == ND_UNIT)
+        module_full = unit_node->module_path.full_name;
+
+    if (module_full && !decl->metadata.backend_name)
+    {
+        char *backend = module_backend_name(module_full, decl->var_name);
+        if (backend)
+            decl->metadata.backend_name = backend;
+    }
+
+    decl->var_type = canonicalize_type_deep(decl->var_type);
+
+    Symbol s = {0};
+    populate_symbol_from_global(&s, decl);
+
+    if (!s.name)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "global variable missing name");
+        exit(1);
+    }
+
+    const Symbol *existing = symtab_get(sc->syms, s.name);
+    if (existing)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "duplicate symbol '%s'", s.name);
+        exit(1);
+    }
+
+    symtab_add(sc->syms, s);
+
+    if (s.backend_name && strcmp(s.backend_name, s.name) != 0)
+    {
+        Symbol alias = s;
+        alias.name = s.backend_name;
+        symtab_add(sc->syms, alias);
+    }
+
+    if (decl->is_exposed && module_full)
+    {
+        char *qualified = make_qualified_name(&unit_node->module_path, decl->var_name);
+        if (qualified)
+        {
+            Symbol alias = s;
+            alias.name = qualified;
             symtab_add(sc->syms, alias);
         }
     }
@@ -630,6 +708,51 @@ static void sema_register_function_foreign(SemaContext *sc, const Node *unit_nod
         alias.name = qualified;
         alias.backend_name = s.backend_name;
         symtab_add(sc->syms, alias);
+    }
+}
+
+static void sema_register_global_foreign(SemaContext *sc, const Node *unit_node, Node *decl)
+{
+    if (!sc || !sc->syms || !unit_node || unit_node->kind != ND_UNIT || !decl || decl->kind != ND_VAR_DECL || !decl->var_is_global)
+        return;
+    if (!decl->is_exposed)
+        return;
+
+    const char *module_full = unit_node->module_path.full_name;
+    if (!module_full || !*module_full)
+        return;
+
+    if (!decl->metadata.backend_name)
+    {
+        char *backend = module_backend_name(module_full, decl->var_name);
+        if (backend)
+            decl->metadata.backend_name = backend;
+    }
+
+    decl->var_type = canonicalize_type_deep(decl->var_type);
+
+    Symbol s = {0};
+    populate_symbol_from_global(&s, decl);
+    s.is_extern = 1;
+
+    symtab_add(sc->syms, s);
+
+    if (s.backend_name && strcmp(s.backend_name, s.name) != 0)
+    {
+        Symbol alias = s;
+        alias.name = s.backend_name;
+        symtab_add(sc->syms, alias);
+    }
+
+    if (decl->is_exposed)
+    {
+        char *qualified = make_qualified_name(&unit_node->module_path, decl->var_name);
+        if (qualified)
+        {
+            Symbol alias = s;
+            alias.name = qualified;
+            symtab_add(sc->syms, alias);
+        }
     }
 }
 
@@ -998,6 +1121,39 @@ static int scope_is_const(SemaContext *sc, const char *name)
     return 0;
 }
 
+static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global, int *is_const)
+{
+    if (is_global)
+        *is_global = 0;
+    if (is_const)
+        *is_const = 0;
+    if (!sc || !name)
+        return NULL;
+
+    Type *local_ty = scope_get_type(sc, name);
+    if (local_ty)
+    {
+        if (is_const)
+            *is_const = scope_is_const(sc, name);
+        return canonicalize_type_deep(local_ty);
+    }
+
+    if (!sc->syms)
+        return NULL;
+
+    const Symbol *sym = symtab_get(sc->syms, name);
+    if (sym && sym->kind == SYM_GLOBAL)
+    {
+        if (is_global)
+            *is_global = 1;
+        if (is_const)
+            *is_const = sym->is_const;
+        return canonicalize_type_deep(sym->var_type);
+    }
+
+    return NULL;
+}
+
 static const char *nodekind_name(NodeKind k)
 {
     switch (k)
@@ -1091,14 +1247,29 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_VAR)
     {
-        Type *t = scope_get_type(sc, e->var_ref);
+        const char *orig_name = e->var_ref;
+        int is_global = 0;
+        int is_const = 0;
+        Type *t = resolve_variable(sc, orig_name, &is_global, &is_const);
         if (!t)
         {
             diag_error_at(e->src, e->line, e->col, "unknown variable '%s'",
-                          e->var_ref);
+                          orig_name ? orig_name : "<null>");
             exit(1);
         }
-        e->type = canonicalize_type_deep(t);
+
+        e->type = t;
+        e->var_is_global = is_global;
+        e->var_is_const = is_const;
+
+        if (is_global && sc && sc->syms)
+        {
+            const Symbol *sym = symtab_get(sc->syms, orig_name);
+            if (!sym)
+                sym = symtab_get(sc->syms, e->var_ref);
+            if (sym && sym->kind == SYM_GLOBAL && sym->backend_name)
+                e->var_ref = sym->backend_name;
+        }
         return;
     }
     if (e->kind == ND_SIZEOF)
@@ -1268,6 +1439,12 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, target);
+        if (target->kind == ND_VAR && target->var_is_global)
+        {
+            diag_error_at(target->src, target->line, target->col,
+                          "address-of operator is not supported for global variables");
+            exit(1);
+        }
         if (!target->type)
         {
             diag_error_at(target->src, target->line, target->col,
@@ -1533,11 +1710,11 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         if (lhs_base->kind == ND_VAR)
         {
-            if (scope_is_const(sc, lhs_base->var_ref))
+            if (lhs_base->var_is_const)
             {
                 diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
                               "cannot assign to constant variable '%s'",
-                              lhs_base->var_ref);
+                              lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
                 exit(1);
             }
         }
@@ -1546,7 +1723,7 @@ static void check_expr(SemaContext *sc, Node *e)
         if (!lhs_type)
         {
             if (lhs_base->kind == ND_VAR)
-                lhs_type = scope_get_type(sc, lhs_base->var_ref);
+                lhs_type = resolve_variable(sc, lhs_base->var_ref, NULL, NULL);
             else if (lhs_base->kind == ND_MEMBER)
                 lhs_type = lhs_base->type;
             else if (lhs_base->kind == ND_INDEX && lhs_base->lhs && lhs_base->lhs->type && lhs_base->lhs->type->kind == TY_PTR)
@@ -1558,7 +1735,7 @@ static void check_expr(SemaContext *sc, Node *e)
             {
                 diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
                               "unknown variable '%s' on left-hand side of assignment",
-                              lhs_base->var_ref);
+                              lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
                 exit(1);
             }
         }
@@ -1581,19 +1758,29 @@ static void check_expr(SemaContext *sc, Node *e)
         e->kind == ND_POSTDEC)
     {
         // operand must be an lvalue variable of integer type (simplified)
-        if (!e->lhs || e->lhs->kind != ND_VAR)
+        if (!e->lhs)
         {
             diag_error_at(e->src, e->line, e->col,
                           "operand of ++/-- must be a variable");
             exit(1);
         }
-        if (scope_is_const(sc, e->lhs->var_ref))
+        check_expr(sc, e->lhs);
+        if (e->lhs->kind != ND_VAR)
         {
-            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
-                          "cannot modify constant variable '%s'", e->lhs->var_ref);
+            diag_error_at(e->src, e->line, e->col,
+                          "operand of ++/-- must be a variable");
             exit(1);
         }
-        Type *t = scope_get_type(sc, e->lhs->var_ref);
+        if (e->lhs->var_is_const)
+        {
+            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
+                          "cannot modify constant variable '%s'",
+                          e->lhs->var_ref ? e->lhs->var_ref : "<unnamed>");
+            exit(1);
+        }
+        Type *t = e->lhs->type;
+        if (!t)
+            t = resolve_variable(sc, e->lhs->var_ref, NULL, NULL);
         t = canonicalize_type_deep(t);
         e->lhs->type = t;
         if (!t || (!type_is_int(t) && !type_is_pointer(t)))
@@ -1628,6 +1815,13 @@ static void check_expr(SemaContext *sc, Node *e)
                               "unknown function '%s'",
                               e->call_name);
             }
+            exit(1);
+        }
+        if (sym->kind != SYM_FUNC)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "symbol '%s' is not callable",
+                          e->call_name ? e->call_name : "<unnamed>");
             exit(1);
         }
         // check args types minimally
@@ -1849,6 +2043,116 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
     }
 }
 
+static int sema_global_initializer_is_const(const Node *expr)
+{
+    if (!expr)
+        return 1;
+
+    switch (expr->kind)
+    {
+    case ND_INT:
+    case ND_FLOAT:
+    case ND_NULL:
+        return 1;
+    case ND_NEG:
+    case ND_CAST:
+        return sema_global_initializer_is_const(expr->lhs);
+    case ND_INIT_LIST:
+        return expr->init.is_zero;
+    default:
+        return 0;
+    }
+}
+
+static int sema_check_global_decl(SemaContext *sc, Node *decl)
+{
+    if (!decl || decl->kind != ND_VAR_DECL || !decl->var_is_global)
+        return 0;
+
+    if (!decl->var_name)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "global variable requires a name");
+        return 1;
+    }
+
+    decl->var_type = canonicalize_type_deep(decl->var_type);
+    Type *ty = decl->var_type;
+    if (!ty)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "unable to determine type for global '%s'",
+                      decl->var_name);
+        return 1;
+    }
+    if (ty->kind == TY_VOID)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "global '%s' cannot have type void",
+                      decl->var_name);
+        return 1;
+    }
+    if (ty->kind == TY_STRUCT)
+    {
+        if (ty->strct.size_bytes <= 0)
+        {
+            diag_error_at(decl->src, decl->line, decl->col,
+                          "struct global '%s' has incomplete size",
+                          decl->var_name);
+            return 1;
+        }
+
+        if (!decl->rhs)
+            return 0;
+
+        if (decl->rhs->kind != ND_INIT_LIST || !decl->rhs->init.is_zero)
+        {
+            diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                          "struct global '%s' requires an all-zero initializer",
+                          decl->var_name);
+            return 1;
+        }
+
+        decl->rhs->type = ty;
+        return 0;
+    }
+
+    if (!decl->rhs)
+        return 0;
+
+    if (decl->rhs->kind == ND_INIT_LIST)
+    {
+        if (!decl->rhs->init.is_zero)
+        {
+            diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                          "non-zero initializer lists are not supported for global variables");
+            return 1;
+        }
+        decl->rhs->type = ty;
+        return 0;
+    }
+
+    check_expr(sc, decl->rhs);
+    if (!can_assign(ty, decl->rhs))
+    {
+        diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                      "cannot initialize global '%s' with incompatible type",
+                      decl->var_name);
+        return 1;
+    }
+    decl->rhs->type = ty;
+
+    if (!sema_global_initializer_is_const(decl->rhs))
+    {
+        diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                      "global initializer for '%s' must be a constant expression",
+                      decl->var_name);
+        return 1;
+    }
+
+    return 0;
+}
+
 static int sema_check_function(SemaContext *sc, Node *fn)
 {
     if (!fn->ret_type)
@@ -1908,25 +2212,48 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         fprintf(stderr, "sema: expected unit\n");
         return 1;
     }
-    // First pass: add all function symbols
+    // First pass: register functions and globals
     for (int i = 0; i < unit->stmt_count; i++)
     {
-        Node *fn = unit->stmts[i];
-        if (!fn || fn->kind != ND_FUNC)
+        Node *decl = unit->stmts[i];
+        if (!decl)
+            continue;
+        if (decl->kind == ND_FUNC)
         {
-            diag_error("non-function in unit");
+            sema_register_function_local(sc, unit, decl);
+        }
+        else if (decl->kind == ND_VAR_DECL && decl->var_is_global)
+        {
+            sema_register_global_local(sc, unit, decl);
+        }
+        else
+        {
+            diag_error_at(decl ? decl->src : unit->src,
+                          decl ? decl->line : unit->line,
+                          decl ? decl->col : unit->col,
+                          "unsupported top-level declaration");
             return 1;
         }
-        sema_register_function_local(sc, unit, fn);
     }
-    // Second pass: type-check bodies
+
+    // Second pass: validate globals and type-check function bodies
     for (int i = 0; i < unit->stmt_count; i++)
     {
-        Node *fn = unit->stmts[i];
-        if (check_exposed_function_signature(fn))
-            return 1;
-        if (sema_check_function(sc, fn))
-            return 1;
+        Node *decl = unit->stmts[i];
+        if (!decl)
+            continue;
+        if (decl->kind == ND_FUNC)
+        {
+            if (check_exposed_function_signature(decl))
+                return 1;
+            if (sema_check_function(sc, decl))
+                return 1;
+        }
+        else if (decl->kind == ND_VAR_DECL && decl->var_is_global)
+        {
+            if (sema_check_global_decl(sc, decl))
+                return 1;
+        }
     }
     sc->unit = previous_unit;
     return 0;
@@ -1941,9 +2268,13 @@ void sema_register_foreign_unit_symbols(SemaContext *sc, Node *unit)
     {
         for (int i = 0; i < unit->stmt_count; ++i)
         {
-            Node *fn = unit->stmts[i];
-            if (fn && fn->kind == ND_FUNC)
-                sema_register_function_foreign(sc, unit, fn);
+            Node *decl = unit->stmts[i];
+            if (!decl)
+                continue;
+            if (decl->kind == ND_FUNC)
+                sema_register_function_foreign(sc, unit, decl);
+            else if (decl->kind == ND_VAR_DECL && decl->var_is_global)
+                sema_register_global_foreign(sc, unit, decl);
         }
         return;
     }

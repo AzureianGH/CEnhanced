@@ -14,7 +14,7 @@ extend from "C" void free(void *);
 extend from "C" void exit(int);
 extend from "C" int test();
 
-i32 total_test_count = 0;
+hide i32 total_test_count = 0;
 
 extend fun test_chance() -> i32;
 
@@ -47,6 +47,8 @@ expose struct OtherElement
     AnElement thisthing; // Will error because AnElement is hidden and cannot be used in an exposed struct
     AnElement* ptrToSmth;
 };
+
+OtherElement globalElement = {}; // auto hide members
 
 
 hide fun assert(bool condition, string message) -> void
