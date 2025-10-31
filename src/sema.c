@@ -107,13 +107,14 @@ static Type ty_f64 = {.kind = TY_F64};
 static Type ty_f128 = {.kind = TY_F128};
 static Type ty_void = {.kind = TY_VOID};
 static Type ty_char = {.kind = TY_CHAR};
+static Type ty_bool = {.kind = TY_BOOL};
 
 static Type *metadata_token_to_type(const char *token)
 {
     if (!token)
         return NULL;
-    if (strcmp(token, "i1") == 0)
-        return &ty_i8;
+    if (strcmp(token, "i1") == 0 || strcmp(token, "bool") == 0)
+        return &ty_bool;
     if (strcmp(token, "i8") == 0)
         return &ty_i8;
     if (strcmp(token, "u8") == 0)
@@ -283,9 +284,25 @@ static int unit_allows_module_call(const Node *unit, const char *qualified_name)
 
 static int type_is_int(Type *t)
 {
-    return t && (t->kind == TY_I8 || t->kind == TY_U8 || t->kind == TY_I16 ||
-                 t->kind == TY_U16 || t->kind == TY_I32 || t->kind == TY_U32 ||
-                 t->kind == TY_I64 || t->kind == TY_U64 || t->kind == TY_CHAR);
+    t = canonicalize_type_deep(t);
+    if (!t)
+        return 0;
+    switch (t->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+    case TY_I16:
+    case TY_U16:
+    case TY_I32:
+    case TY_U32:
+    case TY_I64:
+    case TY_U64:
+    case TY_CHAR:
+    case TY_BOOL:
+        return 1;
+    default:
+        return 0;
+    }
 }
 
 static int type_is_builtin(const Type *t)
@@ -307,6 +324,7 @@ static int type_is_builtin(const Type *t)
     case TY_F128:
     case TY_VOID:
     case TY_CHAR:
+    case TY_BOOL:
         return 1;
     default:
         return 0;
@@ -362,6 +380,9 @@ static void describe_type(const Type *t, char *buf, size_t bufsz)
         return;
     case TY_CHAR:
         snprintf(buf, bufsz, "char");
+        return;
+    case TY_BOOL:
+        snprintf(buf, bufsz, "bool");
         return;
     case TY_PTR:
         if (!t->pointee)
@@ -630,6 +651,7 @@ static void check_expr(SemaContext *sc, Node *e);
 
 static int type_is_signed_int(Type *t)
 {
+    t = canonicalize_type_deep(t);
     if (!t)
         return 0;
     switch (t->kind)
@@ -638,6 +660,7 @@ static int type_is_signed_int(Type *t)
     case TY_I16:
     case TY_I32:
     case TY_I64:
+    case TY_CHAR:
         return 1;
     default:
         return 0;
@@ -646,6 +669,7 @@ static int type_is_signed_int(Type *t)
 
 static int type_is_unsigned_int(Type *t)
 {
+    t = canonicalize_type_deep(t);
     if (!t)
         return 0;
     switch (t->kind)
@@ -654,6 +678,23 @@ static int type_is_unsigned_int(Type *t)
     case TY_U16:
     case TY_U32:
     case TY_U64:
+    case TY_BOOL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int type_is_float(Type *t)
+{
+    t = canonicalize_type_deep(t);
+    if (!t)
+        return 0;
+    switch (t->kind)
+    {
+    case TY_F32:
+    case TY_F64:
+    case TY_F128:
         return 1;
     default:
         return 0;
@@ -680,6 +721,10 @@ static int64_t type_int_min(Type *t)
         return INT32_MIN;
     case TY_I64:
         return INT64_MIN;
+    case TY_CHAR:
+        return SCHAR_MIN;
+    case TY_BOOL:
+        return 0;
     default:
         return 0;
     }
@@ -701,12 +746,16 @@ static int64_t type_int_max(Type *t)
         return INT64_MAX;
     case TY_U8:
         return UINT8_MAX;
+    case TY_BOOL:
+        return 1;
     case TY_U16:
         return UINT16_MAX;
     case TY_U32:
         return UINT32_MAX;
     case TY_U64:
         return INT64_MAX;
+    case TY_CHAR:
+        return SCHAR_MAX;
     default:
         return 0;
     }
@@ -736,6 +785,12 @@ static int can_assign(Type *target, Node *rhs)
 {
     if (!target || !rhs)
         return 0;
+    Type *canon_target = canonicalize_type_deep(target);
+    if (canon_target && canon_target->kind == TY_PTR && rhs->kind == ND_NULL)
+    {
+        rhs->type = canon_target;
+        return 1;
+    }
     if (rhs->type && type_equal(target, rhs->type))
         return 1;
     if (literal_fits_type(target, rhs))
@@ -1028,6 +1083,12 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = &char_ptr;
         return;
     }
+    if (e->kind == ND_NULL)
+    {
+        static Type null_ptr = {.kind = TY_PTR, .pointee = &ty_void};
+        e->type = &null_ptr;
+        return;
+    }
     if (e->kind == ND_VAR)
     {
         Type *t = scope_get_type(sc, e->var_ref);
@@ -1050,6 +1111,7 @@ static void check_expr(SemaContext *sc, Node *e)
         switch (ty->kind)
         {
         case TY_I8: case TY_U8: case TY_CHAR: sz = 1; break;
+    case TY_BOOL: sz = 1; break;
         case TY_I16: case TY_U16: sz = 2; break;
         case TY_I32: case TY_U32: case TY_F32: sz = 4; break;
         case TY_I64: case TY_U64: case TY_F64: case TY_PTR: sz = 8; break;
@@ -1108,6 +1170,7 @@ static void check_expr(SemaContext *sc, Node *e)
             case TY_F128: snprintf(buf, sizeof(buf), "<built-in>::f128"); break;
             case TY_VOID: snprintf(buf, sizeof(buf), "<built-in>::void"); break;
             case TY_CHAR: snprintf(buf, sizeof(buf), "<built-in>::char"); break;
+            case TY_BOOL: snprintf(buf, sizeof(buf), "<built-in>::bool"); break;
             case TY_PTR: snprintf(buf, sizeof(buf), "<built-in>::ptr"); break;
             default:
                 snprintf(buf, sizeof(buf), "<built-in>::?");
@@ -1296,6 +1359,22 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = lhs_type;
         return;
     }
+    if (e->kind == ND_NEG)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col, "negation missing operand");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        if (!(type_is_int(e->lhs->type) || type_is_float(e->lhs->type)))
+        {
+            diag_error_at(e->src, e->line, e->col, "unary '-' requires integer or floating-point operand");
+            exit(1);
+        }
+        e->type = e->lhs->type;
+        return;
+    }
     if (e->kind == ND_MUL || e->kind == ND_DIV)
     {
         check_expr(sc, e->lhs);
@@ -1307,10 +1386,12 @@ static void check_expr(SemaContext *sc, Node *e)
                           e->kind == ND_MUL ? "*" : "/");
             exit(1);
         }
-        if (!type_is_int(e->lhs->type))
+        int lhs_is_int = type_is_int(e->lhs->type);
+        int lhs_is_float = type_is_float(e->lhs->type);
+        if (!(lhs_is_int || lhs_is_float))
         {
             diag_error_at(e->src, e->line, e->col,
-                          "integer type required for '%s'",
+                          "numeric type required for '%s'",
                           e->kind == ND_MUL ? "*" : "/");
             exit(1);
         }
@@ -1335,17 +1416,19 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        // Allow integer-vs-integer or pointer-vs-pointer relational comparisons.
+    // Allow integer, floating-point, or pointer relational comparisons when categories match.
         int lhs_is_int = type_is_int(e->lhs->type);
         int rhs_is_int = type_is_int(e->rhs->type);
+        int lhs_is_float = type_is_float(e->lhs->type);
+        int rhs_is_float = type_is_float(e->rhs->type);
         int lhs_is_ptr = (e->lhs->type && e->lhs->type->kind == TY_PTR);
         int rhs_is_ptr = (e->rhs->type && e->rhs->type->kind == TY_PTR);
-        if (!((lhs_is_int && rhs_is_int) || (lhs_is_ptr && rhs_is_ptr)))
+        if (!((lhs_is_int && rhs_is_int) || (lhs_is_float && rhs_is_float) || (lhs_is_ptr && rhs_is_ptr)))
         {
-            diag_error_at(e->src, e->line, e->col, "relational operator requires integer or pointer operands of the same category");
+            diag_error_at(e->src, e->line, e->col, "relational operator requires integer, floating-point, or pointer operands of the same category");
             exit(1);
         }
-        e->type = &ty_i32;
+        e->type = type_bool();
         return;
     }
     if (e->kind == ND_LAND || e->kind == ND_LOR)
@@ -1358,25 +1441,27 @@ static void check_expr(SemaContext *sc, Node *e)
                           e->kind == ND_LAND ? "&&" : "||");
             exit(1);
         }
-        e->type = &ty_i32;
+        e->type = type_bool();
         return;
     }
     if (e->kind == ND_EQ || e->kind == ND_NE)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        // Allow integer==integer or pointer==pointer comparisons.
+    // Allow integer, floating-point, or pointer equality when categories match.
         int lhs_is_int = type_is_int(e->lhs->type);
         int rhs_is_int = type_is_int(e->rhs->type);
+        int lhs_is_float = type_is_float(e->lhs->type);
+        int rhs_is_float = type_is_float(e->rhs->type);
         int lhs_is_ptr = (e->lhs->type && e->lhs->type->kind == TY_PTR);
         int rhs_is_ptr = (e->rhs->type && e->rhs->type->kind == TY_PTR);
-        if (!((lhs_is_int && rhs_is_int) || (lhs_is_ptr && rhs_is_ptr)))
+        if (!((lhs_is_int && rhs_is_int) || (lhs_is_float && rhs_is_float) || (lhs_is_ptr && rhs_is_ptr)))
         {
             diag_error_at(e->src, e->line, e->col,
-                          "equality requires both operands to be integers or pointers");
+                          "equality requires both operands to be integers, floats, or pointers");
             exit(1);
         }
-        e->type = &ty_i32;
+        e->type = type_bool();
         return;
     }
     if (e->kind == ND_CAST)

@@ -46,6 +46,7 @@ typedef enum
     TK_KW_CONSTANT,
     TK_KW_VOID,
     TK_KW_CHAR,
+    TK_KW_BOOL,
     TK_KW_IF,
     TK_KW_ELSE,
     TK_KW_WHILE,
@@ -54,6 +55,7 @@ typedef enum
     TK_KW_AS,
     TK_KW_SIZEOF,
     TK_KW_TYPEOF,
+    TK_KW_NULL,
     TK_KW_NORETURN,
     TK_KW_MODULE,
     TK_KW_BRING,
@@ -121,6 +123,7 @@ typedef enum
     TY_F128,
     TY_VOID,
     TY_CHAR,
+    TY_BOOL,
     TY_PTR,
     TY_STRUCT,
     TY_IMPORT,
@@ -163,6 +166,7 @@ typedef enum
     ND_RET,
     ND_FUNC,
     ND_STRING,
+    ND_NULL,
     ND_CALL,
     ND_BLOCK,
     ND_VAR_DECL,
@@ -175,6 +179,7 @@ typedef enum
     ND_LE,
     ND_GE,
     ND_SUB,
+    ND_NEG,
     ND_WHILE,
     ND_EXPR_STMT,
     ND_VAR,
@@ -316,6 +321,7 @@ Type *type_f32(void);
 Type *type_f64(void);
 Type *type_void(void);
 Type *type_char(void);
+Type *type_bool(void);
 Type *type_ptr(Type *to);
 int type_equals(Type *a, Type *b);
 

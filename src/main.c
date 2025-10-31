@@ -1235,6 +1235,7 @@ static Type builtin_ty_f64 = {.kind = TY_F64};
 static Type builtin_ty_f128 = {.kind = TY_F128};
 static Type builtin_ty_void = {.kind = TY_VOID};
 static Type builtin_ty_char = {.kind = TY_CHAR};
+static Type builtin_ty_bool = {.kind = TY_BOOL};
 
 static char *type_to_spec(Type *ty)
 {
@@ -1273,6 +1274,8 @@ static char *type_to_spec(Type *ty)
         return xstrdup("void");
     case TY_CHAR:
         return xstrdup("char");
+    case TY_BOOL:
+        return xstrdup("bool");
     case TY_PTR:
     {
         char *inner = type_to_spec(ty->pointee);
@@ -1331,6 +1334,8 @@ static Type *spec_to_type(const char *spec)
         return &builtin_ty_void;
     if (strcmp(spec, "char") == 0)
         return &builtin_ty_char;
+    if (strcmp(spec, "bool") == 0)
+        return &builtin_ty_bool;
 
     if (strncmp(spec, "ptr(", 4) == 0)
     {

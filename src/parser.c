@@ -1100,6 +1100,7 @@ static int is_type_start(Parser *ps, Token t)
     case TK_KW_DOUBLE:
     case TK_KW_VOID:
     case TK_KW_CHAR:
+    case TK_KW_BOOL:
     case TK_KW_STACK:
         return 1;
     case TK_KW_STRUCT:
@@ -1144,7 +1145,7 @@ static Type *parse_type_spec(Parser *ps)
                 ti64 = {.kind = TY_I64}, tu64 = {.kind = TY_U64};
     static Type tf32 = {.kind = TY_F32}, tf64 = {.kind = TY_F64},
                 tf128 = {.kind = TY_F128};
-    static Type tv = {.kind = TY_VOID}, tch = {.kind = TY_CHAR};
+    static Type tv = {.kind = TY_VOID}, tch = {.kind = TY_CHAR}, tbool = {.kind = TY_BOOL};
     if (b.kind == TK_KW_I8)
         base = &ti8;
     else if (b.kind == TK_KW_U8)
@@ -1177,6 +1178,8 @@ static Type *parse_type_spec(Parser *ps)
         base = &tv;
     else if (b.kind == TK_KW_CHAR)
         base = &tch;
+    else if (b.kind == TK_KW_BOOL)
+        base = &tbool;
     else if (b.kind == TK_KW_LONG)
     {
         // check for 'long double'
@@ -1493,6 +1496,18 @@ static Node *parse_primary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (t.kind == TK_KW_NULL)
+    {
+        Node *n = new_node(ND_NULL);
+        static Type *null_ty = NULL;
+        if (!null_ty)
+            null_ty = type_ptr(type_void());
+        n->type = null_ty;
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     if (t.kind == TK_LPAREN)
     {
         Node *inner = parse_expr(ps);
@@ -1509,6 +1524,7 @@ static Node *parse_primary(Parser *ps)
         {
             Node *n = new_node(ND_INT);
             n->int_val = 1;
+            n->type = type_bool();
             n->line = t.line;
             n->col = t.col;
             n->src = lexer_source(ps->lx);
@@ -1518,6 +1534,7 @@ static Node *parse_primary(Parser *ps)
         {
             Node *n = new_node(ND_INT);
             n->int_val = 0;
+            n->type = type_bool();
             n->line = t.line;
             n->col = t.col;
             n->src = lexer_source(ps->lx);
@@ -1764,12 +1781,8 @@ static Node *parse_unary(Parser *ps)
         // unary minus: lower to 0 - expr
         lexer_next(ps->lx);
         Node *rv = parse_unary(ps);
-        Node *zero = new_node(ND_INT);
-        zero->int_val = 0;
-        zero->src = lexer_source(ps->lx);
-        Node *n = new_node(ND_SUB);
-        n->lhs = zero;
-        n->rhs = rv;
+        Node *n = new_node(ND_NEG);
+        n->lhs = rv;
         n->line = p.line;
         n->col = p.col;
         n->src = lexer_source(ps->lx);

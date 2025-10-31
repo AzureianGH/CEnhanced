@@ -14,6 +14,8 @@ extend from "C" void free(void *);
 extend from "C" void exit(int);
 extend from "C" int test();
 
+i32 total_test_count = 0;
+
 extend fun test_chance() -> i32;
 
 hide alias string = char*;
@@ -47,16 +49,16 @@ expose struct OtherElement
 };
 
 
-hide fun assert(i64 condition, string messageFail, string messagePass) -> void
+hide fun assert(bool condition, string message) -> void
 {
-    if (condition == 0)
+    if (condition)
     {
-        printf("FAIL: %s\n", messageFail);
-        abort();
+        printf("TEST PASSED: %s\n", message);
     }
     else
     {
-        printf("PASSED: %s\n", messagePass);
+        printf("TEST FAIL: %s\n", message);
+        abort();
     }
     ret;
 }
@@ -65,24 +67,25 @@ hide fun assert(i64 condition, string messageFail, string messagePass) -> void
 expose fun main() -> i32
 {
     // allocate 128 bytes for input
-    ptr<void> buf = Std.Memory.alloc(128);
+    ptr<void> buf = null;
+    
+    buf = Std.Memory.alloc(128);
 
-    if (true)
-    {
-        ptr<void> aaaa = Std.Memory.alloc(128);
-        Std.Memory.dealloc(aaaa);
-    }
-
-    assert(true, "Memory allocation failed", "Memory allocation succeeded");
+    assert(buf != null, "\"buf\" allocation");
 
     Std.Memory.memset(buf, 0, 128);
 
-    assert(true, "Memory memset failed", "Memory memset succeeded");
+    bool all_zero = true;
 
-    if (true)
+    for (i32 i = 0; i < 128; i = i + 1)
     {
-        assert(true, "Initial assertions failed", "Initial assertions succeeded");
+        if ((buf as u8*)[i] != 0)
+        {
+            all_zero = false;
+        }
     }
+
+    assert(all_zero, "memset to zero");
 
     // prompt the user
     write(1, "What's your name? > ", 20);
@@ -91,11 +94,9 @@ expose fun main() -> i32
     i32 len = read(0, buf as char *, 127);
 
     // test printwrapper result
-    if (true)
-    {
-        i32 printed = printwrapper();
-        printf("Read %d bytes (printwrapper printed %d chars)\n", len, printed);
-    }
+    i32 printed = printwrapper();
+    // "Hello, CHance! Number: 42\n" is 26 characters
+    assert(printed == 26, "printwrapper printed length");
 
     // null-terminate the string safely
     string str = buf as string;
@@ -110,20 +111,19 @@ expose fun main() -> i32
         str[0] = 0;
     }
 
-    // print greeting
-    printf("Hello, %s!\n", str);
-
-    printf("String length: %d\n", Std.String.strlen(str));
+    // basic string length sanity check
+    assert(Std.String.strlen(str) == len, "strlen matches bytes read");
 
     string cmp_target = "CHance";
 
+    // If user actually entered secret name, assert success; otherwise assert not equal.
     if (strcmp(str, cmp_target) == 0)
     {
-        printf("You entered the secret name!\n");
+        assert(true, "User entered the secret name");
     }
     else
     {
-        printf("You did not enter the secret name.\n");
+        assert(true, "User did not enter the secret name (not required for tests)");
     }
 
     printf("Freeing memory...\n");
@@ -131,19 +131,25 @@ expose fun main() -> i32
 
     // Test overflow behavior
     i16 of = test_overflow();
-    printf("Overflow test result (should be -25536): %d\n", of);
+    printf("test_overflow result: %d\n", of);
+    assert(of == -25536, "test_overflow result is -25536");
+
+    // Test multiplication overflow
+    u8 mul_of = test_mul_overflow();
+    assert(mul_of == 64, "test_mul_overflow result is 64");
+
+    // Arithmetic and function tests
+    i32 mul = 6 * 7;
+    assert(mul == 42, "6 * 7 == 42");
+
+    i32 div = 20 / -4;
+    assert(div == -5, "20 / -4 == -5");
+
+    assert((0xFF as i32) == 255, "0xFF == 255");
 
     printf("Calling test_chance(): %d\n", TC.test_chance());
 
     printf("Calling extended C function test(): %d\n", test());
-
-    printf("Multiplication test: 6 * 7 = %d\n", 6 * 7);
-
-    printf("Multiplication overflow test (200 * 200 = 64): %d\n", test_mul_overflow());
-
-    printf("Division test: 20 / -4 = %d\n", 20 / -4); // expect -5
-
-    printf("Test hex output: %d in hex is %x\n", 0xFF, 0xFF);
 
     TC.SmallTest vari = {};
     vari.smallValue = 3;
@@ -158,19 +164,19 @@ expose fun main() -> i32
 
     TC.SmallTest deref = *test;
 
-    printf("Type of deref test: %d\n", deref.testVar); // expect 44
+    assert(deref.testVar == 44, "deref.testVar == 44");
 
     i32 testint = 123;
     i32* testintp = &testint;
     i32** testintpp = &testintp;
-    printf("Ptrptr deref: %d\n", testintpp[0][0]); // expect 123
+    assert(testintpp[0][0] == 123, "double pointer deref == 123");
 
     TC.SmallTest* addptr = Std.Memory.alloc(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
     addptr[0] = construct_thing();
     addptr[1] = another;
 
-    printf("addptr[0].smallValue = %d\n", (*addptr).smallValue); // expect 5
-    printf("addptr[1].smallValue = %d\n", (*(addptr + 1 * 2 / 2)).smallValue); // expect 123, optimized constant folding
+    assert(addptr[0].smallValue == 5, "addptr[0].smallValue == 5");
+    assert(addptr[1].smallValue == 123, "addptr[1].smallValue == 123");
 
     Std.Memory.dealloc(addptr as void*);
 
@@ -181,16 +187,13 @@ expose fun main() -> i32
 
     test=>testVar = 45;
 
-    if (test=>testVar == 45 || another.smallValue == 3)
-    {
-        printf("Logical OR worked!\n");
-    }
+    assert(test=>testVar == 45, "setter/getter via => works");
 
     i32 a = 1 << 1;
-    printf("1 << 1 = %d\n", a); // expect 2
+    assert(a == 2, "1 << 1 == 2");
 
     i32 b = 4 >> 1;
-    printf("4 >> 1 = %d\n", b); // expect 2
+    assert(b == 2, "4 >> 1 == 2");
 
     printf("typeof() = %s with sizeof() = %d\n", typeof(TC.SmallTest), sizeof(TC.SmallTest));
 
@@ -198,7 +201,7 @@ expose fun main() -> i32
 
     test_idk();
 
-    printf("Raw thing: %d\n", rawthing(10)); // expect 466
+    assert(rawthing(10) == 466, "rawthing(10) == 466");
 
     printf("Result from LibTest: %d\n", LT.test_fun(41));
 
@@ -210,14 +213,27 @@ expose fun main() -> i32
     floatptr[0] = 6.28f;
     i32 ac = 4;
 
-    printf("Multiple varargs test:\n");
-    printf("Int value: %d, Hex value: %x, Char: %c\n", ac, ac, ac + 60); // Should print: 4, 4, '@'
+    // Validate simple var values
+    assert(ac == 4, "ac == 4");
+    assert(floatptr[0] == 6.28f, "floatptr[0] == 6.28f");
+    assert(doubleval == 1.23456789, "doubleval == 1.23456789");
+    printf("Expect addition of doubleval + floatval = %lf\n", (doubleval + (floatval as f64)) as f64);
+    f64 sum = doubleval + (floatval as f64);
+    f64 diff = sum - 7.514568;
+    if (diff < 0.0) diff = -diff;
+    assert(diff < 1e-6, "doubleval + floatval ~= 7.514568");
+    assert(((vari.testVar as i32) + (another.smallValue as i32)) == 168, "Sum of vari.testVar and another.smallValue == 168");
 
-    printf("Float value: %f, Double value: %.9lf, Int: %d\n", floatval, doubleval + (floatval as f64), ac); // Should print: 1.23456789 + 3.14 = 4.37456789
+    f128 bigfloat = 0.1234567 as f128;
+    f64 floathing = 0.1;
+    f32 floathing2 = 0.1f;
+    assert((floathing == 0.1 && floathing2 == 0.1f && bigfloat == 0.1234567 as f128), "f128, f64, f32 assignments");
 
-    printf("Exit code should be %d\n", ((vari.testVar as i32) + (another.smallValue as i32)));
+    // Validate final return value
+    i32 final_sum = (vari.testVar as i32) + (another.smallValue as i32);
+    assert(final_sum == 168, "final return value equals 168");
 
-    ret ((vari.testVar as i32) + (another.smallValue as i32)); // expect 45 + 123 = 168
+    ret final_sum; // expect 168
 }
 
 hide fun construct_thing() -> TC.SmallTest

@@ -865,10 +865,16 @@ static CCValueType ccb_type_for_expr(const Node *expr)
     {
     case ND_STRING:
         return CC_TYPE_PTR;
+    case ND_NULL:
+        return CC_TYPE_PTR;
     case ND_INT:
         return CC_TYPE_I32;
     case ND_FLOAT:
         return expr->type ? map_type_to_cc(expr->type) : CC_TYPE_F64;
+    case ND_NEG:
+        if (expr->lhs)
+            return ccb_type_for_expr(expr->lhs);
+        return CC_TYPE_I32;
     case ND_VAR:
         return CC_TYPE_I32;
     case ND_ASSIGN:
@@ -2138,6 +2144,12 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
 
     switch (expr->kind)
     {
+    case ND_NULL:
+    {
+        if (!ccb_emit_const_zero(&fb->body, CC_TYPE_PTR))
+            return 1;
+        return 0;
+    }
     case ND_INT:
     {
         CCValueType ty = map_type_to_cc(expr->type);
@@ -2220,6 +2232,31 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             if (!string_list_appendf(&fb->body, "  binop div %s", cc_type_name(ty)))
                 return 1;
         }
+        return 0;
+    }
+    case ND_NEG:
+    {
+        if (!expr->lhs)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "negation missing operand");
+            return 1;
+        }
+
+        CCValueType operand_ty = ccb_type_for_expr(expr->lhs);
+        if (operand_ty == CC_TYPE_INVALID || operand_ty == CC_TYPE_PTR)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "unsupported operand type for unary '-'");
+            return 1;
+        }
+
+        if (!ccb_emit_const_zero(&fb->body, operand_ty))
+            return 1;
+        if (ccb_emit_expr_basic(fb, expr->lhs))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  binop sub %s", cc_type_name(operand_ty)))
+            return 1;
         return 0;
     }
     case ND_SUB:
@@ -2477,11 +2514,6 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         }
 
-        if (ccb_emit_expr_basic(fb, expr->lhs))
-            return 1;
-        if (ccb_emit_expr_basic(fb, expr->rhs))
-            return 1;
-
         CCValueType lhs_ty = ccb_type_for_expr(expr->lhs);
         CCValueType rhs_ty = ccb_type_for_expr(expr->rhs);
 
@@ -2506,11 +2538,67 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         }
 
+        CCValueType common_ty = lhs_ty;
+        bool homogenize = false;
+        if (lhs_is_int && rhs_is_int)
+        {
+            if (lhs_ty != rhs_ty)
+            {
+                size_t lhs_sz = ccb_value_type_size(lhs_ty);
+                size_t rhs_sz = ccb_value_type_size(rhs_ty);
+                if (lhs_sz > rhs_sz)
+                    common_ty = lhs_ty;
+                else if (rhs_sz > lhs_sz)
+                    common_ty = rhs_ty;
+                else
+                {
+                    if (ccb_value_type_is_signed(lhs_ty) == ccb_value_type_is_signed(rhs_ty))
+                        common_ty = lhs_ty;
+                    else
+                        common_ty = ccb_value_type_is_signed(lhs_ty) ? rhs_ty : lhs_ty;
+                }
+                homogenize = true;
+            }
+        }
+        else if (lhs_is_float && rhs_is_float)
+        {
+            if (lhs_ty != rhs_ty)
+            {
+                common_ty = (lhs_ty == CC_TYPE_F64 || rhs_ty == CC_TYPE_F64) ? CC_TYPE_F64 : CC_TYPE_F32;
+                homogenize = true;
+            }
+        }
+
+        if (ccb_emit_expr_basic(fb, expr->lhs))
+            return 1;
+        if (homogenize && lhs_ty != common_ty)
+        {
+            if (ccb_emit_convert_between(fb, lhs_ty, common_ty, expr->lhs))
+                return 1;
+            lhs_ty = common_ty;
+        }
+
+        if (ccb_emit_expr_basic(fb, expr->rhs))
+            return 1;
+        if (homogenize && rhs_ty != common_ty)
+        {
+            if (ccb_emit_convert_between(fb, rhs_ty, common_ty, expr->rhs))
+                return 1;
+            rhs_ty = common_ty;
+        }
+
+        lhs_is_ptr = lhs_ty == CC_TYPE_PTR;
+        rhs_is_ptr = rhs_ty == CC_TYPE_PTR;
+        lhs_is_int = ccb_value_type_is_integer(lhs_ty);
+        rhs_is_int = ccb_value_type_is_integer(rhs_ty);
+        lhs_is_float = ccb_value_type_is_float(lhs_ty);
+        rhs_is_float = ccb_value_type_is_float(rhs_ty);
+
         CCValueType op_ty = lhs_ty;
-        if (lhs_is_float && !rhs_is_float)
-            op_ty = lhs_ty;
-        else if (!lhs_is_float && rhs_is_float)
-            op_ty = rhs_ty;
+        if (lhs_is_int && rhs_is_int)
+            op_ty = common_ty;
+        else if (lhs_is_float && rhs_is_float)
+            op_ty = common_ty;
 
         const char *cmp_op = NULL;
         switch (expr->kind)
@@ -3645,6 +3733,8 @@ static CCValueType map_type_to_cc(const Type *ty)
         return CC_TYPE_VOID;
     case TY_CHAR:
         return CC_TYPE_I8;
+    case TY_BOOL:
+        return CC_TYPE_I1;
     case TY_STRUCT:
         return CC_TYPE_PTR;
     case TY_F128:

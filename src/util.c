@@ -53,6 +53,7 @@ static Type TY_F32_SINGLETON = {.kind = TY_F32};
 static Type TY_F64_SINGLETON = {.kind = TY_F64};
 static Type TY_VOID_SINGLETON = {.kind = TY_VOID};
 static Type TY_CHAR_SINGLETON = {.kind = TY_CHAR};
+static Type TY_BOOL_SINGLETON = {.kind = TY_BOOL};
 
 Type *type_i32(void) { return &TY_I32_SINGLETON; }
 Type *type_i64(void) { return &TY_I64_SINGLETON; }
@@ -60,6 +61,7 @@ Type *type_f32(void) { return &TY_F32_SINGLETON; }
 Type *type_f64(void) { return &TY_F64_SINGLETON; }
 Type *type_void(void) { return &TY_VOID_SINGLETON; }
 Type *type_char(void) { return &TY_CHAR_SINGLETON; }
+Type *type_bool(void) { return &TY_BOOL_SINGLETON; }
 
 Type *type_ptr(Type *to)
 {
@@ -102,6 +104,8 @@ const char *node_kind_name(NodeKind kind)
         return "function";
     case ND_STRING:
         return "string literal";
+    case ND_NULL:
+        return "null literal";
     case ND_CALL:
         return "function call";
     case ND_BLOCK:
@@ -126,6 +130,8 @@ const char *node_kind_name(NodeKind kind)
         return ">= comparison";
     case ND_SUB:
         return "subtraction expression";
+    case ND_NEG:
+        return "negation expression";
     case ND_WHILE:
         return "while statement";
     case ND_EXPR_STMT:
