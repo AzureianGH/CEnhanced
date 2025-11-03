@@ -51,6 +51,8 @@ hide alias ptr<T> = T*;
 
 hide fun printwrapper() -> i32
 {
+    string fn_name = __FUNCTION__;
+    assert(strcmp(fn_name, "printwrapper") == 0, "__FUNCTION__ matches printwrapper");
     ret printf("Hello, %s! Number: %d\n", "CHance", 42);
 }
 
@@ -128,6 +130,8 @@ expose fun main() -> i32
     // "Hello, CHance! Number: 42\n" is 26 characters
     assert(printed == 26, "printwrapper printed length");
 
+    string function_macro = __FUNCTION__;
+    assert(strcmp(function_macro, "main") == 0, "__FUNCTION__ matches main");
     // null-terminate the string safely
     string str = buf as string;
     if (len > 0)
@@ -335,9 +339,11 @@ expose fun main() -> i32
     i32 counter_b = __COUNTER__;
     assert(counter_b == counter_a + 1, "__COUNTER__ increments sequentially");
     // the blood of your enemies will be your sustenance
-    printf("File: %s, Module: %s, Line: %d, Date: %s, Time: %s, Counter A: %d, Counter B: %d\n",
-        "fileee", "mrrrow", 22, "meow", "mrrp", 1, 2);
+    printf("File: %s, Module: %s, Function: %s, Line: %d, Date: %s, Time: %s, Counter A: %d, Counter B: %d\n",
+        __FILE__, __MODULE__, __FUNCTION__, __LINE__, __DATE__, __TIME__, __COUNTER__, __COUNTER__);
 
+    
+    
     ret final_sum; // expect 168
 }
 

@@ -21,6 +21,7 @@ struct Parser
     Symbol *externs;
     int ext_count;
     int ext_cap;
+    const char *current_function_name;
     // type aliases (simple + single-parameter generic)
     struct Alias
     {
@@ -1564,6 +1565,25 @@ static Node *parse_primary(Parser *ps)
             n->src = lexer_source(ps->lx);
             return n;
         }
+    if (t.length == 12 && strncmp(t.lexeme, "__FUNCTION__", 12) == 0)
+        {
+            if (!ps->current_function_name)
+            {
+                diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                              "__FUNCTION__ is only valid within a function body");
+                exit(1);
+            }
+            Node *n = new_node(ND_STRING);
+            size_t len = strlen(ps->current_function_name);
+            char *copy = (char *)xmalloc(len + 1);
+            memcpy(copy, ps->current_function_name, len + 1);
+            n->str_data = copy;
+            n->str_len = (int)len;
+            n->line = t.line;
+            n->col = t.col;
+            n->src = lexer_source(ps->lx);
+            return n;
+        }
         // enum constant?
         int ev = 0;
         if (enum_const_get(ps, t.lexeme, t.length, &ev))
@@ -2621,7 +2641,10 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     }
     else
     {
+        const char *prev_fn = ps->current_function_name;
+        ps->current_function_name = fn->name;
         fn->body = parse_block(ps);
+        ps->current_function_name = prev_fn;
     }
     return fn;
 }
