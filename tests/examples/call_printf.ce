@@ -4,6 +4,27 @@ bring Test.Chance as TC;
 bring LibTest as LT;
 bring LibTest.Another;
 
+#define WARN_MSG "diag warning triggered"
+#define NOTE_MSG "diag note triggered"
+#define ASSERT_OK 1
+
+#note NOTE_MSG
+#warn WARN_MSG
+#static_assert(ASSERT_OK, "static assert should pass")
+#static_assert(1)
+
+#if 0
+
+#define ERROR_MSG "forced preprocessing error"
+
+#error ERROR_MSG
+
+#define FAIL_COND 0
+#define FAIL_MSG "failing static assertion"
+
+#static_assert(FAIL_COND, FAIL_MSG)
+#endif
+
 #define TEST_DEFINE 99
 #define MACRO_SUM(a, b) ((a) + (b))
 #define MACRO_SQUARE(x) ((x) * (x))

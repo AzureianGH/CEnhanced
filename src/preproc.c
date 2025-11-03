@@ -676,6 +676,7 @@ static int eval_condition(PreprocState *st, const char *expr, size_t len, int li
 }
 
 static char *expand_text(PreprocState *st, const char *text, size_t len, MacroParam *params, int param_count, MacroStack *stack, int depth, int line_no);
+static char *expand_directive_argument(PreprocState *st, const char *src, size_t len, int line_no);
 
 static char *try_expand_identifier(PreprocState *st, const char *src, size_t len, size_t start, size_t *out_end,
 								   MacroParam *params, int param_count, MacroStack *stack, int depth, int line_no);
@@ -771,6 +772,22 @@ static char *expand_text(PreprocState *st, const char *text, size_t len, MacroPa
 	if (last_emit < len)
 		sb_append_range(&sb, text + last_emit, len - last_emit);
 	return sb_build(&sb);
+}
+
+static char *expand_directive_argument(PreprocState *st, const char *src, size_t len, int line_no)
+{
+	if (!src || len == 0)
+		return xstrdup("");
+	size_t start = 0;
+	size_t end = len;
+	trim_range(src, len, &start, &end);
+	char *raw = copy_trimmed(src, start, end);
+	if (!raw)
+		return xstrdup("");
+	size_t raw_len = strlen(raw);
+	char *expanded = expand_text(st, raw, raw_len, NULL, 0, &st->expansion_stack, 0, line_no);
+	free(raw);
+	return expanded;
 }
 
 static int find_param_index(MacroParam *params, int param_count, const char *name)
@@ -1254,6 +1271,138 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 	{
 		if (active)
 			undef_macro(st, src + arg_start, arg_len);
+	}
+	else if (strcmp(keyword, "warn") == 0)
+	{
+		if (active)
+		{
+			char *msg = expand_directive_argument(st, src + arg_start, arg_len, *line_no);
+			const char *path = st && st->path ? st->path : "<input>";
+			const char *text = (msg && *msg) ? msg : "#warn triggered";
+			diag_warning("%s:%d: warning: %s", path, *line_no, text);
+			free(msg);
+		}
+	}
+	else if (strcmp(keyword, "note") == 0)
+	{
+		if (active)
+		{
+			char *msg = expand_directive_argument(st, src + arg_start, arg_len, *line_no);
+			const char *path = st && st->path ? st->path : "<input>";
+			const char *text = (msg && *msg) ? msg : "#note";
+			diag_note("%s:%d: note: %s", path, *line_no, text);
+			free(msg);
+		}
+	}
+	else if (strcmp(keyword, "error") == 0)
+	{
+		if (active)
+		{
+			char *msg = expand_directive_argument(st, src + arg_start, arg_len, *line_no);
+			const char *text = (msg && *msg) ? msg : "#error";
+			preproc_error(st, *line_no, "%s", text);
+			free(msg);
+		}
+	}
+	else if (strcmp(keyword, "static_assert") == 0)
+	{
+		if (active)
+		{
+			char *arg = expand_directive_argument(st, src + arg_start, arg_len, *line_no);
+			if (arg)
+			{
+				size_t len = strlen(arg);
+				const char *arg_end = arg + len;
+				const char *expr_start = arg;
+				size_t expr_len = len;
+				if (len >= 2 && arg[0] == '(' && arg[len - 1] == ')')
+				{
+					expr_start = arg + 1;
+					expr_len = len - 2;
+				}
+				while (expr_len > 0 && (expr_start[0] == ' ' || expr_start[0] == '\t'))
+				{
+					expr_start++;
+					expr_len--;
+				}
+				while (expr_len > 0 && (expr_start[expr_len - 1] == ' ' || expr_start[expr_len - 1] == '\t'))
+					expr_len--;
+				const char *message_start = NULL;
+				size_t message_len = 0;
+				int depth = 0;
+				int in_string = 0;
+				int escape = 0;
+				for (size_t i = 0; i < expr_len; ++i)
+				{
+					char c = expr_start[i];
+					if (in_string)
+					{
+						if (!escape && c == '"')
+							in_string = 0;
+						escape = (!escape && c == '\\');
+						continue;
+					}
+					if (c == '"')
+					{
+						in_string = 1;
+						continue;
+					}
+					if (escape)
+					{
+						escape = 0;
+						continue;
+					}
+					if (c == '(')
+					{
+						depth++;
+						continue;
+					}
+					if (c == ')')
+					{
+						if (depth > 0)
+							depth--;
+						continue;
+					}
+					if (c == ',' && depth == 0)
+					{
+						expr_len = i;
+						message_start = expr_start + i + 1;
+						message_len = (size_t)(arg_end - message_start);
+						break;
+					}
+				}
+				while (expr_len > 0 && (expr_start[expr_len - 1] == ' ' || expr_start[expr_len - 1] == '\t'))
+					expr_len--;
+				if (message_start)
+				{
+					while (message_len > 0 && (*message_start == ' ' || *message_start == '\t'))
+					{
+						message_start++;
+						message_len--;
+					}
+					while (message_len > 0 && (message_start[message_len - 1] == ' ' || message_start[message_len - 1] == '\t'))
+						message_len--;
+				}
+				int cond = expr_len > 0 ? eval_condition(st, expr_start, expr_len, *line_no) : 0;
+				if (!cond)
+				{
+					char buffer[512];
+					const char *msg = NULL;
+					if (message_start && message_len > 0)
+					{
+						size_t copy_len = message_len < sizeof(buffer) - 1 ? message_len : sizeof(buffer) - 1;
+						memcpy(buffer, message_start, copy_len);
+						buffer[copy_len] = '\0';
+						msg = buffer;
+					}
+					if (msg && *msg)
+						preproc_error(st, *line_no, "static assertion failed: %s", msg);
+					else
+						preproc_error(st, *line_no, "static assertion failed");
+				}
+			}
+			free(arg);
+		}
 	}
 	else if (strcmp(keyword, "ifdef") == 0)
 	{

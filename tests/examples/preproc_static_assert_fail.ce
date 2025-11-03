@@ -1,0 +1,11 @@
+module Test.PreprocStaticAssertFail;
+
+#define FAIL_COND 0
+#define FAIL_MSG "failing static assertion"
+
+#static_assert(FAIL_COND, FAIL_MSG)
+
+expose fun main() -> i32
+{
+    ret 0;
+}

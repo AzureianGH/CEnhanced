@@ -26,6 +26,13 @@ add_ce_test(shift_left shift_left.ce 42)
 add_ce_test(shift_right shift_right.ce 42)
 add_ce_test(global_vars global_vars.ce 12)
 add_ce_test(global_struct global_struct.ce 16)
+add_ce_test(preproc_diagnostics preproc_diagnostics.ce 0)
+
+add_test(NAME preproc_static_assert_fail COMMAND ${CHANCEC} ${CMAKE_CURRENT_SOURCE_DIR}/examples/preproc_static_assert_fail.ce)
+set_tests_properties(preproc_static_assert_fail PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME preproc_error COMMAND ${CHANCEC} ${CMAKE_CURRENT_SOURCE_DIR}/examples/preproc_error.ce)
+set_tests_properties(preproc_error PROPERTIES WILL_FAIL TRUE)
 
 # Freestanding mode tests
 function(add_ce_test_fs name src expected_rc)
