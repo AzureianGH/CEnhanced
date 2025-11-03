@@ -1404,6 +1404,30 @@ static Type *parse_type_spec(Parser *ps)
 static Node *parse_primary(Parser *ps)
 {
     Token t = lexer_next(ps->lx);
+    if (t.kind == TK_KW_IF)
+    {
+        expect(ps, TK_LPAREN, "(");
+        Node *cond = parse_expr(ps);
+        expect(ps, TK_RPAREN, ")");
+        Node *then_expr = parse_expr(ps);
+        Token else_tok = lexer_peek(ps->lx);
+        if (else_tok.kind != TK_KW_ELSE)
+        {
+            diag_error_at(lexer_source(ps->lx), else_tok.line, else_tok.col,
+                          "conditional expression requires 'else' branch");
+            exit(1);
+        }
+        lexer_next(ps->lx); // consume else
+        Node *else_expr = parse_expr(ps);
+        Node *n = new_node(ND_COND);
+        n->lhs = cond;
+        n->rhs = then_expr;
+        n->body = else_expr;
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     if (t.kind == TK_KW_SIZEOF)
     {
         expect(ps, TK_LPAREN, "(");

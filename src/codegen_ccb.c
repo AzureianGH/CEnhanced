@@ -2972,6 +2972,68 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         return 0;
     }
+    case ND_COND:
+    {
+        if (!expr->lhs || !expr->rhs || !expr->body)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "conditional expression missing branch");
+            return 1;
+        }
+
+        if (ccb_emit_condition(fb, expr->lhs))
+            return 1;
+
+        char true_label[32];
+        char false_label[32];
+        char end_label[32];
+
+        ccb_make_label(fb, true_label, sizeof(true_label), "cond_true");
+        ccb_make_label(fb, false_label, sizeof(false_label), "cond_false");
+        ccb_make_label(fb, end_label, sizeof(end_label), "cond_end");
+
+        if (!string_list_appendf(&fb->body, "  branch %s %s", true_label, false_label))
+            return 1;
+
+        Type *result_type = expr->type ? expr->type : (expr->rhs ? expr->rhs->type : NULL);
+        if (result_type && result_type->kind == TY_STRUCT)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "struct-valued conditional expressions are not supported by the bytecode backend yet");
+            return 1;
+        }
+
+        CcbLocal *temp = ccb_local_add(fb, NULL, result_type, false, false);
+        if (!temp)
+            return 1;
+        CCValueType result_cc = temp->value_type;
+
+        if (!string_list_appendf(&fb->body, "label %s", true_label))
+            return 1;
+        if (ccb_emit_expr_basic(fb, expr->rhs))
+            return 1;
+        if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->rhs), result_cc, expr->rhs))
+            return 1;
+        if (!ccb_emit_store_local(fb, temp))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  jump %s", end_label))
+            return 1;
+
+        if (!string_list_appendf(&fb->body, "label %s", false_label))
+            return 1;
+        if (ccb_emit_expr_basic(fb, expr->body))
+            return 1;
+        if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->body), result_cc, expr->body))
+            return 1;
+        if (!ccb_emit_store_local(fb, temp))
+            return 1;
+
+        if (!string_list_appendf(&fb->body, "label %s", end_label))
+            return 1;
+        if (!ccb_emit_load_local(fb, temp))
+            return 1;
+        return 0;
+    }
     case ND_INDEX:
     {
         CCValueType elem_ty = CC_TYPE_I32;

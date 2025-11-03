@@ -1,0 +1,1241 @@
+#include "preproc.h"
+#include "ast.h"
+
+#include <ctype.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_MACRO_RECURSION 64
+#define MAX_CONDITION_RECURSION 32
+
+typedef struct
+{
+	char *name;
+	int param_count; // -1 for object-like macros
+	char **params;
+	char *body;
+} Macro;
+
+typedef struct
+{
+	int parent_active;
+	int current_active;
+	int branch_taken;
+	int saw_else;
+} CondFrame;
+
+typedef struct
+{
+	const Macro *items[MAX_MACRO_RECURSION];
+	int count;
+} MacroStack;
+
+typedef struct
+{
+	Macro *macros;
+	int macro_count;
+	int macro_cap;
+	CondFrame *conds;
+	int cond_count;
+	int cond_cap;
+	const char *path;
+	MacroStack expansion_stack;
+} PreprocState;
+
+typedef struct
+{
+	char *data;
+	size_t len;
+	size_t cap;
+} StrBuilder;
+
+typedef struct
+{
+	const char *name;
+	const char *value;
+} MacroParam;
+
+static void sb_init(StrBuilder *sb)
+{
+	sb->data = NULL;
+	sb->len = 0;
+	sb->cap = 0;
+}
+
+static void sb_reserve(StrBuilder *sb, size_t extra)
+{
+	size_t need = sb->len + extra + 1;
+	if (need <= sb->cap)
+		return;
+	size_t cap = sb->cap ? sb->cap : 64;
+	while (cap < need)
+		cap *= 2;
+	char *ndata = (char *)realloc(sb->data, cap);
+	if (!ndata)
+		diag_error("preprocessor: out of memory");
+	sb->data = ndata;
+	sb->cap = cap;
+}
+
+static void sb_append_range(StrBuilder *sb, const char *s, size_t len)
+{
+	if (!len)
+		return;
+	sb_reserve(sb, len);
+	memcpy(sb->data + sb->len, s, len);
+	sb->len += len;
+}
+
+static void sb_append_char(StrBuilder *sb, char c)
+{
+	sb_reserve(sb, 1);
+	sb->data[sb->len++] = c;
+}
+
+static void sb_append_str(StrBuilder *sb, const char *s)
+{
+	if (!s)
+		return;
+	sb_append_range(sb, s, strlen(s));
+}
+
+static char *sb_build(StrBuilder *sb)
+{
+	sb_append_char(sb, '\0');
+	char *out = sb->data;
+	sb->data = NULL;
+	sb->len = 0;
+	sb->cap = 0;
+	return out ? out : xstrdup("");
+}
+
+static void free_macro(Macro *mac)
+{
+	if (!mac)
+		return;
+	free(mac->name);
+	free(mac->body);
+	if (mac->params)
+	{
+		for (int i = 0; i < mac->param_count; ++i)
+			free(mac->params[i]);
+		free(mac->params);
+	}
+	memset(mac, 0, sizeof(*mac));
+}
+
+static void macro_stack_push(MacroStack *stack, const Macro *mac)
+{
+	if (!stack || !mac)
+		return;
+	if (stack->count >= MAX_MACRO_RECURSION)
+		return;
+	stack->items[stack->count++] = mac;
+}
+
+static void macro_stack_pop(MacroStack *stack, const Macro *mac)
+{
+	if (!stack || stack->count <= 0)
+		return;
+	if (stack->items[stack->count - 1] == mac)
+		stack->count--;
+	else
+		stack->count--;
+}
+
+static int macro_stack_contains(const MacroStack *stack, const Macro *mac)
+{
+	if (!stack || !mac)
+		return 0;
+	for (int i = 0; i < stack->count; ++i)
+	{
+		if (stack->items[i] == mac)
+			return 1;
+	}
+	return 0;
+}
+
+static int is_ident_start(char c)
+{
+	return (c == '_') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+static int is_ident_char(char c)
+{
+	return is_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+static void trim_range(const char *src, size_t len, size_t *start, size_t *end)
+{
+	while (*start < *end && (src[*start] == ' ' || src[*start] == '\t' || src[*start] == '\r' || src[*start] == '\n'))
+		(*start)++;
+	while (*end > *start && (src[*end - 1] == ' ' || src[*end - 1] == '\t' || src[*end - 1] == '\r' || src[*end - 1] == '\n'))
+		(*end)--;
+}
+
+static char *copy_trimmed(const char *src, size_t start, size_t end)
+{
+	if (end <= start)
+		return xstrdup("");
+	char *out = (char *)xmalloc(end - start + 1);
+	memcpy(out, src + start, end - start);
+	out[end - start] = '\0';
+	return out;
+}
+
+static void preproc_error(const PreprocState *st, int line, const char *fmt, ...)
+{
+	va_list ap;
+	fprintf(stderr, "%s:%d: error: ", st && st->path ? st->path : "<input>", line > 0 ? line : 0);
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	fprintf(stderr, "\n");
+	exit(1);
+}
+
+static int macro_find_index(const PreprocState *st, const char *name)
+{
+	if (!st || !name)
+		return -1;
+	for (int i = 0; i < st->macro_count; ++i)
+	{
+		if (strcmp(st->macros[i].name, name) == 0)
+			return i;
+	}
+	return -1;
+}
+
+static Macro *macro_find(PreprocState *st, const char *name)
+{
+	int idx = macro_find_index(st, name);
+	if (idx < 0)
+		return NULL;
+	return &st->macros[idx];
+}
+
+static void macro_remove(PreprocState *st, const char *name)
+{
+	int idx = macro_find_index(st, name);
+	if (idx < 0)
+		return;
+	free_macro(&st->macros[idx]);
+	for (int i = idx + 1; i < st->macro_count; ++i)
+		st->macros[i - 1] = st->macros[i];
+	st->macro_count--;
+}
+
+static void macro_add(PreprocState *st, Macro mac)
+{
+	if (st->macro_count == st->macro_cap)
+	{
+		int ncap = st->macro_cap ? st->macro_cap * 2 : 16;
+		Macro *nm = (Macro *)realloc(st->macros, (size_t)ncap * sizeof(Macro));
+		if (!nm)
+			diag_error("preprocessor: out of memory adding macro");
+		st->macros = nm;
+		st->macro_cap = ncap;
+	}
+	st->macros[st->macro_count++] = mac;
+}
+
+typedef struct
+{
+	const char *expr;
+	size_t len;
+	size_t pos;
+	PreprocState *state;
+	int line_no;
+	int depth;
+} ExprParser;
+
+static void expr_skip_ws(ExprParser *p)
+{
+	while (p->pos < p->len && (p->expr[p->pos] == ' ' || p->expr[p->pos] == '\t' || p->expr[p->pos] == '\r' || p->expr[p->pos] == '\n'))
+		p->pos++;
+}
+
+static int expr_match_keyword(ExprParser *p, const char *kw)
+{
+	expr_skip_ws(p);
+	size_t klen = strlen(kw);
+	if (p->pos + klen > p->len)
+		return 0;
+	if (strncmp(p->expr + p->pos, kw, klen) == 0)
+	{
+		if (p->pos + klen < p->len && is_ident_char(p->expr[p->pos + klen]))
+			return 0;
+		p->pos += klen;
+		return 1;
+	}
+	return 0;
+}
+
+static long eval_expr_recursive(PreprocState *st, const char *expr, size_t len, int line_no, int depth);
+
+static long eval_identifier_value(PreprocState *st, const char *name, int line_no, int depth)
+{
+	Macro *mac = macro_find(st, name);
+	if (!mac)
+		return 0;
+	if (mac->param_count >= 0)
+		return 0;
+	const char *body = mac->body ? mac->body : "";
+	size_t body_len = strlen(body);
+	return eval_expr_recursive(st, body, body_len, line_no, depth + 1);
+}
+
+static long parse_primary(ExprParser *p);
+
+static long parse_unary(ExprParser *p)
+{
+	expr_skip_ws(p);
+	if (p->pos >= p->len)
+		return 0;
+	char c = p->expr[p->pos];
+	if (c == '!')
+	{
+		p->pos++;
+		long v = parse_unary(p);
+		return !v;
+	}
+	if (c == '+')
+	{
+		p->pos++;
+		return parse_unary(p);
+	}
+	if (c == '-')
+	{
+		p->pos++;
+		long v = parse_unary(p);
+		return -v;
+	}
+	if (c == '~')
+	{
+		p->pos++;
+		long v = parse_unary(p);
+		return ~v;
+	}
+	return parse_primary(p);
+}
+
+static long parse_mul(ExprParser *p)
+{
+	long lhs = parse_unary(p);
+	while (1)
+	{
+		expr_skip_ws(p);
+		if (p->pos >= p->len)
+			return lhs;
+		char c = p->expr[p->pos];
+		if (c == '*' || c == '/' || c == '%')
+		{
+			p->pos++;
+			long rhs = parse_unary(p);
+			if (c == '*')
+				lhs *= rhs;
+			else if (c == '/')
+				lhs = rhs ? lhs / rhs : 0;
+			else
+				lhs = rhs ? lhs % rhs : 0;
+		}
+		else
+			return lhs;
+	}
+}
+
+static long parse_add(ExprParser *p)
+{
+	long lhs = parse_mul(p);
+	while (1)
+	{
+		expr_skip_ws(p);
+		if (p->pos >= p->len)
+			return lhs;
+		char c = p->expr[p->pos];
+		if (c == '+' || c == '-')
+		{
+			p->pos++;
+			long rhs = parse_mul(p);
+			if (c == '+')
+				lhs += rhs;
+			else
+				lhs -= rhs;
+		}
+		else
+			return lhs;
+	}
+}
+
+static long parse_rel(ExprParser *p)
+{
+	long lhs = parse_add(p);
+	while (1)
+	{
+		expr_skip_ws(p);
+		if (p->pos + 1 < p->len && strncmp(p->expr + p->pos, "<=", 2) == 0)
+		{
+			p->pos += 2;
+			long rhs = parse_add(p);
+			lhs = lhs <= rhs;
+			continue;
+		}
+		if (p->pos + 1 < p->len && strncmp(p->expr + p->pos, ">=", 2) == 0)
+		{
+			p->pos += 2;
+			long rhs = parse_add(p);
+			lhs = lhs >= rhs;
+			continue;
+		}
+		if (p->pos < p->len && p->expr[p->pos] == '<')
+		{
+			p->pos++;
+			long rhs = parse_add(p);
+			lhs = lhs < rhs;
+			continue;
+		}
+		if (p->pos < p->len && p->expr[p->pos] == '>')
+		{
+			p->pos++;
+			long rhs = parse_add(p);
+			lhs = lhs > rhs;
+			continue;
+		}
+		break;
+	}
+	return lhs;
+}
+
+static long parse_eq(ExprParser *p)
+{
+	long lhs = parse_rel(p);
+	while (1)
+	{
+		expr_skip_ws(p);
+		if (p->pos + 1 < p->len && strncmp(p->expr + p->pos, "==", 2) == 0)
+		{
+			p->pos += 2;
+			long rhs = parse_rel(p);
+			lhs = lhs == rhs;
+			continue;
+		}
+		if (p->pos + 1 < p->len && strncmp(p->expr + p->pos, "!=", 2) == 0)
+		{
+			p->pos += 2;
+			long rhs = parse_rel(p);
+			lhs = lhs != rhs;
+			continue;
+		}
+		break;
+	}
+	return lhs;
+}
+
+static long parse_and(ExprParser *p)
+{
+	long lhs = parse_eq(p);
+	while (1)
+	{
+		expr_skip_ws(p);
+		if (p->pos + 1 < p->len && strncmp(p->expr + p->pos, "&&", 2) == 0)
+		{
+			p->pos += 2;
+			long rhs = parse_eq(p);
+			lhs = (lhs && rhs);
+			continue;
+		}
+		break;
+	}
+	return lhs;
+}
+
+static long parse_or(ExprParser *p)
+{
+	long lhs = parse_and(p);
+	while (1)
+	{
+		expr_skip_ws(p);
+		if (p->pos + 1 < p->len && strncmp(p->expr + p->pos, "||", 2) == 0)
+		{
+			p->pos += 2;
+			long rhs = parse_and(p);
+			lhs = (lhs || rhs);
+			continue;
+		}
+		break;
+	}
+	return lhs;
+}
+
+static long parse_primary(ExprParser *p)
+{
+	expr_skip_ws(p);
+	if (p->pos >= p->len)
+		return 0;
+	char c = p->expr[p->pos];
+	if (c == '(')
+	{
+		p->pos++;
+		long v = parse_or(p);
+		expr_skip_ws(p);
+		if (p->pos < p->len && p->expr[p->pos] == ')')
+			p->pos++;
+		return v;
+	}
+	if (expr_match_keyword(p, "defined"))
+	{
+		expr_skip_ws(p);
+		int need_paren = 0;
+		if (p->pos < p->len && p->expr[p->pos] == '(')
+		{
+			need_paren = 1;
+			p->pos++;
+		}
+		expr_skip_ws(p);
+		size_t start = p->pos;
+		while (p->pos < p->len && is_ident_char(p->expr[p->pos]))
+			p->pos++;
+		size_t end = p->pos;
+		if (end <= start)
+			return 0;
+		char *name = copy_trimmed(p->expr, start, end);
+		int res = macro_find(p->state, name) != NULL;
+		free(name);
+		if (need_paren)
+		{
+			expr_skip_ws(p);
+			if (p->pos < p->len && p->expr[p->pos] == ')')
+				p->pos++;
+		}
+		return res;
+	}
+	if ((c >= '0' && c <= '9') || c == '.')
+	{
+		char *endptr = NULL;
+		long val = strtol(p->expr + p->pos, &endptr, 0);
+		p->pos = (size_t)(endptr - p->expr);
+		return val;
+	}
+	if (is_ident_start(c))
+	{
+		size_t start = p->pos;
+		p->pos++;
+		while (p->pos < p->len && is_ident_char(p->expr[p->pos]))
+			p->pos++;
+		char *name = copy_trimmed(p->expr, start, p->pos);
+		long val = eval_identifier_value(p->state, name, p->line_no, p->depth + 1);
+		free(name);
+		return val;
+	}
+	return 0;
+}
+
+static long eval_expr_recursive(PreprocState *st, const char *expr, size_t len, int line_no, int depth)
+{
+	if (depth > MAX_CONDITION_RECURSION)
+		return 0;
+	ExprParser p = {expr, len, 0, st, line_no, depth};
+	long v = parse_or(&p);
+	return v;
+}
+
+static int eval_condition(PreprocState *st, const char *expr, size_t len, int line_no)
+{
+	long v = eval_expr_recursive(st, expr, len, line_no, 0);
+	return v != 0;
+}
+
+static char *expand_text(PreprocState *st, const char *text, size_t len, MacroParam *params, int param_count, MacroStack *stack, int depth, int line_no);
+
+static char *try_expand_identifier(PreprocState *st, const char *src, size_t len, size_t start, size_t *out_end,
+								   MacroParam *params, int param_count, MacroStack *stack, int depth, int line_no);
+
+static char *expand_text(PreprocState *st, const char *text, size_t len, MacroParam *params, int param_count, MacroStack *stack, int depth, int line_no)
+{
+	if (!text || len == 0)
+		return xstrdup("");
+	if (depth > MAX_MACRO_RECURSION)
+	{
+		char *dup = (char *)xmalloc(len + 1);
+		memcpy(dup, text, len);
+		dup[len] = '\0';
+		return dup;
+	}
+	StrBuilder sb;
+	sb_init(&sb);
+	size_t i = 0;
+	size_t last_emit = 0;
+	int in_string = 0;
+	int in_char = 0;
+	int escape = 0;
+	while (i < len)
+	{
+		char c = text[i];
+		if (in_string)
+		{
+			if (!escape && c == '"')
+				in_string = 0;
+			escape = (!escape && c == '\\');
+			i++;
+			continue;
+		}
+		if (in_char)
+		{
+			if (!escape && c == '\'')
+				in_char = 0;
+			escape = (!escape && c == '\\');
+			i++;
+			continue;
+		}
+		if (c == '"')
+		{
+			i++;
+			in_string = 1;
+			continue;
+		}
+		if (c == '\'')
+		{
+			i++;
+			in_char = 1;
+			continue;
+		}
+		if (c == '/' && i + 1 < len)
+		{
+			if (text[i + 1] == '/')
+			{
+				i += 2;
+				while (i < len && text[i] != '\n')
+					i++;
+				continue;
+			}
+			if (text[i + 1] == '*')
+			{
+				i += 2;
+				while (i + 1 < len && !(text[i] == '*' && text[i + 1] == '/'))
+					i++;
+				if (i + 1 < len)
+					i += 2;
+				continue;
+			}
+		}
+		if (is_ident_start(c))
+		{
+			sb_append_range(&sb, text + last_emit, i - last_emit);
+			size_t end = i;
+			char *expanded = try_expand_identifier(st, text, len, i, &end, params, param_count, stack, depth, line_no);
+			if (expanded)
+			{
+				sb_append_str(&sb, expanded);
+				free(expanded);
+				i = end;
+				last_emit = i;
+				continue;
+			}
+			sb_append_range(&sb, text + i, end - i);
+			i = end;
+			last_emit = i;
+			continue;
+		}
+		i++;
+	}
+	if (last_emit < len)
+		sb_append_range(&sb, text + last_emit, len - last_emit);
+	return sb_build(&sb);
+}
+
+static int find_param_index(MacroParam *params, int param_count, const char *name)
+{
+	for (int i = 0; i < param_count; ++i)
+	{
+		if (strcmp(params[i].name, name) == 0)
+			return i;
+	}
+	return -1;
+}
+
+static int parse_macro_arguments(const char *src, size_t len, size_t lparen, char ***out_args, int *out_count, size_t *out_end,
+								 PreprocState *st, int line_no)
+{
+	size_t pos = lparen + 1;
+	int depth = 1;
+	size_t arg_start = pos;
+	char **args = NULL;
+	int arg_count = 0;
+	int arg_cap = 0;
+	int in_string = 0, in_char = 0, escape = 0;
+	while (pos < len)
+	{
+		char c = src[pos];
+		if (in_string)
+		{
+			if (!escape && c == '"')
+				in_string = 0;
+			escape = (!escape && c == '\\');
+			pos++;
+			continue;
+		}
+		if (in_char)
+		{
+			if (!escape && c == '\'')
+				in_char = 0;
+			escape = (!escape && c == '\\');
+			pos++;
+			continue;
+		}
+		if (c == '"')
+		{
+			in_string = 1;
+			pos++;
+			continue;
+		}
+		if (c == '\'')
+		{
+			in_char = 1;
+			pos++;
+			continue;
+		}
+		if (c == '/' && pos + 1 < len)
+		{
+			if (src[pos + 1] == '/')
+			{
+				pos += 2;
+				while (pos < len && src[pos] != '\n')
+					pos++;
+				continue;
+			}
+			if (src[pos + 1] == '*')
+			{
+				pos += 2;
+				while (pos + 1 < len && !(src[pos] == '*' && src[pos + 1] == '/'))
+					pos++;
+				if (pos + 1 < len)
+					pos += 2;
+				continue;
+			}
+		}
+		if (c == '(')
+		{
+			depth++;
+			pos++;
+			continue;
+		}
+		if (c == ')')
+		{
+			depth--;
+			if (depth == 0)
+			{
+				size_t start = arg_start;
+				size_t end = pos;
+				trim_range(src, len, &start, &end);
+				if (!(arg_count == 0 && start == end))
+				{
+					if (arg_count == arg_cap)
+					{
+						int ncap = arg_cap ? arg_cap * 2 : 4;
+						char **tmp = (char **)realloc(args, (size_t)ncap * sizeof(char *));
+						if (!tmp)
+							diag_error("preprocessor: out of memory parsing macro arguments");
+						args = tmp;
+						arg_cap = ncap;
+					}
+					args[arg_count++] = copy_trimmed(src, start, end);
+				}
+				pos++;
+				*out_args = args;
+				*out_count = arg_count;
+				*out_end = pos;
+				return 1;
+			}
+			pos++;
+			continue;
+		}
+		if (c == ',' && depth == 1)
+		{
+			size_t start = arg_start;
+			size_t end = pos;
+			trim_range(src, len, &start, &end);
+			if (arg_count == arg_cap)
+			{
+				int ncap = arg_cap ? arg_cap * 2 : 4;
+				char **tmp = (char **)realloc(args, (size_t)ncap * sizeof(char *));
+				if (!tmp)
+					diag_error("preprocessor: out of memory parsing macro arguments");
+				args = tmp;
+				arg_cap = ncap;
+			}
+			args[arg_count++] = copy_trimmed(src, start, end);
+			pos++;
+			while (pos < len && (src[pos] == ' ' || src[pos] == '\t' || src[pos] == '\r' || src[pos] == '\n'))
+				pos++;
+			arg_start = pos;
+			continue;
+		}
+		pos++;
+	}
+	preproc_error(st, line_no, "unterminated macro argument list");
+	return 0;
+}
+
+static char *expand_function_macro(PreprocState *st, const Macro *mac, const char *src, size_t len, size_t ident_start,
+								   size_t *out_end, MacroStack *stack, int depth, int line_no)
+{
+	size_t lparen = ident_start;
+	while (lparen < len && is_ident_char(src[lparen]))
+		lparen++;
+	if (lparen >= len || src[lparen] != '(')
+		return NULL;
+	char **raw_args = NULL;
+	int arg_count = 0;
+	size_t after_args = lparen;
+	if (!parse_macro_arguments(src, len, lparen, &raw_args, &arg_count, &after_args, st, line_no))
+		return NULL;
+	if (arg_count != mac->param_count)
+	{
+		preproc_error(st, line_no, "macro '%s' expects %d argument(s), got %d", mac->name, mac->param_count, arg_count);
+	}
+	MacroParam *subs = NULL;
+	if (mac->param_count > 0)
+	{
+		subs = (MacroParam *)xcalloc((size_t)mac->param_count, sizeof(MacroParam));
+		for (int i = 0; i < mac->param_count; ++i)
+		{
+			subs[i].name = mac->params[i];
+			char *expanded = expand_text(st, raw_args[i], strlen(raw_args[i]), NULL, 0, stack, depth + 1, line_no);
+			subs[i].value = expanded;
+		}
+	}
+	macro_stack_push(stack, mac);
+	const char *body = mac->body ? mac->body : "";
+	char *result = expand_text(st, body, strlen(body), subs, mac->param_count, stack, depth + 1, line_no);
+	macro_stack_pop(stack, mac);
+	if (subs)
+	{
+		for (int i = 0; i < mac->param_count; ++i)
+			free((char *)subs[i].value);
+		free(subs);
+	}
+	for (int i = 0; i < arg_count; ++i)
+		free(raw_args[i]);
+	free(raw_args);
+	*out_end = after_args;
+	return result;
+}
+
+static char *expand_object_macro(PreprocState *st, const Macro *mac, MacroStack *stack, int depth, int line_no)
+{
+	macro_stack_push(stack, mac);
+	const char *body = mac->body ? mac->body : "";
+	char *res = expand_text(st, body, strlen(body), NULL, 0, stack, depth + 1, line_no);
+	macro_stack_pop(stack, mac);
+	return res;
+}
+
+static char *try_expand_identifier(PreprocState *st, const char *src, size_t len, size_t start, size_t *out_end,
+								   MacroParam *params, int param_count, MacroStack *stack, int depth, int line_no)
+{
+	size_t end = start;
+	while (end < len && is_ident_char(src[end]))
+		end++;
+	*out_end = end;
+	if (end == start)
+		return NULL;
+	char temp[128];
+	size_t name_len = end - start;
+	char *name = NULL;
+	if (name_len < sizeof(temp))
+	{
+		memcpy(temp, src + start, name_len);
+		temp[name_len] = '\0';
+		name = temp;
+	}
+	else
+	{
+		name = (char *)xmalloc(name_len + 1);
+		memcpy(name, src + start, name_len);
+		name[name_len] = '\0';
+	}
+
+	int param_idx = params ? find_param_index(params, param_count, name) : -1;
+	if (param_idx >= 0)
+	{
+		char *dup = xstrdup(params[param_idx].value ? params[param_idx].value : "");
+		if (name != temp)
+			free(name);
+		return dup;
+	}
+
+	Macro *mac = macro_find(st, name);
+	if (name != temp)
+		free(name);
+	if (!mac)
+		return NULL;
+	if (macro_stack_contains(stack, mac))
+		return NULL;
+	if (mac->param_count >= 0)
+	{
+		if (src[end] != '(')
+			return NULL;
+		return expand_function_macro(st, mac, src, len, start, out_end, stack, depth, line_no);
+	}
+	return expand_object_macro(st, mac, stack, depth, line_no);
+}
+
+static int current_active(const PreprocState *st)
+{
+	if (!st || st->cond_count == 0)
+		return 1;
+	return st->conds[st->cond_count - 1].current_active;
+}
+
+static void push_condition(PreprocState *st, int parent_active, int cond)
+{
+	if (st->cond_count == st->cond_cap)
+	{
+		int ncap = st->cond_cap ? st->cond_cap * 2 : 8;
+		CondFrame *nc = (CondFrame *)realloc(st->conds, (size_t)ncap * sizeof(CondFrame));
+		if (!nc)
+			diag_error("preprocessor: out of memory tracking conditionals");
+		st->conds = nc;
+		st->cond_cap = ncap;
+	}
+	CondFrame frame;
+	frame.parent_active = parent_active;
+	frame.current_active = parent_active && cond;
+	frame.branch_taken = parent_active && cond;
+	frame.saw_else = 0;
+	st->conds[st->cond_count++] = frame;
+}
+
+static void handle_if(PreprocState *st, const char *expr, size_t len, int line_no)
+{
+	int parent_active = current_active(st);
+	int cond = parent_active ? eval_condition(st, expr, len, line_no) : 0;
+	push_condition(st, parent_active, cond);
+}
+
+static void handle_else(PreprocState *st, int line_no)
+{
+	if (st->cond_count == 0)
+		preproc_error(st, line_no, "#else without matching #if");
+	CondFrame *frame = &st->conds[st->cond_count - 1];
+	if (frame->saw_else)
+		preproc_error(st, line_no, "multiple #else directives in the same #if");
+	frame->saw_else = 1;
+	if (!frame->parent_active)
+	{
+		frame->current_active = 0;
+		return;
+	}
+	frame->current_active = !frame->branch_taken;
+	frame->branch_taken = frame->branch_taken || frame->current_active;
+}
+
+static void handle_elif(PreprocState *st, const char *expr, size_t len, int line_no)
+{
+	if (st->cond_count == 0)
+		preproc_error(st, line_no, "#elif without matching #if");
+	CondFrame *frame = &st->conds[st->cond_count - 1];
+	if (frame->saw_else)
+		preproc_error(st, line_no, "#elif after #else");
+	if (!frame->parent_active || frame->branch_taken)
+	{
+		frame->current_active = 0;
+		return;
+	}
+	int cond = eval_condition(st, expr, len, line_no);
+	frame->current_active = cond;
+	if (cond)
+		frame->branch_taken = 1;
+}
+
+static void handle_endif(PreprocState *st, int line_no)
+{
+	if (st->cond_count == 0)
+		preproc_error(st, line_no, "#endif without matching #if");
+	st->cond_count--;
+}
+
+static void define_macro(PreprocState *st, const char *line, size_t len, int line_no)
+{
+	size_t pos = 0;
+	while (pos < len && (line[pos] == ' ' || line[pos] == '\t'))
+		pos++;
+	size_t name_start = pos;
+	if (pos >= len || !is_ident_start(line[pos]))
+		preproc_error(st, line_no, "#define missing macro name");
+	pos++;
+	while (pos < len && is_ident_char(line[pos]))
+		pos++;
+	size_t name_end = pos;
+	int function_like = 0;
+	if (pos < len && line[pos] == '(')
+	{
+		function_like = 1;
+	}
+	size_t body_start = pos;
+	Macro mac = {0};
+	mac.name = copy_trimmed(line, name_start, name_end);
+	macro_remove(st, mac.name);
+	if (function_like)
+	{
+		pos++; // skip '('
+		char **params = NULL;
+		int param_count = 0;
+		int param_cap = 0;
+		size_t current_start = pos;
+		int closed = 0;
+		while (pos < len)
+		{
+			char c = line[pos];
+			if (c == ')')
+			{
+				size_t start = current_start;
+				size_t end = pos;
+				trim_range(line, len, &start, &end);
+				if (end > start)
+				{
+					if (param_count == param_cap)
+					{
+						int ncap = param_cap ? param_cap * 2 : 4;
+						char **tmp = (char **)realloc(params, (size_t)ncap * sizeof(char *));
+						if (!tmp)
+							diag_error("preprocessor: out of memory storing macro parameters");
+						params = tmp;
+						param_cap = ncap;
+					}
+					params[param_count++] = copy_trimmed(line, start, end);
+				}
+				pos++;
+				closed = 1;
+				break;
+			}
+			if (c == ',')
+			{
+				size_t start = current_start;
+				size_t end = pos;
+				trim_range(line, len, &start, &end);
+				if (end <= start)
+					preproc_error(st, line_no, "empty parameter name in macro");
+				if (param_count == param_cap)
+				{
+					int ncap = param_cap ? param_cap * 2 : 4;
+					char **tmp = (char **)realloc(params, (size_t)ncap * sizeof(char *));
+					if (!tmp)
+						diag_error("preprocessor: out of memory storing macro parameters");
+					params = tmp;
+					param_cap = ncap;
+				}
+				params[param_count++] = copy_trimmed(line, start, end);
+				pos++;
+				while (pos < len && (line[pos] == ' ' || line[pos] == '\t'))
+					pos++;
+				current_start = pos;
+				continue;
+			}
+			pos++;
+		}
+		if (!closed)
+			preproc_error(st, line_no, "unterminated parameter list in macro");
+		mac.param_count = param_count;
+		mac.params = params;
+		body_start = pos;
+	}
+	else
+	{
+		mac.param_count = -1;
+		mac.params = NULL;
+	}
+	while (body_start < len && (line[body_start] == ' ' || line[body_start] == '\t'))
+		body_start++;
+	mac.body = copy_trimmed(line, body_start, len);
+	macro_add(st, mac);
+}
+
+static void undef_macro(PreprocState *st, const char *line, size_t len)
+{
+	size_t pos = 0;
+	while (pos < len && (line[pos] == ' ' || line[pos] == '\t'))
+		pos++;
+	size_t start = pos;
+	while (pos < len && is_ident_char(line[pos]))
+		pos++;
+	if (pos > start)
+	{
+		char *name = copy_trimmed(line, start, pos);
+		macro_remove(st, name);
+		free(name);
+	}
+}
+
+static int handle_directive(PreprocState *st, const char *src, int len, int *index, StrBuilder *out, int *line_no)
+{
+	int i = *index;
+	int orig = i;
+	while (i < len && (src[i] == ' ' || src[i] == '\t'))
+		i++;
+	if (i >= len || src[i] != '#')
+		return 0;
+	i++;
+	while (i < len && (src[i] == ' ' || src[i] == '\t'))
+		i++;
+	size_t kw_start = i;
+	while (i < len && is_ident_char(src[i]))
+		i++;
+	size_t kw_end = i;
+	while (i < len && (src[i] == ' ' || src[i] == '\t'))
+		i++;
+	size_t arg_start = i;
+	size_t line_end = i;
+	while (line_end < len && src[line_end] != '\n' && src[line_end] != '\r')
+		line_end++;
+	size_t arg_len = (line_end > arg_start) ? (line_end - arg_start) : 0;
+	char keyword[32];
+	size_t kw_len = kw_end - kw_start;
+	if (kw_len >= sizeof(keyword))
+		kw_len = sizeof(keyword) - 1;
+	memcpy(keyword, src + kw_start, kw_len);
+	keyword[kw_len] = '\0';
+	int active = current_active(st);
+
+	if (strcmp(keyword, "define") == 0)
+	{
+		if (active)
+			define_macro(st, src + arg_start, arg_len, *line_no);
+	}
+	else if (strcmp(keyword, "undef") == 0)
+	{
+		if (active)
+			undef_macro(st, src + arg_start, arg_len);
+	}
+	else if (strcmp(keyword, "ifdef") == 0)
+	{
+		size_t start = arg_start;
+		size_t end = arg_start + arg_len;
+		trim_range(src, len, &start, &end);
+		char *name = copy_trimmed(src, start, end);
+		int cond = macro_find(st, name) != NULL;
+		free(name);
+		push_condition(st, current_active(st), cond);
+	}
+	else if (strcmp(keyword, "ifndef") == 0)
+	{
+		size_t start = arg_start;
+		size_t end = arg_start + arg_len;
+		trim_range(src, len, &start, &end);
+		char *name = copy_trimmed(src, start, end);
+		int cond = macro_find(st, name) == NULL;
+		free(name);
+		push_condition(st, current_active(st), cond);
+	}
+	else if (strcmp(keyword, "if") == 0)
+		handle_if(st, src + arg_start, arg_len, *line_no);
+	else if (strcmp(keyword, "elif") == 0)
+		handle_elif(st, src + arg_start, arg_len, *line_no);
+	else if (strcmp(keyword, "else") == 0)
+		handle_else(st, *line_no);
+	else if (strcmp(keyword, "endif") == 0)
+		handle_endif(st, *line_no);
+
+	size_t newline_pos = line_end;
+	if (newline_pos < len)
+	{
+		if (src[newline_pos] == '\r' && newline_pos + 1 < len && src[newline_pos + 1] == '\n')
+			newline_pos += 2;
+		else
+			newline_pos += 1;
+		sb_append_char(out, '\n');
+		(*line_no)++;
+	}
+	*index = (int)newline_pos;
+	return 1;
+}
+
+static void process_active_line(PreprocState *st, const char *src, int len, int *index, StrBuilder *out, int *line_no)
+{
+	int pos = *index;
+	int start = pos;
+	while (pos < len && src[pos] != '\n' && src[pos] != '\r')
+		pos++;
+	size_t slice_len = (size_t)(pos - start);
+	char *expanded = expand_text(st, src + start, slice_len, NULL, 0, &st->expansion_stack, 0, *line_no);
+	sb_append_str(out, expanded);
+	free(expanded);
+	if (pos < len)
+	{
+		if (src[pos] == '\r' && pos + 1 < len && src[pos + 1] == '\n')
+			pos += 2;
+		else
+			pos += 1;
+		sb_append_char(out, '\n');
+		(*line_no)++;
+	}
+	*index = pos;
+}
+
+static void process_inactive_line(const char *src, int len, int *index, StrBuilder *out, int *line_no)
+{
+	int pos = *index;
+	while (pos < len && src[pos] != '\n' && src[pos] != '\r')
+		pos++;
+	if (pos < len)
+	{
+		if (src[pos] == '\r' && pos + 1 < len && src[pos + 1] == '\n')
+			pos += 2;
+		else
+			pos += 1;
+		sb_append_char(out, '\n');
+		(*line_no)++;
+	}
+	*index = pos;
+}
+
+char *chance_preprocess_source(const char *path, const char *src, int len, int *out_len)
+{
+	if (!src || len <= 0)
+	{
+		if (out_len)
+			*out_len = 0;
+		return xstrdup("");
+	}
+	PreprocState st;
+	memset(&st, 0, sizeof(st));
+	st.path = path;
+	st.expansion_stack.count = 0;
+	StrBuilder out;
+	sb_init(&out);
+	int index = 0;
+	int line_no = 1;
+	int at_line_start = 1;
+	while (index < len)
+	{
+		if (at_line_start)
+		{
+			if (handle_directive(&st, src, len, &index, &out, &line_no))
+			{
+				at_line_start = 1;
+				continue;
+			}
+		}
+		if (current_active(&st))
+		{
+			process_active_line(&st, src, len, &index, &out, &line_no);
+		}
+		else
+		{
+			process_inactive_line(src, len, &index, &out, &line_no);
+		}
+		at_line_start = 1;
+	}
+	if (st.cond_count != 0)
+		preproc_error(&st, line_no, "unterminated conditional block");
+	char *result = sb_build(&out);
+	if (out_len)
+		*out_len = (int)strlen(result);
+	for (int i = 0; i < st.macro_count; ++i)
+		free_macro(&st.macros[i]);
+	free(st.macros);
+	free(st.conds);
+	return result;
+}

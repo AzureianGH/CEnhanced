@@ -4,6 +4,34 @@ bring Test.Chance as TC;
 bring LibTest as LT;
 bring LibTest.Another;
 
+#define TEST_DEFINE 99
+#define MACRO_SUM(a, b) ((a) + (b))
+#define MACRO_SQUARE(x) ((x) * (x))
+
+#define SHOULD_BE_UNDEF 123
+#undef SHOULD_BE_UNDEF
+
+#ifdef SHOULD_BE_UNDEF
+#define UNDEF_CHECK_VALUE -1
+#else
+#define UNDEF_CHECK_VALUE 456
+#endif
+
+#if defined(TEST_DEFINE) && TEST_DEFINE == 99
+#define CONDITIONAL_VALUE 99
+#else
+#define CONDITIONAL_VALUE -1
+#endif
+
+#define FEATURE_LEVEL 3
+#if FEATURE_LEVEL > 3
+#define FEATURE_SENTINEL 10
+#elif FEATURE_LEVEL == 3
+#define FEATURE_SENTINEL 30
+#else
+#define FEATURE_SENTINEL -10
+#endif
+
 bring Std as Std;
 
 extend from "C" i32 printf(char *, _vaargs_);
@@ -253,12 +281,24 @@ expose fun main() -> i32
 
     u16 random_number = 12345;
 
+    char* chkarray = Std.Memory.alloc(17) as char*;
+    Std.Memory.memset(chkarray as void*, 0, 17);
+
     // Print out each bit of random_number
     for (i32 i = 15; i >= 0; i = i - 1)
     {
         u16 bit = (random_number >> i) & 1;
-        printf("%d", bit);
+        chkarray[15 - i] = if (bit == 1) '1' else '0';
     }
+
+    assert(strcmp(chkarray, "0011000000111001") == 0, "Bitwise representation of 12345 is correct");
+
+    assert(TEST_DEFINE == 99, "object-like macro expands to literal");
+    assert(MACRO_SUM(20, 22) == 42, "function-style macro expansion works");
+    assert(MACRO_SQUARE(5) == 25, "macro arguments stay parenthesized");
+    assert(CONDITIONAL_VALUE == 99, "#if/#else branch selection works");
+    assert(FEATURE_SENTINEL == 30, "#elif branch selection works");
+    assert(UNDEF_CHECK_VALUE == 456, "#undef clears definitions for guards");
 
     ret final_sum; // expect 168
 }

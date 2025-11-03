@@ -1005,14 +1005,27 @@ static int can_assign(Type *target, Node *rhs)
     if (!target || !rhs)
         return 0;
     Type *canon_target = canonicalize_type_deep(target);
-    if (canon_target && canon_target->kind == TY_PTR && rhs->kind == ND_NULL)
+    if (!canon_target)
+        return 0;
+    if (canon_target->kind == TY_PTR && rhs->kind == ND_NULL)
     {
         rhs->type = canon_target;
         return 1;
     }
-    if (rhs->type && type_equal(target, rhs->type))
+    if (rhs->type && type_equal(canon_target, rhs->type))
         return 1;
-    if (coerce_int_literal_to_type(rhs, target, "assignment"))
+    if (rhs->kind == ND_COND)
+    {
+        if (!rhs->rhs || !rhs->body)
+            return 0;
+        if (!can_assign(canon_target, rhs->rhs))
+            return 0;
+        if (!can_assign(canon_target, rhs->body))
+            return 0;
+        rhs->type = canon_target;
+        return 1;
+    }
+    if (coerce_int_literal_to_type(rhs, canon_target, "assignment"))
         return 1;
     return 0;
 }
@@ -2069,14 +2082,47 @@ static void check_expr(SemaContext *sc, Node *e)
             diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col, "ternary condition must be integer or pointer");
             exit(1);
         }
-        // Branch types must match exactly for now
-        if (!type_equal(e->rhs->type, e->body->type))
+        Type *then_type = canonicalize_type_deep(e->rhs->type);
+        Type *else_type = canonicalize_type_deep(e->body->type);
+        e->rhs->type = then_type;
+        e->body->type = else_type;
+
+        if (type_equal(then_type, else_type))
         {
-            diag_error_at(e->src, e->line, e->col, "ternary branches must have the same type");
-            exit(1);
+            e->type = then_type;
+            return;
         }
-        e->type = e->rhs->type;
-        return;
+
+        if (then_type && then_type->kind == TY_PTR && e->body->kind == ND_NULL)
+        {
+            e->body->type = then_type;
+            e->type = then_type;
+            return;
+        }
+        if (else_type && else_type->kind == TY_PTR && e->rhs->kind == ND_NULL)
+        {
+            e->rhs->type = else_type;
+            e->type = else_type;
+            return;
+        }
+
+        if (else_type && coerce_int_literal_to_type(e->rhs, else_type, "conditional branch"))
+        {
+            then_type = canonicalize_type_deep(e->rhs->type);
+        }
+        if (then_type && coerce_int_literal_to_type(e->body, then_type, "conditional branch"))
+        {
+            else_type = canonicalize_type_deep(e->body->type);
+        }
+
+        if (type_equal(then_type, else_type))
+        {
+            e->type = then_type;
+            return;
+        }
+
+        diag_error_at(e->src, e->line, e->col, "ternary branches must have compatible types");
+        exit(1);
     }
     diag_error_at(e->src, e->line, e->col, "unsupported expression: %s",
                   nodekind_name(e->kind));

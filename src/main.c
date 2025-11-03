@@ -2,6 +2,7 @@
 #include "includes.h"
 #include "cclib.h"
 #include "module_registry.h"
+#include "preproc.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2990,10 +2991,10 @@ int main(int argc, char **argv)
             rc = 1;
             break;
         }
-        int stripped_len = 0;
-        char *stripped = chance_strip_preprocessor_lines(src, len, &stripped_len);
-        SourceBuffer sb = {stripped ? stripped : src,
-                           stripped ? stripped_len : len, input};
+    int pre_len = 0;
+    char *preprocessed = chance_preprocess_source(input, src, len, &pre_len);
+    SourceBuffer sb = {preprocessed ? preprocessed : src,
+               preprocessed ? pre_len : len, input};
         Parser *ps = parser_create(sb);
         SemaContext *sc = sema_create();
         chance_process_includes_and_scan(input, src, len, include_dirs,
@@ -3004,7 +3005,7 @@ int main(int argc, char **argv)
 
         units[fi].input_path = xstrdup(input);
         units[fi].src = src;
-        units[fi].stripped = stripped;
+    units[fi].stripped = preprocessed;
         units[fi].unit = unit;
         units[fi].sc = sc;
         units[fi].parser = ps;
