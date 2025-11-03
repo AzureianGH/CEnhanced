@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_MACRO_RECURSION 64
 #define MAX_CONDITION_RECURSION 32
@@ -42,6 +43,11 @@ typedef struct
 	int cond_cap;
 	const char *path;
 	MacroStack expansion_stack;
+	char date_literal[32];
+	char time_literal[32];
+	char *module_name;
+	int counter;
+	int pointer_width;
 } PreprocState;
 
 typedef struct
@@ -185,6 +191,45 @@ static char *copy_trimmed(const char *src, size_t start, size_t end)
 	return out;
 }
 
+static char *make_string_literal(const char *s)
+{
+	StrBuilder sb;
+	sb_init(&sb);
+	sb_append_char(&sb, '"');
+	if (s)
+	{
+		for (const char *p = s; *p; ++p)
+		{
+			unsigned char c = (unsigned char)*p;
+			switch (c)
+			{
+			case '\\':
+			case '"':
+				sb_append_char(&sb, '\\');
+				sb_append_char(&sb, (char)c);
+				break;
+			case '\n':
+				sb_append_char(&sb, '\\');
+				sb_append_char(&sb, 'n');
+				break;
+			case '\r':
+				sb_append_char(&sb, '\\');
+				sb_append_char(&sb, 'r');
+				break;
+			case '\t':
+				sb_append_char(&sb, '\\');
+				sb_append_char(&sb, 't');
+				break;
+			default:
+				sb_append_char(&sb, (char)c);
+				break;
+			}
+		}
+	}
+	sb_append_char(&sb, '"');
+	return sb_build(&sb);
+}
+
 static void preproc_error(const PreprocState *st, int line, const char *fmt, ...)
 {
 	va_list ap;
@@ -241,6 +286,79 @@ static void macro_add(PreprocState *st, Macro mac)
 	st->macros[st->macro_count++] = mac;
 }
 
+static void define_builtin_macro(PreprocState *st, const char *name, const char *value)
+{
+	if (!st || !name)
+		return;
+	macro_remove(st, name);
+	Macro mac = {0};
+	mac.name = xstrdup(name);
+	mac.param_count = -1;
+	mac.params = NULL;
+	mac.body = xstrdup(value ? value : "");
+	macro_add(st, mac);
+}
+
+static void define_builtin_flag(PreprocState *st, const char *name)
+{
+	define_builtin_macro(st, name, "1");
+}
+
+static char *detect_module_name(const char *src, int len)
+{
+	if (!src || len <= 0)
+		return NULL;
+	const char *p = src;
+	const char *end = src + len;
+	while (p < end)
+	{
+		if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')
+		{
+			p++;
+			continue;
+		}
+		if (*p == '/' && p + 1 < end)
+		{
+			if (p[1] == '/')
+			{
+				p += 2;
+				while (p < end && *p != '\n')
+					p++;
+				continue;
+			}
+			if (p[1] == '*')
+			{
+				p += 2;
+				while (p + 1 < end && !(p[0] == '*' && p[1] == '/'))
+					p++;
+				if (p + 1 < end)
+					p += 2;
+				continue;
+			}
+		}
+		break;
+	}
+	if (p + 6 <= end && strncmp(p, "module", 6) == 0 && !is_ident_char(p[6]))
+	{
+		p += 6;
+		while (p < end && (*p == ' ' || *p == '\t'))
+			p++;
+		const char *start = p;
+		while (p < end && *p != ';' && *p != '\n' && *p != '\r')
+			p++;
+		const char *finish = p;
+		while (finish > start && (finish[-1] == ' ' || finish[-1] == '\t'))
+			finish--;
+		if (finish > start)
+		{
+			size_t sidx = (size_t)(start - src);
+			size_t eidx = (size_t)(finish - src);
+			return copy_trimmed(src, sidx, eidx);
+		}
+	}
+	return NULL;
+}
+
 typedef struct
 {
 	const char *expr;
@@ -277,6 +395,16 @@ static long eval_expr_recursive(PreprocState *st, const char *expr, size_t len, 
 
 static long eval_identifier_value(PreprocState *st, const char *name, int line_no, int depth)
 {
+	if (!st || !name)
+		return 0;
+	if (strcmp(name, "__LINE__") == 0)
+		return line_no;
+	if (strcmp(name, "__IS64BIT__") == 0)
+		return st->pointer_width >= 64 ? 1 : 0;
+	if (strcmp(name, "__POINTER_WIDTH__") == 0)
+		return st->pointer_width;
+	if (strcmp(name, "__COUNTER__") == 0)
+		return st->counter++;
 	Macro *mac = macro_find(st, name);
 	if (!mac)
 		return 0;
@@ -856,6 +984,24 @@ static char *try_expand_identifier(PreprocState *st, const char *src, size_t len
 		memcpy(name, src + start, name_len);
 		name[name_len] = '\0';
 	}
+	if (strcmp(name, "__LINE__") == 0)
+	{
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%d", line_no);
+		char *dup = xstrdup(buf);
+		if (name != temp)
+			free(name);
+		return dup;
+	}
+	if (strcmp(name, "__COUNTER__") == 0)
+	{
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%d", st->counter++);
+		char *dup = xstrdup(buf);
+		if (name != temp)
+			free(name);
+		return dup;
+	}
 
 	int param_idx = params ? find_param_index(params, param_count, name) : -1;
 	if (param_idx >= 0)
@@ -1203,6 +1349,83 @@ char *chance_preprocess_source(const char *path, const char *src, int len, int *
 	memset(&st, 0, sizeof(st));
 	st.path = path;
 	st.expansion_stack.count = 0;
+	st.counter = 0;
+	st.pointer_width = (int)(sizeof(void *) * 8);
+	st.module_name = detect_module_name(src, len);
+	st.date_literal[0] = '\0';
+	st.time_literal[0] = '\0';
+	time_t now = time(NULL);
+	struct tm tm_now;
+#if defined(_WIN32)
+	if (localtime_s(&tm_now, &now) == 0)
+#else
+	if (localtime_r(&now, &tm_now) != NULL)
+#endif
+	{
+		if (strftime(st.date_literal, sizeof(st.date_literal), "%b %d %Y", &tm_now) == 0)
+			st.date_literal[0] = '\0';
+		if (strftime(st.time_literal, sizeof(st.time_literal), "%H:%M:%S", &tm_now) == 0)
+			st.time_literal[0] = '\0';
+	}
+	if (!st.date_literal[0])
+		strncpy(st.date_literal, "Jan 01 1970", sizeof(st.date_literal) - 1);
+	if (!st.time_literal[0])
+		strncpy(st.time_literal, "00:00:00", sizeof(st.time_literal) - 1);
+	st.date_literal[sizeof(st.date_literal) - 1] = '\0';
+	st.time_literal[sizeof(st.time_literal) - 1] = '\0';
+	define_builtin_macro(&st, "__CHANCE__", "1");
+	const int version_major = 0;
+	const int version_minor = 6;
+	const int version_patch = 1;
+	char version_compact[16];
+	snprintf(version_compact, sizeof(version_compact), "%d", version_major * 10000 + version_minor * 100 + version_patch);
+	define_builtin_macro(&st, "__CHANCE_VERSION__", version_compact);
+	char version_major_buf[8];
+	char version_minor_buf[8];
+	char version_patch_buf[8];
+	snprintf(version_major_buf, sizeof(version_major_buf), "%d", version_major);
+	snprintf(version_minor_buf, sizeof(version_minor_buf), "%d", version_minor);
+	snprintf(version_patch_buf, sizeof(version_patch_buf), "%d", version_patch);
+	define_builtin_macro(&st, "__CHANCE_VERSION_MAJOR__", version_major_buf);
+	define_builtin_macro(&st, "__CHANCE_VERSION_MINOR__", version_minor_buf);
+	define_builtin_macro(&st, "__CHANCE_VERSION_PATCH__", version_patch_buf);
+	char version_str_literal[32];
+	snprintf(version_str_literal, sizeof(version_str_literal), "%d.%d.%d", version_major, version_minor, version_patch);
+	char *version_str_macro = make_string_literal(version_str_literal);
+	define_builtin_macro(&st, "__CHANCE_VERSION_STR__", version_str_macro);
+	free(version_str_macro);
+	char pointer_buf[16];
+	snprintf(pointer_buf, sizeof(pointer_buf), "%d", st.pointer_width);
+	define_builtin_macro(&st, "__POINTER_WIDTH__", pointer_buf);
+	define_builtin_macro(&st, "__IS64BIT__", st.pointer_width >= 64 ? "1" : "0");
+	define_builtin_macro(&st, "__LINE__", "0");
+	define_builtin_macro(&st, "__COUNTER__", "0");
+#if defined(_WIN32)
+	define_builtin_flag(&st, "__WIN32__");
+#else
+	define_builtin_flag(&st, "__LINUX__");
+#endif
+	char *file_literal = make_string_literal(path ? path : "");
+	define_builtin_macro(&st, "__FILE__", file_literal);
+	free(file_literal);
+	const char *module_macro_value = st.module_name ? st.module_name : (path ? path : "");
+	char *module_literal = make_string_literal(module_macro_value);
+	define_builtin_macro(&st, "__MODULE__", module_literal);
+	free(module_literal);
+	char *date_literal = make_string_literal(st.date_literal);
+	define_builtin_macro(&st, "__DATE__", date_literal);
+	free(date_literal);
+	char *time_literal = make_string_literal(st.time_literal);
+	define_builtin_macro(&st, "__TIME__", time_literal);
+	free(time_literal);
+#if 0
+	Macro *dbg_date = macro_find(&st, "__DATE__");
+	Macro *dbg_time = macro_find(&st, "__TIME__");
+	fprintf(stderr, "[preproc dbg] __DATE__=%s, __TIME__=%s, counter=%d\n",
+			dbg_date && dbg_date->body ? dbg_date->body : "(null)",
+			dbg_time && dbg_time->body ? dbg_time->body : "(null)",
+			st.counter);
+#endif
 	StrBuilder out;
 	sb_init(&out);
 	int index = 0;
@@ -1237,5 +1460,7 @@ char *chance_preprocess_source(const char *path, const char *src, int len, int *
 		free_macro(&st.macros[i]);
 	free(st.macros);
 	free(st.conds);
+	if (st.module_name)
+		free(st.module_name);
 	return result;
 }

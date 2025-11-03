@@ -300,6 +300,44 @@ expose fun main() -> i32
     assert(FEATURE_SENTINEL == 30, "#elif branch selection works");
     assert(UNDEF_CHECK_VALUE == 456, "#undef clears definitions for guards");
 
+    assert(__CHANCE__ == 1, "__CHANCE__ builtin defined");
+    assert(__CHANCE_VERSION_MAJOR__ == 0, "major version under 1");
+    assert(__CHANCE_VERSION_MINOR__ >= 6, "minor version reflects progress");
+    assert(__CHANCE_VERSION_PATCH__ >= 1, "patch version set");
+    assert(__CHANCE_VERSION__ == (__CHANCE_VERSION_MAJOR__ * 10000 + __CHANCE_VERSION_MINOR__ * 100 + __CHANCE_VERSION_PATCH__), "aggregate version matches components");
+    assert(strcmp(__CHANCE_VERSION_STR__, "0.6.1") == 0, "string version matches 0.6.1");
+    assert(__POINTER_WIDTH__ == (sizeof(void*) * 8), "__POINTER_WIDTH__ matches sizeof(void*)");
+    if (sizeof(void*) == 8)
+    {
+        assert(__IS64BIT__ == 1, "__IS64BIT__ reflects 64-bit");
+    }
+    else
+    {
+        assert(__IS64BIT__ == 0, "__IS64BIT__ reflects non-64-bit");
+    }
+#ifdef __WIN32__
+    assert(__WIN32__ == 1, "__WIN32__ macro active");
+#else
+    assert(__LINUX__ == 1, "__LINUX__ macro active");
+#endif
+
+    string file_macro = __FILE__;
+    assert(file_macro[0] != 0, "__FILE__ yields non-empty value");
+    string module_macro = __MODULE__;
+    assert(strcmp(module_macro, "Test.Program") == 0, "__MODULE__ matches module name");
+    i32 line_macro = __LINE__;
+    assert(line_macro > 0, "__LINE__ yields positive value");
+    string date_macro = __DATE__;
+    assert(date_macro[0] != 0, "__DATE__ yields non-empty value");
+    string time_macro = __TIME__;
+    assert(time_macro[0] != 0, "__TIME__ yields non-empty value");
+    i32 counter_a = __COUNTER__;
+    i32 counter_b = __COUNTER__;
+    assert(counter_b == counter_a + 1, "__COUNTER__ increments sequentially");
+    // the blood of your enemies will be your sustenance
+    printf("File: %s, Module: %s, Line: %d, Date: %s, Time: %s, Counter A: %d, Counter B: %d\n",
+        "fileee", "mrrrow", 22, "meow", "mrrp", 1, 2);
+
     ret final_sum; // expect 168
 }
 
