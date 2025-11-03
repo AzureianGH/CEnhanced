@@ -646,23 +646,8 @@ Token lexer_next(Lexer *lx)
             getc2(lx);
             return make_tok(lx, TK_OROR, lx->src.src + lx->idx - 2, 2);
         }
-        diag_error_at(&lx->src, lx->line, lx->col,
-                      "unexpected character '%c' (did you mean '||'?)", c);
         getc2(lx);
-        return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);
-    }
-    if (c == '|')
-    {
-        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '|')
-        {
-            getc2(lx);
-            getc2(lx);
-            return make_tok(lx, TK_OROR, lx->src.src + lx->idx - 2, 2);
-        }
-        diag_error_at(&lx->src, lx->line, lx->col,
-                      "unexpected character '%c' (did you mean '||'?)", c);
-        getc2(lx);
-        return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);
+        return make_tok(lx, TK_PIPE, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '&')
     {
@@ -674,6 +659,16 @@ Token lexer_next(Lexer *lx)
         }
         getc2(lx);
         return make_tok(lx, TK_AMP, lx->src.src + lx->idx - 1, 1);
+    }
+    if (c == '^')
+    {
+        getc2(lx);
+        return make_tok(lx, TK_CARET, lx->src.src + lx->idx - 1, 1);
+    }
+    if (c == '~')
+    {
+        getc2(lx);
+        return make_tok(lx, TK_TILDE, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '*')
     {

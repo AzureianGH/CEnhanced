@@ -235,6 +235,31 @@ expose fun main() -> i32
     i32 final_sum = (vari.testVar as i32) + (another.smallValue as i32);
     assert(final_sum == 168, "final return value equals 168");
 
+    // & test
+    i32 and_val = 0b1100 & 0b1010;
+    assert(and_val == 0b1000, "Bitwise AND works");
+
+    // | test
+    i32 or_val = 0b1100 | 0b1010;
+    assert(or_val == 0b1110, "Bitwise OR works");
+
+    // ^ test
+    i32 xor_val = 0b1100 ^ 0b1010;
+    assert(xor_val == 0b0110, "Bitwise XOR works");
+
+    // ~ test
+    i32 not_val = ~0b00001111;
+    assert(not_val == -16, "Bitwise NOT works");
+
+    u16 random_number = 12345;
+
+    // Print out each bit of random_number
+    for (i32 i = 15; i >= 0; i = i - 1)
+    {
+        u16 bit = (random_number >> i) & 1;
+        printf("%d", bit);
+    }
+
     ret final_sum; // expect 168
 }
 

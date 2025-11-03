@@ -147,6 +147,8 @@ typedef struct
     bool is_address_only;
     bool is_param;
     int index;
+    int scope_depth;
+    bool is_active;
 } CcbLocal;
 
 typedef struct
@@ -161,6 +163,7 @@ typedef struct
     size_t param_count;
     size_t local_count;
     int next_label_id;
+    int scope_depth;
 } CcbFunctionBuilder;
 
 static CCValueType map_type_to_cc(const Type *ty);
@@ -356,6 +359,7 @@ static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, co
     fb->param_count = 0;
     fb->local_count = 0;
     fb->next_label_id = 0;
+    fb->scope_depth = 0;
 }
 
 static void ccb_function_builder_free(CcbFunctionBuilder *fb)
@@ -807,10 +811,15 @@ static CcbLocal *ccb_local_lookup(CcbFunctionBuilder *fb, const char *name)
 {
     if (!fb || !name)
         return NULL;
-    for (size_t i = 0; i < fb->locals_count; ++i)
+    for (size_t i = fb->locals_count; i-- > 0;)
     {
-        if (fb->locals[i].name && strcmp(fb->locals[i].name, name) == 0)
-            return &fb->locals[i];
+        CcbLocal *local = &fb->locals[i];
+        if (!local->name || !local->is_active)
+            continue;
+        if (local->scope_depth > fb->scope_depth)
+            continue;
+        if (strcmp(local->name, name) == 0)
+            return local;
     }
     return NULL;
 }
@@ -836,11 +845,57 @@ static CcbLocal *ccb_local_add(CcbFunctionBuilder *fb, const char *name, Type *t
     slot->is_address_only = address_only;
     slot->is_param = is_param;
     slot->index = is_param ? (int)fb->param_count : (int)fb->local_count;
+    slot->scope_depth = fb->scope_depth;
+    slot->is_active = true;
     if (is_param)
         fb->param_count++;
     else
         fb->local_count++;
     return slot;
+}
+
+static bool ccb_local_in_current_scope(CcbFunctionBuilder *fb, const char *name)
+{
+    if (!fb || !name)
+        return false;
+    for (size_t i = fb->locals_count; i-- > 0;)
+    {
+        CcbLocal *local = &fb->locals[i];
+        if (!local->name || !local->is_active)
+            continue;
+        if (local->scope_depth != fb->scope_depth)
+            continue;
+        if (strcmp(local->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static void ccb_scope_enter(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+    fb->scope_depth++;
+}
+
+static void ccb_scope_leave(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+    int depth = fb->scope_depth;
+    if (depth <= 0)
+        return;
+    for (size_t i = fb->locals_count; i-- > 0;)
+    {
+        CcbLocal *local = &fb->locals[i];
+        if (!local->is_active)
+            continue;
+        if (local->is_param)
+            continue;
+        if (local->scope_depth == depth)
+            local->is_active = false;
+    }
+    fb->scope_depth = depth - 1;
 }
 
 static void ccb_make_label(CcbFunctionBuilder *fb, char *buffer, size_t bufsz, const char *prefix)
@@ -890,6 +945,28 @@ static CCValueType ccb_type_for_expr(const Node *expr)
     default:
         return CC_TYPE_I32;
     }
+}
+
+static int ccb_emit_block(CcbFunctionBuilder *fb, const Node *block, bool push_scope)
+{
+    if (!fb || !block)
+        return 1;
+    if (block->kind != ND_BLOCK)
+        return ccb_emit_stmt_basic(fb, block);
+    if (push_scope)
+        ccb_scope_enter(fb);
+    for (int i = 0; i < block->stmt_count; ++i)
+    {
+        if (ccb_emit_stmt_basic(fb, block->stmts[i]))
+        {
+            if (push_scope)
+                ccb_scope_leave(fb);
+            return 1;
+        }
+    }
+    if (push_scope)
+        ccb_scope_leave(fb);
+    return 0;
 }
 
 static bool ccb_format_type_list(const CCValueType *types, size_t count, char **out_text)
@@ -2364,6 +2441,29 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         return 0;
     }
+    case ND_BITNOT:
+    {
+        if (!expr->lhs)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "bitwise '~' missing operand");
+            return 1;
+        }
+
+        CCValueType operand_ty = ccb_type_for_expr(expr->lhs);
+        if (operand_ty == CC_TYPE_INVALID || !ccb_value_type_is_integer(operand_ty))
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "unsupported operand type for bitwise '~'");
+            return 1;
+        }
+
+        if (ccb_emit_expr_basic(fb, expr->lhs))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  unop bitnot %s", cc_type_name(operand_ty)))
+            return 1;
+        return 0;
+    }
     case ND_SUB:
     {
         if (!expr->lhs || !expr->rhs)
@@ -2400,6 +2500,28 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         CCValueType ty = map_type_to_cc(expr->type ? expr->type : lhs_type);
         if (!string_list_appendf(&fb->body, "  binop sub %s", cc_type_name(ty)))
+            return 1;
+        return 0;
+    }
+    case ND_BITAND:
+    case ND_BITOR:
+    case ND_BITXOR:
+    {
+        if (ccb_emit_expr_basic(fb, expr->lhs))
+            return 1;
+        if (ccb_emit_expr_basic(fb, expr->rhs))
+            return 1;
+        CCValueType ty = map_type_to_cc(expr->type ? expr->type : (expr->lhs ? expr->lhs->type : NULL));
+        if (ty == CC_TYPE_INVALID)
+            ty = ccb_type_for_expr(expr);
+        if (ty == CC_TYPE_INVALID || !ccb_value_type_is_integer(ty))
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "bitwise operator requires integer operands");
+            return 1;
+        }
+        const char *op = (expr->kind == ND_BITAND) ? "and" : (expr->kind == ND_BITOR) ? "or" : "xor";
+        if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(ty)))
             return 1;
         return 0;
     }
@@ -3453,12 +3575,7 @@ static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
         }
         return 0;
     case ND_BLOCK:
-        for (int i = 0; i < stmt->stmt_count; ++i)
-        {
-            if (ccb_emit_stmt_basic(fb, stmt->stmts[i]))
-                return 1;
-        }
-        return 0;
+        return ccb_emit_block(fb, stmt, true);
     case ND_EXPR_STMT:
         if (stmt->lhs)
         {
@@ -3569,7 +3686,7 @@ static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
                           "local declaration missing name");
             return 1;
         }
-        if (ccb_local_lookup(fb, stmt->var_name))
+        if (ccb_local_in_current_scope(fb, stmt->var_name))
         {
             diag_error_at(stmt->src, stmt->line, stmt->col,
                           "duplicate local '%s'", stmt->var_name);
@@ -3938,7 +4055,11 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
     ccb_function_builder_init(&fb, mod, fn);
     ccb_function_builder_register_params(&fb);
 
-    int rc = ccb_emit_stmt_basic(&fb, fn->body);
+    int rc;
+    if (fn->body && fn->body->kind == ND_BLOCK)
+        rc = ccb_emit_block(&fb, fn->body, false);
+    else
+        rc = ccb_emit_stmt_basic(&fb, fn->body);
     if (!rc)
         ccb_function_optimize(&fb, opts);
     if (!rc)

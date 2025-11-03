@@ -172,6 +172,14 @@ const char *node_kind_name(NodeKind kind)
         return "shift-left expression";
     case ND_SHR:
         return "shift-right expression";
+    case ND_BITAND:
+        return "bitwise AND expression";
+    case ND_BITOR:
+        return "bitwise OR expression";
+    case ND_BITXOR:
+        return "bitwise XOR expression";
+    case ND_BITNOT:
+        return "bitwise NOT expression";
     default:
         return "unknown expression";
     }

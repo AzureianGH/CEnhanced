@@ -1838,6 +1838,17 @@ static Node *parse_unary(Parser *ps)
         ix->src = lexer_source(ps->lx);
         return ix;
     }
+    if (p.kind == TK_TILDE)
+    {
+        lexer_next(ps->lx);
+        Node *operand = parse_unary(ps);
+        Node *n = new_node(ND_BITNOT);
+        n->lhs = operand;
+        n->line = p.line;
+        n->col = p.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     return parse_postfix(ps);
 }
 
@@ -1993,16 +2004,88 @@ static Node *parse_eq(Parser *ps)
     return lhs;
 }
 
-static Node *parse_and(Parser *ps)
+static Node *parse_bitand(Parser *ps)
 {
     Node *lhs = parse_eq(ps);
+    for (;;)
+    {
+        Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_AMP)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_eq(ps);
+            Node *n = new_node(ND_BITAND);
+            n->lhs = lhs;
+            n->rhs = rhs;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
+        break;
+    }
+    return lhs;
+}
+
+static Node *parse_bitxor(Parser *ps)
+{
+    Node *lhs = parse_bitand(ps);
+    for (;;)
+    {
+        Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_CARET)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_bitand(ps);
+            Node *n = new_node(ND_BITXOR);
+            n->lhs = lhs;
+            n->rhs = rhs;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
+        break;
+    }
+    return lhs;
+}
+
+static Node *parse_bitor(Parser *ps)
+{
+    Node *lhs = parse_bitxor(ps);
+    for (;;)
+    {
+        Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_PIPE)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_bitxor(ps);
+            Node *n = new_node(ND_BITOR);
+            n->lhs = lhs;
+            n->rhs = rhs;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
+        break;
+    }
+    return lhs;
+}
+
+static Node *parse_and(Parser *ps)
+{
+    Node *lhs = parse_bitor(ps);
     for (;;)
     {
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_ANDAND)
         {
             Token op = lexer_next(ps->lx);
-            Node *rhs = parse_eq(ps);
+            Node *rhs = parse_bitor(ps);
             Node *n = new_node(ND_LAND);
             n->lhs = lhs;
             n->rhs = rhs;

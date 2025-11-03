@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <stdint.h>
 static Type *canonicalize_type_deep(Type *ty)
 {
     ty = module_registry_canonical_type(ty);
@@ -884,24 +885,119 @@ static int64_t type_int_max(Type *t)
     }
 }
 
-static int literal_fits_type(Type *target, const Node *rhs)
+static int type_bit_width(Type *t)
 {
-    if (!target || !rhs)
+    t = canonicalize_type_deep(t);
+    if (!t)
         return 0;
-    if (rhs->kind != ND_INT)
-        return 0;
-    if (!type_is_int(target))
-        return 0;
-    int64_t v = rhs->int_val;
-    if (type_is_unsigned_int(target))
+    switch (t->kind)
     {
-        if (v < 0)
-            return 0;
-        return (uint64_t)v <= (uint64_t)type_int_max(target);
+    case TY_BOOL:
+        return 1;
+    case TY_I8:
+    case TY_U8:
+    case TY_CHAR:
+        return 8;
+    case TY_I16:
+    case TY_U16:
+        return 16;
+    case TY_I32:
+    case TY_U32:
+        return 32;
+    case TY_I64:
+    case TY_U64:
+        return 64;
+    default:
+        return 0;
     }
-    if (type_is_signed_int(target))
-        return v >= type_int_min(target) && v <= type_int_max(target);
-    return 0;
+}
+
+static int coerce_int_literal_to_type(Node *literal, Type *target, const char *context)
+{
+    if (!literal || !target)
+        return 0;
+    if (literal->kind != ND_INT)
+        return 0;
+
+    Type *canon_target = canonicalize_type_deep(target);
+    if (!type_is_int(canon_target))
+        return 0;
+
+    int64_t original = literal->int_val;
+    int64_t coerced = original;
+    int warn = 0;
+
+    int64_t min = type_is_unsigned_int(canon_target) ? 0 : type_int_min(canon_target);
+    int64_t max = type_int_max(canon_target);
+
+    if (type_is_unsigned_int(canon_target))
+    {
+        if (original < 0 || (uint64_t)original > (uint64_t)max)
+            warn = 1;
+    }
+    else if (type_is_signed_int(canon_target))
+    {
+        if (original < min || original > max)
+            warn = 1;
+    }
+
+    int bits = type_bit_width(canon_target);
+    if ((warn || literal->type != canon_target) && bits > 0 && bits < 64)
+    {
+        uint64_t mask = (1ULL << bits) - 1ULL;
+        uint64_t truncated = ((uint64_t)original) & mask;
+        if (type_is_unsigned_int(canon_target))
+        {
+            coerced = (int64_t)truncated;
+        }
+        else
+        {
+            uint64_t sign_bit = 1ULL << (bits - 1);
+            if (truncated & sign_bit)
+                truncated |= ~mask;
+            coerced = (int64_t)truncated;
+        }
+    }
+    else if (warn)
+    {
+        if (type_is_unsigned_int(canon_target))
+        {
+            if (original < 0)
+                coerced = 0;
+            else if (original > max)
+                coerced = max;
+        }
+        else
+        {
+            if (original < min)
+                coerced = min;
+            else if (original > max)
+                coerced = max;
+        }
+    }
+
+    literal->int_val = coerced;
+    literal->type = canon_target;
+
+    if (warn)
+    {
+        char ty_name[64];
+        describe_type(canon_target, ty_name, sizeof(ty_name));
+        if (context && *context)
+        {
+            diag_warning_at(literal->src, literal->line, literal->col,
+                            "integer literal %lld does not fit in %s; value converted for %s",
+                            (long long)original, ty_name, context);
+        }
+        else
+        {
+            diag_warning_at(literal->src, literal->line, literal->col,
+                            "integer literal %lld does not fit in %s; value converted",
+                            (long long)original, ty_name);
+        }
+    }
+
+    return 1;
 }
 
 static int can_assign(Type *target, Node *rhs)
@@ -916,11 +1012,8 @@ static int can_assign(Type *target, Node *rhs)
     }
     if (rhs->type && type_equal(target, rhs->type))
         return 1;
-    if (literal_fits_type(target, rhs))
-    {
-        rhs->type = target;
+    if (coerce_int_literal_to_type(rhs, target, "assignment"))
         return 1;
-    }
     return 0;
 }
 
@@ -1071,13 +1164,13 @@ static void scope_pop(SemaContext *sc)
 }
 static int scope_find(SemaContext *sc, const char *name)
 {
-    for (struct Scope *s = sc->scope; s; s = s->parent)
+    if (!sc || !sc->scope)
+        return 0;
+    struct Scope *s = sc->scope;
+    for (int i = 0; i < s->local_count; i++)
     {
-        for (int i = 0; i < s->local_count; i++)
-        {
-            if (strcmp(s->locals[i].name, name) == 0)
-                return 1;
-        }
+        if (strcmp(s->locals[i].name, name) == 0)
+            return 1;
     }
     return 0;
 }
@@ -1488,9 +1581,16 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         if (!type_equal(lhs_type, rhs_type))
         {
-            diag_error_at(e->src, e->line, e->col,
-                          "'+' requires both operands to have the same type");
-            exit(1);
+            if (type_is_int(rhs_type) && coerce_int_literal_to_type(e->lhs, rhs_type, "+"))
+                lhs_type = canonicalize_type_deep(e->lhs->type);
+            if (!type_equal(lhs_type, rhs_type) && type_is_int(lhs_type) && coerce_int_literal_to_type(e->rhs, lhs_type, "+"))
+                rhs_type = canonicalize_type_deep(e->rhs->type);
+            if (!type_equal(lhs_type, rhs_type))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "'+' requires both operands to have the same type");
+                exit(1);
+            }
         }
         e->type = lhs_type;
         return;
@@ -1529,9 +1629,16 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         if (!type_equal(lhs_type, rhs_type))
         {
-            diag_error_at(e->src, e->line, e->col,
-                          "'-' requires both operands to have the same type");
-            exit(1);
+            if (type_is_int(rhs_type) && coerce_int_literal_to_type(e->lhs, rhs_type, "-"))
+                lhs_type = canonicalize_type_deep(e->lhs->type);
+            if (!type_equal(lhs_type, rhs_type) && type_is_int(lhs_type) && coerce_int_literal_to_type(e->rhs, lhs_type, "-"))
+                rhs_type = canonicalize_type_deep(e->rhs->type);
+            if (!type_equal(lhs_type, rhs_type))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "'-' requires both operands to have the same type");
+                exit(1);
+            }
         }
         e->type = lhs_type;
         return;
@@ -1556,12 +1663,23 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!type_equal(e->lhs->type, e->rhs->type))
+        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
+        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        if (!type_equal(lhs_type, rhs_type))
         {
-            diag_error_at(e->src, e->line, e->col,
-                          "'%s' requires both operands to have the same type",
-                          e->kind == ND_MUL ? "*" : "/");
-            exit(1);
+            const char *op = (e->kind == ND_MUL) ? "*" : "/";
+            if (type_is_int(rhs_type) && coerce_int_literal_to_type(e->lhs, rhs_type, op))
+                lhs_type = canonicalize_type_deep(e->lhs->type);
+            if (!type_equal(lhs_type, rhs_type) && type_is_int(lhs_type) && coerce_int_literal_to_type(e->rhs, lhs_type, op))
+                rhs_type = canonicalize_type_deep(e->rhs->type);
+            if (!type_equal(lhs_type, rhs_type))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "'%s' requires both operands to have the same type", op);
+                exit(1);
+            }
         }
         int lhs_is_int = type_is_int(e->lhs->type);
         int lhs_is_float = type_is_float(e->lhs->type);
@@ -1587,6 +1705,57 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         // Result type is the type of the left operand
         e->type = e->lhs->type;
+        return;
+    }
+    if (e->kind == ND_BITAND || e->kind == ND_BITOR || e->kind == ND_BITXOR)
+    {
+        check_expr(sc, e->lhs);
+        check_expr(sc, e->rhs);
+        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
+        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        const char *op_symbol = (e->kind == ND_BITAND) ? "&" : (e->kind == ND_BITOR) ? "|" : "^";
+        if (!type_is_int(lhs_type) || !type_is_int(rhs_type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "'%s' requires integer operands", op_symbol);
+            exit(1);
+        }
+        if (!type_equal(lhs_type, rhs_type))
+        {
+            if (type_is_int(rhs_type) && coerce_int_literal_to_type(e->lhs, rhs_type, op_symbol))
+                lhs_type = canonicalize_type_deep(e->lhs->type);
+            if (!type_equal(lhs_type, rhs_type) && type_is_int(lhs_type) && coerce_int_literal_to_type(e->rhs, lhs_type, op_symbol))
+                rhs_type = canonicalize_type_deep(e->rhs->type);
+        }
+        if (!type_equal(lhs_type, rhs_type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "'%s' requires both operands to have the same type", op_symbol);
+            exit(1);
+        }
+        e->type = lhs_type;
+        return;
+    }
+    if (e->kind == ND_BITNOT)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "bitwise '~' requires an operand");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        Type *operand_type = canonicalize_type_deep(e->lhs->type);
+        e->lhs->type = operand_type;
+        if (!type_is_int(operand_type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "bitwise '~' requires integer operand");
+            exit(1);
+        }
+        e->type = operand_type;
         return;
     }
     if (e->kind == ND_GT_EXPR || e->kind == ND_LT || e->kind == ND_LE || e->kind == ND_GE)

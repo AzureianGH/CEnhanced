@@ -76,6 +76,9 @@ typedef enum
     TK_ANDAND,     // &&
     TK_OROR,       // ||
     TK_AMP,        // &
+    TK_PIPE,       // |
+    TK_CARET,      // ^
+    TK_TILDE,      // ~
     TK_STAR,       // *
     TK_SLASH,      // /
     TK_MINUS,      // -
@@ -200,6 +203,10 @@ typedef enum
     ND_INIT_LIST, // brace initializer
     ND_SHL,      // <<
     ND_SHR,      // >>
+    ND_BITAND,   // &
+    ND_BITOR,    // |
+    ND_BITXOR,   // ^
+    ND_BITNOT,   // ~
 } NodeKind;
 
 const char *node_kind_name(NodeKind kind);
