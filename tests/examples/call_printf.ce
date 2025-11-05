@@ -359,11 +359,7 @@ expose fun main() -> i32
     i32 counter_b = __COUNTER__;
     assert(counter_b == counter_a + 1, "__COUNTER__ increments sequentially");
     assert(strcmp(__FUNCTION__, "main") == 0, "__FUNCTION__ matches main");
-    // the blood of your enemies will be your sustenance
-    printf("File: %s, Module: %s, Function: %s, Line: %d, Date: %s, Time: %s, Counter A: %d, Counter B: %d\n",
-        __FILE__, __MODULE__, __FUNCTION__, __LINE__, __DATE__, __TIME__, __COUNTER__, __COUNTER__);
-
-    
+    assert(strcmp("hello" + "world", "helloworld") == 0, "constant string merging");
     
     ret final_sum; // expect 168
 }

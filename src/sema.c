@@ -1564,6 +1564,35 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
+
+        if (e->lhs && e->rhs && e->lhs->kind == ND_STRING && e->rhs->kind == ND_STRING)
+        {
+            size_t lhs_len = (size_t)(e->lhs->str_len >= 0 ? e->lhs->str_len : 0);
+            size_t rhs_len = (size_t)(e->rhs->str_len >= 0 ? e->rhs->str_len : 0);
+            size_t total = lhs_len + rhs_len;
+            char *merged = (char *)xmalloc(total + 1);
+            if (lhs_len > 0 && e->lhs->str_data)
+                memcpy(merged, e->lhs->str_data, lhs_len);
+            if (rhs_len > 0 && e->rhs->str_data)
+                memcpy(merged + lhs_len, e->rhs->str_data, rhs_len);
+            merged[total] = '\0';
+
+            Node *lhs_old = e->lhs;
+            Node *rhs_old = e->rhs;
+
+            e->kind = ND_STRING;
+            e->lhs = NULL;
+            e->rhs = NULL;
+            e->str_data = merged;
+            e->str_len = (int)total;
+            static Type char_ptr = {.kind = TY_PTR, .pointee = &ty_char};
+            e->type = &char_ptr;
+
+            ast_free(lhs_old);
+            ast_free(rhs_old);
+            return;
+        }
+
         Type *lhs_type = canonicalize_type_deep(e->lhs->type);
         Type *rhs_type = canonicalize_type_deep(e->rhs->type);
         e->lhs->type = lhs_type;
