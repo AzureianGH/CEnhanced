@@ -366,6 +366,17 @@ expose fun main() -> i32
     ret final_sum; // expect 168
 }
 
+hide fun test_varargs(i32 count, ...) -> i32
+{
+    i32 total = 0;
+    for (i32 i = 0; i < count; i = i + 1)
+    {
+        i32 val = va_arg(i32);
+        total = total + val;
+    }
+    ret total;
+}
+
 hide fun construct_thing() -> TC.SmallTest
 {
     TC.SmallTest thing = {};
