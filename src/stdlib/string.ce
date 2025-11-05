@@ -58,7 +58,7 @@ expose fun strchr(char* str, char ch) -> char*
     {
         if (str[idx] == ch)
         {
-            ret &str[idx];
+            ret (&str[idx]) as char*;
         }
         idx++;
     }
@@ -82,7 +82,7 @@ expose fun strstr(char* haystack, char* needle) -> char*
         }
         if (j == nlen)
         {
-            ret &haystack[i];
+            ret (&haystack[i]) as char*;
         }
     }
     ret 0 as char*;

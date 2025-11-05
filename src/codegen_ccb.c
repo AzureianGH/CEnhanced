@@ -1832,10 +1832,13 @@ static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
         elem_type = base_type->pointee;
 
     CCValueType elem_cc_ty = map_type_to_cc(elem_type);
-    if (elem_type && elem_type->kind == TY_STRUCT) {
+    if (elem_type && elem_type->kind == TY_STRUCT)
+    {
         // Struct: use struct type
         // (leave elem_cc_ty as mapped)
-    } else if (elem_cc_ty == CC_TYPE_INVALID || elem_cc_ty == CC_TYPE_VOID) {
+    }
+    else if (elem_cc_ty == CC_TYPE_INVALID || elem_cc_ty == CC_TYPE_VOID)
+    {
         elem_cc_ty = CC_TYPE_I32;
     }
 
@@ -2520,7 +2523,8 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
                           "bitwise operator requires integer operands");
             return 1;
         }
-        const char *op = (expr->kind == ND_BITAND) ? "and" : (expr->kind == ND_BITOR) ? "or" : "xor";
+        const char *op = (expr->kind == ND_BITAND) ? "and" : (expr->kind == ND_BITOR) ? "or"
+                                                                                      : "xor";
         if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(ty)))
             return 1;
         return 0;
@@ -4136,7 +4140,7 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         else
         {
             if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu", backend_name,
-                                     cc_type_name(fb.ret_type), fb.param_count, fb.local_count))
+                                    cc_type_name(fb.ret_type), fb.param_count, fb.local_count))
                 rc = 1;
         }
 

@@ -151,8 +151,7 @@ expose fun main() -> i32
     // "Hello, CHance! Number: 42\n" is 26 characters
     assert(printed == 26, "printwrapper printed length");
 
-    string function_macro = __FUNCTION__;
-    assert(strcmp(function_macro, "main") == 0, "__FUNCTION__ matches main");
+    
     // null-terminate the string safely
     string str = buf as string;
     if (len > 0)
@@ -359,6 +358,7 @@ expose fun main() -> i32
     i32 counter_a = __COUNTER__;
     i32 counter_b = __COUNTER__;
     assert(counter_b == counter_a + 1, "__COUNTER__ increments sequentially");
+    assert(strcmp(__FUNCTION__, "main") == 0, "__FUNCTION__ matches main");
     // the blood of your enemies will be your sustenance
     printf("File: %s, Module: %s, Function: %s, Line: %d, Date: %s, Time: %s, Counter A: %d, Counter B: %d\n",
         __FILE__, __MODULE__, __FUNCTION__, __LINE__, __DATE__, __TIME__, __COUNTER__, __COUNTER__);
