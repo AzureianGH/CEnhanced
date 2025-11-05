@@ -83,50 +83,6 @@ static int try_form_path(char *dst, size_t dstsz, const char *base_dir,
     return 0;
 }
 
-static int is_space_only_prefix(const char *line)
-{
-    while (*line == ' ' || *line == '\t')
-        line++;
-    return *line == '#';
-}
-
-char *chance_strip_preprocessor_lines(const char *src, int len, int *out_len)
-{
-    const char *p = src;
-    const char *end = src + len;
-    size_t cap = (size_t)len + 1;
-    char *out = (char *)xmalloc(cap);
-    size_t oi = 0;
-    while (p < end)
-    {
-        const char *line = p;
-        while (p < end && *p != '\n')
-            p++;
-        const char *nl = p < end ? p + 1 : p;
-        int strip = is_space_only_prefix(line);
-        if (!strip)
-        {
-            size_t L = (size_t)(p - line);
-            if (oi + L + 1 > cap)
-            {
-                cap = cap * 2 + L + 16;
-                out = (char *)realloc(out, cap);
-            }
-            memcpy(out + oi, line, L);
-            oi += L;
-            if (p < end)
-            {
-                out[oi++] = '\n';
-            }
-        }
-        p = nl;
-    }
-    out[oi] = '\0';
-    if (out_len)
-        *out_len = (int)oi;
-    return out;
-}
-
 // Very naive C prototype scanner: handles lines like 'extern int puts(const
 // char*);' or 'int printf(const char*, ...);'
 static void scan_header_for_prototypes(const char *buf, int len,
@@ -176,6 +132,7 @@ static void scan_header_for_prototypes(const char *buf, int len,
                     Symbol s = (Symbol){0};
                     s.kind = SYM_FUNC;
                     s.name = nm;
+                    s.backend_name = s.name;
                     s.is_extern = 1;
                     s.abi = "C";
                     static Type ti32 = {.kind = TY_I32};

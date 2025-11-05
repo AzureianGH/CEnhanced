@@ -1,4 +1,59 @@
-#include "test.h"
+module Test.Program;
+
+bring Test.Chance as TC;
+bring LibTest as LT;
+bring LibTest.Another;
+
+#define WARN_MSG "diag warning triggered"
+#define NOTE_MSG "diag note triggered"
+#define ASSERT_OK 1
+
+#note NOTE_MSG
+#warn WARN_MSG
+#static_assert(ASSERT_OK, "static assert should pass")
+#static_assert(1)
+
+#if 0
+
+#define ERROR_MSG "forced preprocessing error"
+
+#error ERROR_MSG
+
+#define FAIL_COND 0
+#define FAIL_MSG "failing static assertion"
+
+#static_assert(FAIL_COND, FAIL_MSG)
+#endif
+
+#define TEST_DEFINE 99
+#define MACRO_SUM(a, b) ((a) + (b))
+#define MACRO_SQUARE(x) ((x) * (x))
+
+#define SHOULD_BE_UNDEF 123
+#undef SHOULD_BE_UNDEF
+
+#ifdef SHOULD_BE_UNDEF
+#define UNDEF_CHECK_VALUE -1
+#else
+#define UNDEF_CHECK_VALUE 456
+#endif
+
+#if defined(TEST_DEFINE) && TEST_DEFINE == 99
+#define CONDITIONAL_VALUE 99
+#else
+#define CONDITIONAL_VALUE -1
+#endif
+
+#define FEATURE_LEVEL 3
+#if FEATURE_LEVEL > 3
+#define FEATURE_SENTINEL 10
+#elif FEATURE_LEVEL == 3
+#define FEATURE_SENTINEL 30
+#else
+#define FEATURE_SENTINEL -10
+#endif
+
+bring Std as Std;
 
 extend from "C" i32 printf(char *, _vaargs_);
 extend from "C" i32 write(int, char *, int);
@@ -8,48 +63,82 @@ extend from "C" void free(void *);
 extend from "C" void exit(int);
 extend from "C" int test();
 
+hide i32 total_test_count = 0;
+
 extend fun test_chance() -> i32;
 
-alias string = char*;
-alias ptr<T> = T*;
+hide alias string = char*;
+hide alias ptr<T> = T*;
 
-fun printwrapper() -> i32
+hide fun printwrapper() -> i32
 {
+    string fn_name = __FUNCTION__;
+    assert(strcmp(fn_name, "printwrapper") == 0, "__FUNCTION__ matches printwrapper");
     ret printf("Hello, %s! Number: %d\n", "CHance", 42);
 }
 
-enum Element
+expose enum Element
 {
     ElementPart, // Auto 0
     ElementPart2, // Auto 1
     SetElement = 3 // 3
 };
 
-struct AnElement
+expose struct AnElement
 {
     Element internalElement;
     Element* ptrToElement;
 };
 
-struct OtherElement
+expose struct OtherElement
 {
     i32 part;
     char* str;
     u64 bignumber;
-    AnElement thisthing;
+    AnElement thisthing; // Will error because AnElement is hidden and cannot be used in an exposed struct
     AnElement* ptrToSmth;
 };
 
-struct SmallTest
-{
-    i32 testVar;
-    u8 smallValue;
-};
+OtherElement globalElement = {}; // auto hide members
 
-fun main() -> i32
+
+hide fun assert(bool condition, string message) -> void
+{
+    if (condition)
+    {
+        printf("TEST PASSED: %s\n", message);
+    }
+    else
+    {
+        printf("TEST FAIL: %s\n", message);
+        abort();
+    }
+    ret;
+}
+
+[EntryPoint]
+expose fun main() -> i32
 {
     // allocate 128 bytes for input
-    ptr<void> buf = malloc(128);
+    ptr<void> buf = null;
+    
+    buf = Std.Memory.alloc(128);
+
+    assert(buf != null, "\"buf\" allocation");
+
+    Std.Memory.memset(buf, 0, 128);
+
+    bool all_zero = true;
+
+    for (i32 i = 0; i < 128; i = i + 1)
+    {
+        if ((buf as u8*)[i] != 0)
+        {
+            all_zero = false;
+        }
+    }
+
+    assert(all_zero, "memset to zero");
 
     // prompt the user
     write(1, "What's your name? > ", 20);
@@ -59,8 +148,10 @@ fun main() -> i32
 
     // test printwrapper result
     i32 printed = printwrapper();
-    printf("Read %d bytes (printwrapper printed %d chars)\n", len, printed);
+    // "Hello, CHance! Number: 42\n" is 26 characters
+    assert(printed == 26, "printwrapper printed length");
 
+    
     // null-terminate the string safely
     string str = buf as string;
     if (len > 0)
@@ -74,79 +165,216 @@ fun main() -> i32
         str[0] = 0;
     }
 
-    // print greeting
-    printf("Hello, %s!\n", str);
-
-    printf("String length: %d\n", strlen(str));
+    // basic string length sanity check
+    assert(Std.String.strlen(str) == len, "strlen matches bytes read");
 
     string cmp_target = "CHance";
 
+    // If user actually entered secret name, assert success; otherwise assert not equal.
     if (strcmp(str, cmp_target) == 0)
     {
-        printf("You entered the secret name!\n");
+        assert(true, "User entered the secret name");
     }
     else
     {
-        printf("You did not enter the secret name.\n");
+        assert(true, "User did not enter the secret name (not required for tests)");
     }
 
     printf("Freeing memory...\n");
-    free(buf);
+    Std.Memory.dealloc(buf as void*);
 
     // Test overflow behavior
     i16 of = test_overflow();
-    printf("Overflow test result (should be -25536): %d\n", of);
+    printf("test_overflow result: %d\n", of);
+    assert(of == -25536, "test_overflow result is -25536");
 
-    printf("Calling test_chance(): %d\n", test_chance());
+    // Test multiplication overflow
+    u8 mul_of = test_mul_overflow();
+    assert(mul_of == 64, "test_mul_overflow result is 64");
+
+    // Arithmetic and function tests
+    i32 mul = 6 * 7;
+    assert(mul == 42, "6 * 7 == 42");
+
+    i32 div = 20 / -4;
+    assert(div == -5, "20 / -4 == -5");
+
+    assert((0xFF as i32) == 255, "0xFF == 255");
+
+    printf("Calling test_chance(): %d\n", TC.test_chance());
 
     printf("Calling extended C function test(): %d\n", test());
 
-    printf("Multiplication test: 6 * 7 = %d\n", 6 * 7);
-
-    printf("Multiplication overflow test (200 * 200 = 64): %d\n", test_mul_overflow());
-
-    printf("Test hex output: %d in hex is %x\n", 0xFF, 0xFF);
-
-    SmallTest vari = {};
+    TC.SmallTest vari = {};
     vari.smallValue = 3;
     vari.testVar = 44;
     
-    SmallTest another = {
+    TC.SmallTest another = {
         .smallValue = 123,
         .testVar = 333 
     };
 
-    SmallTest* test = &vari;
+    TC.SmallTest* test = &vari;
 
-    Element elem = SetElement;
+    TC.SmallTest deref = *test;
+
+    assert(deref.testVar == 44, "deref.testVar == 44");
+
+    i32 testint = 123;
+    i32* testintp = &testint;
+    i32** testintpp = &testintp;
+    assert(testintpp[0][0] == 123, "double pointer deref == 123");
+
+    TC.SmallTest* addptr = Std.Memory.alloc(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
+    addptr[0] = construct_thing();
+    addptr[1] = another;
+
+    assert(addptr[0].smallValue == 5, "addptr[0].smallValue == 5");
+    assert(addptr[1].smallValue == 123, "addptr[1].smallValue == 123");
+
+    Std.Memory.dealloc(addptr as void*);
+
+    i32* testintptr = test as i32*;
+    printf("testVar via intptr: %p\n", testintptr);
+
+    Element elem = Element.SetElement;
 
     test=>testVar = 45;
 
-    if (test=>testVar == 45 || another.smallValue == 3)
-    {
-        printf("Logical OR worked!\n");
-    }
+    assert(test=>testVar == 45, "setter/getter via => works");
 
     i32 a = 1 << 1;
-    printf("1 << 1 = %d\n", a); // expect 2
+    assert(a == 2, "1 << 1 == 2");
 
     i32 b = 4 >> 1;
-    printf("4 >> 1 = %d\n", b); // expect 2
+    assert(b == 2, "4 >> 1 == 2");
 
-    printf("typeof() = %s with sizeof() = %d\n", typeof(SmallTest), sizeof(SmallTest));
+    printf("typeof() = %s with sizeof() = %d\n", typeof(TC.SmallTest), sizeof(TC.SmallTest));
 
-    ret ((vari.testVar as i32) + (another.smallValue as i32)); // expect 45 + 123 = 168
+    [MetadataCall("differentsig")]();
+
+    test_idk();
+
+    assert(rawthing(10) == 466, "rawthing(10) == 466");
+
+    printf("Result from LibTest: %d\n", LT.test_fun(41));
+
+    printf("Result from LibTest.Another: %d\n", LibTest.Another.other_test_fun(50)); // Will be 60
+
+    f32 floatval = 3.14f;
+    f64 doubleval = 1.23456789;
+    f32* floatptr = &floatval;
+    floatptr[0] = 6.28f;
+    i32 ac = 4;
+
+    // Validate simple var values
+    assert(ac == 4, "ac == 4");
+    assert(floatptr[0] == 6.28f, "floatptr[0] == 6.28f");
+    assert(doubleval == 1.23456789, "doubleval == 1.23456789");
+    printf("Expect addition of doubleval + floatval = %lf\n", (doubleval + (floatval as f64)) as f64);
+    f64 sum = doubleval + (floatval as f64);
+    f64 diff = sum - 7.514568;
+    if (diff < 0.0) diff = -diff;
+    assert(diff < 1e-6, "doubleval + floatval ~= 7.514568");
+    assert(((vari.testVar as i32) + (another.smallValue as i32)) == 168, "Sum of vari.testVar and another.smallValue == 168");
+
+    f128 bigfloat = 0.1234567 as f128;
+    f64 floathing = 0.1;
+    f32 floathing2 = 0.1f;
+    assert((floathing == 0.1 && floathing2 == 0.1f && bigfloat == 0.1234567 as f128), "f128, f64, f32 assignments");
+
+    // Validate final return value
+    i32 final_sum = (vari.testVar as i32) + (another.smallValue as i32);
+    assert(final_sum == 168, "final return value equals 168");
+
+    // & test
+    i32 and_val = 0b1100 & 0b1010;
+    assert(and_val == 0b1000, "Bitwise AND works");
+
+    // | test
+    i32 or_val = 0b1100 | 0b1010;
+    assert(or_val == 0b1110, "Bitwise OR works");
+
+    // ^ test
+    i32 xor_val = 0b1100 ^ 0b1010;
+    assert(xor_val == 0b0110, "Bitwise XOR works");
+
+    // ~ test
+    i32 not_val = ~0b00001111;
+    assert(not_val == -16, "Bitwise NOT works");
+
+    u16 random_number = 12345;
+
+    char* chkarray = Std.Memory.alloc(17) as char*;
+    Std.Memory.memset(chkarray as void*, 0, 17);
+
+    // Print out each bit of random_number
+    for (i32 i = 15; i >= 0; i = i - 1)
+    {
+        u16 bit = (random_number >> i) & 1;
+        chkarray[15 - i] = if (bit == 1) '1' else '0';
+    }
+
+    assert(strcmp(chkarray, "0011000000111001") == 0, "Bitwise representation of 12345 is correct");
+
+    assert(TEST_DEFINE == 99, "object-like macro expands to literal");
+    assert(MACRO_SUM(20, 22) == 42, "function-style macro expansion works");
+    assert(MACRO_SQUARE(5) == 25, "macro arguments stay parenthesized");
+    assert(CONDITIONAL_VALUE == 99, "#if/#else branch selection works");
+    assert(FEATURE_SENTINEL == 30, "#elif branch selection works");
+    assert(UNDEF_CHECK_VALUE == 456, "#undef clears definitions for guards");
+
+    assert(__CHANCE__ == 1, "__CHANCE__ builtin defined");
+    assert(__CHANCE_VERSION_MAJOR__ == 0, "major version under 1");
+    assert(__CHANCE_VERSION_MINOR__ >= 6, "minor version reflects progress");
+    assert(__CHANCE_VERSION_PATCH__ >= 1, "patch version set");
+    assert(__CHANCE_VERSION__ == (__CHANCE_VERSION_MAJOR__ * 10000 + __CHANCE_VERSION_MINOR__ * 100 + __CHANCE_VERSION_PATCH__), "aggregate version matches components");
+    assert(strcmp(__CHANCE_VERSION_STR__, "0.6.1") == 0, "string version matches 0.6.1");
+    assert(__POINTER_WIDTH__ == (sizeof(void*) * 8), "__POINTER_WIDTH__ matches sizeof(void*)");
+    if (sizeof(void*) == 8)
+    {
+        assert(__IS64BIT__ == 1, "__IS64BIT__ reflects 64-bit");
+    }
+    else
+    {
+        assert(__IS64BIT__ == 0, "__IS64BIT__ reflects non-64-bit");
+    }
+#ifdef __WIN32__
+    assert(__WIN32__ == 1, "__WIN32__ macro active");
+#else
+    assert(__LINUX__ == 1, "__LINUX__ macro active");
+#endif
+
+    string file_macro = __FILE__;
+    assert(file_macro[0] != 0, "__FILE__ yields non-empty value");
+    string module_macro = __MODULE__;
+    assert(strcmp(module_macro, "Test.Program") == 0, "__MODULE__ matches module name");
+    i32 line_macro = __LINE__;
+    assert(line_macro > 0, "__LINE__ yields positive value");
+    string date_macro = __DATE__;
+    assert(date_macro[0] != 0, "__DATE__ yields non-empty value");
+    string time_macro = __TIME__;
+    assert(time_macro[0] != 0, "__TIME__ yields non-empty value");
+    i32 counter_a = __COUNTER__;
+    i32 counter_b = __COUNTER__;
+    assert(counter_b == counter_a + 1, "__COUNTER__ increments sequentially");
+    assert(strcmp(__FUNCTION__, "main") == 0, "__FUNCTION__ matches main");
+    assert(strcmp("hello" + "world", "helloworld") == 0, "constant string merging");
+
+    printf(LibTest.Another.get_info());
+    
+    ret final_sum; // expect 168
 }
 
-fun construct_thing() -> SmallTest
+hide fun construct_thing() -> TC.SmallTest
 {
-    SmallTest thing = {};
+    TC.SmallTest thing = {};
     thing.smallValue = 5;
     thing.testVar = 10;
     ret thing;
 }
 
-fun strlen(string strg) -> i32
+hide fun strlen(string strg) -> i32
 {
     i32 len = 0;
     while (strg[len])
@@ -156,7 +384,7 @@ fun strlen(string strg) -> i32
     ret len;
 }
 
-fun strcmp(string a, string b) -> i32
+hide fun strcmp(string a, string b) -> i32
 {
     i32 i = 0;
     while (a[i] && b[i])
@@ -170,22 +398,38 @@ fun strcmp(string a, string b) -> i32
     ret a[i] - b[i];
 }
 
-fun abort() -> void
+hide fun abort() -> void
 {
     exit(1);
     ret;
 }
 
-fun test_overflow() -> i16
+expose fun test_overflow() -> i16
 {
     i16 x = 30000;
     i16 y = 10000;
     ret x + y; // expect overflow to -25536
 }
 
-fun test_mul_overflow() -> u8
+hide fun test_mul_overflow() -> u8
 {
     u8 a = 200;
     u8 b = 200;
     ret a * b; // expect overflow to 64 (200*200=40000 -> 40000 % 256 = 64)
+}
+
+[OverrideMetadata(".func differentsig ret=void params=0 locals=0")]
+hide fun test_idk() -> void
+{
+    printf("Hello from sigfunction!\n");
+    ret;
+}
+
+[ChanceCode]
+fun rawthing(i32 a) -> i32
+{
+    const i32 456;
+    load_param 0;
+    binop add i32;
+    ret;
 }

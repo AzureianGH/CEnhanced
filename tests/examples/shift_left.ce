@@ -1,3 +1,0 @@
-fun main() -> int {
-  ret 21 << 1;
-}

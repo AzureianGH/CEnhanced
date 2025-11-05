@@ -49,13 +49,19 @@ void ast_free(Node *n)
 // --- Simple type helpers (keep minimal for now) ---
 static Type TY_I32_SINGLETON = {.kind = TY_I32};
 static Type TY_I64_SINGLETON = {.kind = TY_I64};
+static Type TY_F32_SINGLETON = {.kind = TY_F32};
+static Type TY_F64_SINGLETON = {.kind = TY_F64};
 static Type TY_VOID_SINGLETON = {.kind = TY_VOID};
 static Type TY_CHAR_SINGLETON = {.kind = TY_CHAR};
+static Type TY_BOOL_SINGLETON = {.kind = TY_BOOL};
 
 Type *type_i32(void) { return &TY_I32_SINGLETON; }
 Type *type_i64(void) { return &TY_I64_SINGLETON; }
+Type *type_f32(void) { return &TY_F32_SINGLETON; }
+Type *type_f64(void) { return &TY_F64_SINGLETON; }
 Type *type_void(void) { return &TY_VOID_SINGLETON; }
 Type *type_char(void) { return &TY_CHAR_SINGLETON; }
+Type *type_bool(void) { return &TY_BOOL_SINGLETON; }
 
 Type *type_ptr(Type *to)
 {
@@ -76,6 +82,107 @@ int type_equals(Type *a, Type *b)
     if (a->kind == TY_PTR)
         return type_equals(a->pointee, b->pointee);
     return 1;
+}
+
+const char *node_kind_name(NodeKind kind)
+{
+    switch (kind)
+    {
+    case ND_INT:
+        return "integer literal";
+    case ND_FLOAT:
+        return "floating-point literal";
+    case ND_ADD:
+        return "addition expression";
+    case ND_MUL:
+        return "multiplication expression";
+    case ND_DIV:
+        return "division expression";
+    case ND_RET:
+        return "return statement";
+    case ND_FUNC:
+        return "function";
+    case ND_STRING:
+        return "string literal";
+    case ND_NULL:
+        return "null literal";
+    case ND_CALL:
+        return "function call";
+    case ND_BLOCK:
+        return "block";
+    case ND_VAR_DECL:
+        return "variable declaration";
+    case ND_ASSIGN:
+        return "assignment";
+    case ND_IF:
+        return "if statement";
+    case ND_INDEX:
+        return "index expression";
+    case ND_CAST:
+        return "cast expression";
+    case ND_GT_EXPR:
+        return "> comparison";
+    case ND_LT:
+        return "< comparison";
+    case ND_LE:
+        return "<= comparison";
+    case ND_GE:
+        return ">= comparison";
+    case ND_SUB:
+        return "subtraction expression";
+    case ND_NEG:
+        return "negation expression";
+    case ND_WHILE:
+        return "while statement";
+    case ND_EXPR_STMT:
+        return "expression statement";
+    case ND_VAR:
+        return "variable reference";
+    case ND_UNIT:
+        return "translation unit";
+    case ND_PREINC:
+        return "pre-increment";
+    case ND_PREDEC:
+        return "pre-decrement";
+    case ND_POSTINC:
+        return "post-increment";
+    case ND_POSTDEC:
+        return "post-decrement";
+    case ND_ADDR:
+        return "address-of expression";
+    case ND_LAND:
+        return "logical AND";
+    case ND_LOR:
+        return "logical OR";
+    case ND_SIZEOF:
+        return "sizeof expression";
+    case ND_TYPEOF:
+        return "typeof expression";
+    case ND_EQ:
+        return "equality comparison";
+    case ND_NE:
+        return "inequality comparison";
+    case ND_COND:
+        return "conditional expression";
+    case ND_MEMBER:
+        return "member access";
+    case ND_INIT_LIST:
+        return "initializer list";
+    case ND_SHL:
+        return "shift-left expression";
+    case ND_SHR:
+        return "shift-right expression";
+    case ND_BITAND:
+        return "bitwise AND expression";
+    case ND_BITOR:
+        return "bitwise OR expression";
+    case ND_BITXOR:
+        return "bitwise XOR expression";
+    case ND_BITNOT:
+        return "bitwise NOT expression";
+    default:
+        return "unknown expression";
+    }
 }
 
 // ---------------- Diagnostics -----------------

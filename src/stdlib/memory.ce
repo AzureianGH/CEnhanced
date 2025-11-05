@@ -1,0 +1,158 @@
+module Std.Memory;
+
+extend from "C" void* malloc(i32 size);
+extend from "C" void free(void* ptr);
+
+expose fun memcpy(void* dest, void* src, i32 n) -> void*
+{
+    i32 idx = 0;
+    u8* d = dest as u8*;
+    u8* s = src as u8*;
+    while (idx < n)
+    {
+        d[idx] = s[idx];
+        idx++;
+    }
+    ret dest;
+}
+
+expose fun memset(void* ptr, u8 value, i32 n) -> void*
+{
+    i32 idx = 0;
+    u8* p = ptr as u8*;
+    while (idx < n)
+    {
+        p[idx] = value;
+        idx++;
+    }
+    ret ptr;
+}
+
+expose fun memcmp(void* ptr1, void* ptr2, i32 n) -> i32
+{
+    i32 idx = 0;
+    u8* p1 = ptr1 as u8*;
+    u8* p2 = ptr2 as u8*;
+    while (idx < n)
+    {
+        if (p1[idx] != p2[idx])
+        {
+            ret (p1[idx] as i32) - (p2[idx] as i32);
+        }
+        idx++;
+    }
+    ret 0;
+}
+
+expose fun memmove(void* dest, void* src, i32 n) -> void*
+{
+    u8* d = dest as u8*;
+    u8* s = src as u8*;
+    if (d < s)
+    {
+        i32 idx = 0;
+        while (idx < n)
+        {
+            d[idx] = s[idx];
+            idx++;
+        }
+    }
+    else if (d > s)
+    {
+        i32 nidx = n - 1;
+        while (nidx >= 0)
+        {
+            d[nidx] = s[nidx];
+            nidx--;
+        }
+    }
+    ret dest;
+}
+
+expose fun memchr(void* ptr, u8 value, i32 n) -> void*
+{
+    i32 idx = 0;
+    u8* p = ptr as u8*;
+    while (idx < n)
+    {
+        if (p[idx] == value)
+        {
+            ret (&p[idx]) as void*;
+        }
+        idx++;
+    }
+    ret 0 as void*;
+}
+
+expose fun memrchr(void* ptr, u8 value, i32 n) -> void*
+{
+    i32 idx = n - 1;
+    u8* p = ptr as u8*;
+    while (idx >= 0)
+    {
+        if (p[idx] == value)
+        {
+            ret (&p[idx]) as void*;
+        }
+        idx--;
+    }
+    ret 0 as void*;
+}
+
+expose fun bzero(void* ptr, i32 n) -> void*
+{
+    ret memset(ptr, 0, n);
+}
+
+expose fun bcopy(void* src, void* dest, i32 n) -> void*
+{
+    ret memmove(dest, src, n);
+}
+
+expose fun alloc(i32 size) -> void*
+{
+    ret malloc(size);
+}
+
+expose fun dealloc(void* ptr) -> void
+{
+    free(ptr);
+}
+
+expose fun realloc(void* ptr, i32 new_size) -> void*
+{
+    void* new_ptr = malloc(new_size);
+    if (new_ptr == 0 as void*)
+    {
+        ret 0 as void*;
+    }
+    memmove(new_ptr, ptr, new_size); // Assume caller knows what they're doing (rare chance)
+    free(ptr);
+    ret new_ptr;
+}
+
+expose fun cleanalloc(i32 num, i32 size) -> void*
+{
+    i32 total_size = num * size;
+    void* ptr = malloc(total_size);
+    if (ptr == 0 as void*)
+    {
+        ret 0 as void*;
+    }
+    memset(ptr, 0, total_size);
+    ret ptr;
+}
+
+expose fun swap(void* ptr1, void* ptr2, i32 size) -> void
+{
+    u8* p1 = ptr1 as u8*;
+    u8* p2 = ptr2 as u8*;
+    i32 idx = 0;
+    while (idx < size)
+    {
+        u8 temp = p1[idx];
+        p1[idx] = p2[idx];
+        p2[idx] = temp;
+        idx++;
+    }
+}

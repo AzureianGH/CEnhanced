@@ -1,0 +1,20 @@
+module LibTest;
+
+expose struct TestStruct
+{
+    i32 a;
+    u8 b;
+};
+
+expose fun test_fun(i32 num) -> i32
+{
+    ret num + 1;
+}
+
+expose fun other_fun() -> TestStruct
+{
+    TestStruct ts;
+    ts.a = 10;
+    ts.b = 20;
+    ret ts;
+}

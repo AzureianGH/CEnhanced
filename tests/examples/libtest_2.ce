@@ -1,0 +1,11 @@
+module LibTest.Another;
+
+expose fun other_test_fun(i32 num) -> i32
+{
+    ret num + 10;
+}
+
+expose fun get_info() -> char*
+{
+    ret (__MODULE__ + "::" + __FUNCTION__ + "()");
+}

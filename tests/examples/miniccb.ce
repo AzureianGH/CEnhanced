@@ -1,0 +1,16 @@
+module Program;
+
+bring LibTest as LT;
+
+extend from "C" i32 printf(char *, _vaargs_);
+extend from "C" void *malloc(int);
+
+
+[EntryPoint]
+expose fun main() -> i32
+{
+    printf("Result from LibTest: %d\n", LT.test_fun(41)); // Should print 42
+    LT.TestStruct ts = LT.other_fun();
+    printf("Result from LibTest struct %d\n", ts.a + (ts.b as i32)); // Should print 62
+    ret 0;
+}

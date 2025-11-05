@@ -46,6 +46,7 @@ typedef enum
     TK_KW_CONSTANT,
     TK_KW_VOID,
     TK_KW_CHAR,
+    TK_KW_BOOL,
     TK_KW_IF,
     TK_KW_ELSE,
     TK_KW_WHILE,
@@ -54,6 +55,12 @@ typedef enum
     TK_KW_AS,
     TK_KW_SIZEOF,
     TK_KW_TYPEOF,
+    TK_KW_NULL,
+    TK_KW_NORETURN,
+    TK_KW_MODULE,
+    TK_KW_BRING,
+    TK_KW_HIDE,
+    TK_KW_EXPOSE,
     // punctuation
     TK_ARROW,      // ->
     TK_LPAREN,     // (
@@ -69,6 +76,9 @@ typedef enum
     TK_ANDAND,     // &&
     TK_OROR,       // ||
     TK_AMP,        // &
+    TK_PIPE,       // |
+    TK_CARET,      // ^
+    TK_TILDE,      // ~
     TK_STAR,       // *
     TK_SLASH,      // /
     TK_MINUS,      // -
@@ -86,6 +96,7 @@ typedef enum
     TK_COLON,      // :
     TK_ACCESS,     // =>
     TK_DOT,        // .
+    TK_FLOAT,      // floating-point literal
 } TokenKind;
 
 typedef struct
@@ -94,6 +105,8 @@ typedef struct
     const char *lexeme; // pointer into buffer
     int length;
     int64_t int_val;
+    double float_val;
+    int float_is_f32;
     int line;
     int col;
 } Token;
@@ -113,8 +126,10 @@ typedef enum
     TY_F128,
     TY_VOID,
     TY_CHAR,
+    TY_BOOL,
     TY_PTR,
     TY_STRUCT,
+    TY_IMPORT,
 } TypeKind;
 
 typedef struct Type
@@ -130,17 +145,31 @@ typedef struct Type
         int field_count;
         int size_bytes;
     } strct;
+    int is_exposed; // visibility flag for module system
+    const char *import_module;
+    const char *import_type_name;
+    struct Type *import_resolved;
 } Type;
+
+typedef struct ModulePath
+{
+    const char **parts;
+    int part_count;
+    const char *full_name;
+    const char *alias;
+} ModulePath;
 
 typedef enum
 {
     ND_INT,
+    ND_FLOAT,
     ND_ADD,
     ND_MUL,
     ND_DIV,
     ND_RET,
     ND_FUNC,
     ND_STRING,
+    ND_NULL,
     ND_CALL,
     ND_BLOCK,
     ND_VAR_DECL,
@@ -153,6 +182,7 @@ typedef enum
     ND_LE,
     ND_GE,
     ND_SUB,
+    ND_NEG,
     ND_WHILE,
     ND_EXPR_STMT,
     ND_VAR,
@@ -173,7 +203,13 @@ typedef enum
     ND_INIT_LIST, // brace initializer
     ND_SHL,      // <<
     ND_SHR,      // >>
+    ND_BITAND,   // &
+    ND_BITOR,    // |
+    ND_BITXOR,   // ^
+    ND_BITNOT,   // ~
 } NodeKind;
+
+const char *node_kind_name(NodeKind kind);
 
 typedef struct
 {
@@ -188,6 +224,7 @@ typedef struct Node
     struct Node *lhs;
     struct Node *rhs;
     int64_t int_val; // for ND_INT
+    double float_val; // for ND_FLOAT
     // Source location for diagnostics
     int line;
     int col;
@@ -202,6 +239,25 @@ typedef struct Node
     Type **param_types;
     const char **param_names;
     int param_count;
+    int is_chancecode;
+    struct
+    {
+        char **lines;
+        int count;
+    } chancecode;
+    // Metadata overrides for backend emission
+    struct
+    {
+        char *func_line;          // overrides .func line when non-null
+        char *params_line;        // overrides .params line when non-null
+        char *locals_line;        // overrides .locals line when non-null
+        char *backend_name;       // alternate symbol name in generated code
+        char **param_type_names;  // parsed tokens from .params override
+        int param_type_count;     // number of parameter tokens from override
+        int declared_param_count; // parsed from .func params= value, or -1 when unspecified
+        int declared_local_count; // parsed from .func locals= value, or -1 when unspecified
+        char *ret_token;          // parsed from .func ret= value, if provided
+    } metadata;
     // For ND_STRING
     const char *str_data;
     int str_len;
@@ -213,11 +269,14 @@ typedef struct Node
     const char *var_name;
     Type *var_type;
     int var_is_const; // for ND_VAR_DECL
+    int var_is_global; // set on declarations/references that live at global scope
     // For ND_BLOCK
     struct Node **stmts;
     int stmt_count;
     // For ND_VAR reference
     const char *var_ref;
+    int is_noreturn;
+    int is_entrypoint;
     // For ND_MEMBER
     const char *field_name;
     int field_index;
@@ -231,6 +290,12 @@ typedef struct Node
         int count;
         int is_zero; // for {} or {0} special cases
     } init;
+    // Module metadata (only valid for ND_UNIT)
+    ModulePath module_path;
+    ModulePath *imports;
+    int import_count;
+    // Declaration visibility flag (used for ND_FUNC and other decl nodes)
+    int is_exposed;
 } Node;
 
 typedef struct Lexer Lexer;
@@ -238,6 +303,7 @@ Lexer *lexer_create(SourceBuffer src);
 void lexer_destroy(Lexer *lx);
 Token lexer_next(Lexer *lx);
 Token lexer_peek(Lexer *lx);
+Token lexer_peek_n(Lexer *lx, int n);
 // Accessor for diagnostics: returns the source buffer associated with this
 // lexer
 const SourceBuffer *lexer_source(Lexer *lx);
@@ -253,17 +319,21 @@ Node *parse_unit(Parser *ps);
 // definition below
 typedef struct SymTable SymTable;
 void parser_export_externs(Parser *ps, SymTable *st);
+const struct Symbol *parser_get_externs(const Parser *ps, int *count);
 
 // Utilities
 void ast_free(Node *n);
 Type *type_i32(void);
 Type *type_i64(void);
+Type *type_f32(void);
+Type *type_f64(void);
 Type *type_void(void);
 Type *type_char(void);
+Type *type_bool(void);
 Type *type_ptr(Type *to);
 int type_equals(Type *a, Type *b);
 
-// Codegen to x64 COFF/PE: returns 0 on success
+// Codegen options when emitting ChanceCode bytecode (.ccb)
 typedef enum
 {
     ASM_INTEL = 0,
@@ -277,21 +347,26 @@ typedef enum
     OS_LINUX = 1
 } TargetOS;
 
+struct Symbol;
+
 typedef struct
 {
     bool freestanding;
     bool m32;
-    bool emit_asm;           // for -S
-    bool no_link;            // don't link; assemble to object only
-    AsmSyntax asm_syntax;    // intel (GAS noprefix), att (GAS AT&T), nasm
-    const char *output_path; // .exe path
-    const char *obj_output_path; // optional: explicit object output path (if null, use output_path)
-    // Target OS/ABI
+    bool emit_asm;           // for -S (produces .S from chancecodec)
+    bool no_link;            // don't link; emit .ccb only
+    AsmSyntax asm_syntax;    // desired assembly flavor when translating via chancecodec
+    const char *output_path; // Final executable (when linking) or output module path
+    const char *obj_output_path; // Optional: explicit intermediate object path
+    const char *ccb_output_path; // Optional: explicit .ccb output path override
     TargetOS os;
+    const struct Symbol *externs;
+    int extern_count;
+    int opt_level;
 } CodegenOptions;
 
-int codegen_coff_x64_write_exe(const Node *unit, const CodegenOptions *opts);
-int codegen_pe_x64_write_exe_const(int32_t retval, const CodegenOptions *opts);
+int codegen_ccb_write_module(const Node *unit, const CodegenOptions *opts);
+int codegen_ccb_resolve_module_path(const CodegenOptions *opts, char *buffer, size_t bufsz);
 
 // tiny utility functions
 void *xmalloc(size_t sz);
@@ -316,7 +391,8 @@ void diag_reset(void);
 // Semantic analysis (type checking) and symbols
 typedef enum
 {
-    SYM_FUNC
+    SYM_FUNC,
+    SYM_GLOBAL
 } SymKind;
 typedef struct FuncSig
 {
@@ -329,9 +405,13 @@ typedef struct Symbol
 {
     SymKind kind;
     const char *name;
+    const char *backend_name;
     int is_extern;   // 1 if extern (extend from "C")
     const char *abi; // e.g., "C"
     FuncSig sig;
+    int is_noreturn;
+    Type *var_type;  // valid when kind == SYM_GLOBAL
+    int is_const;    // valid when kind == SYM_GLOBAL
 } Symbol;
 
 typedef struct SymTable SymTable;
@@ -345,11 +425,13 @@ typedef struct
 {
     SymTable *syms;
     struct Scope *scope;
+    const struct Node *unit;
 } SemaContext;
 
 SemaContext *sema_create(void);
 void sema_destroy(SemaContext *sc);
 // returns 0 on success, non-zero on error (prints diagnostics)
 int sema_check_unit(SemaContext *sc, Node *unit);
+void sema_register_foreign_unit_symbols(SemaContext *sc, Node *unit);
 
 #endif // CHANCE_AST_H

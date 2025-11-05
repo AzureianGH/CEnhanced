@@ -15,8 +15,4 @@ int chance_process_includes_and_scan(const char *source_path,
                                      char **include_dirs, int dir_count,
                                      SymTable *syms);
 
-// Produce a copy of source with lines that start with optional spaces then '#'
-// removed. Caller must free the returned buffer.
-char *chance_strip_preprocessor_lines(const char *src, int len, int *out_len);
-
 #endif

@@ -1,8 +1,21 @@
 #include "ast.h"
+#include "module_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <limits.h>
+#include <stdint.h>
+static Type *canonicalize_type_deep(Type *ty)
+{
+    ty = module_registry_canonical_type(ty);
+    if (ty && ty->kind == TY_PTR && ty->pointee)
+    {
+        Type *resolved = canonicalize_type_deep(ty->pointee);
+        if (resolved && resolved != ty->pointee)
+            ty->pointee = resolved;
+    }
+    return ty;
+}
 
 struct SymTable
 {
@@ -71,6 +84,7 @@ SemaContext *sema_create(void)
 {
     SemaContext *sc = (SemaContext *)xcalloc(1, sizeof(SemaContext));
     sc->syms = symtab_create();
+    sc->unit = NULL;
     return sc;
 }
 void sema_destroy(SemaContext *sc)
@@ -94,15 +108,352 @@ static Type ty_f64 = {.kind = TY_F64};
 static Type ty_f128 = {.kind = TY_F128};
 static Type ty_void = {.kind = TY_VOID};
 static Type ty_char = {.kind = TY_CHAR};
+static Type ty_bool = {.kind = TY_BOOL};
+
+static Type *metadata_token_to_type(const char *token)
+{
+    if (!token)
+        return NULL;
+    if (strcmp(token, "i1") == 0 || strcmp(token, "bool") == 0)
+        return &ty_bool;
+    if (strcmp(token, "i8") == 0)
+        return &ty_i8;
+    if (strcmp(token, "u8") == 0)
+        return &ty_u8;
+    if (strcmp(token, "i16") == 0)
+        return &ty_i16;
+    if (strcmp(token, "u16") == 0)
+        return &ty_u16;
+    if (strcmp(token, "i32") == 0)
+        return &ty_i32;
+    if (strcmp(token, "u32") == 0)
+        return &ty_u32;
+    if (strcmp(token, "i64") == 0)
+        return &ty_i64;
+    if (strcmp(token, "u64") == 0)
+        return &ty_u64;
+    if (strcmp(token, "f32") == 0)
+        return &ty_f32;
+    if (strcmp(token, "f64") == 0)
+        return &ty_f64;
+    if (strcmp(token, "f128") == 0)
+        return &ty_f128;
+    if (strcmp(token, "void") == 0)
+        return &ty_void;
+    if (strcmp(token, "char") == 0)
+        return &ty_char;
+    return NULL;
+}
+
+static char *make_qualified_name(const ModulePath *mod, const char *name)
+{
+    if (!mod || mod->part_count == 0 || !mod->full_name || !name || !*name)
+        return NULL;
+    size_t base_len = strlen(mod->full_name);
+    size_t name_len = strlen(name);
+    char *res = (char *)xmalloc(base_len + 1 + name_len + 1);
+    memcpy(res, mod->full_name, base_len);
+    res[base_len] = '.';
+    memcpy(res + base_len + 1, name, name_len);
+    res[base_len + 1 + name_len] = '\0';
+    return res;
+}
+
+static char *module_name_to_prefix(const char *module_full)
+{
+    if (!module_full || !*module_full)
+        return NULL;
+    size_t len = strlen(module_full);
+    char *copy = (char *)xmalloc(len + 1);
+    memcpy(copy, module_full, len + 1);
+    for (size_t i = 0; i < len; ++i)
+    {
+        if (copy[i] == '.')
+            copy[i] = '_';
+    }
+    return copy;
+}
+
+static char *module_backend_name(const char *module_full, const char *fn_name)
+{
+    if (!module_full || !*module_full || !fn_name || !*fn_name)
+        return NULL;
+    char *prefix = module_name_to_prefix(module_full);
+    if (!prefix)
+        return NULL;
+    size_t prefix_len = strlen(prefix);
+    size_t fn_len = strlen(fn_name);
+    char *res = (char *)xmalloc(prefix_len + 1 + fn_len + 1);
+    memcpy(res, prefix, prefix_len);
+    res[prefix_len] = '_';
+    memcpy(res + prefix_len + 1, fn_name, fn_len);
+    res[prefix_len + 1 + fn_len] = '\0';
+    free(prefix);
+    return res;
+}
+
+static char *backend_from_qualified(const char *qualified_name)
+{
+    if (!qualified_name)
+        return NULL;
+    const char *dot = strrchr(qualified_name, '.');
+    if (!dot || dot == qualified_name || *(dot + 1) == '\0')
+        return xstrdup(qualified_name);
+    size_t module_len = (size_t)(dot - qualified_name);
+    char *module = (char *)xmalloc(module_len + 1);
+    memcpy(module, qualified_name, module_len);
+    module[module_len] = '\0';
+    const char *fn = dot + 1;
+    char *backend = module_backend_name(module, fn);
+    free(module);
+    if (!backend)
+        return xstrdup(qualified_name);
+    return backend;
+}
+
+static char *resolve_import_alias(const Node *unit, const char *call_name)
+{
+    if (!unit || unit->kind != ND_UNIT || !call_name)
+        return NULL;
+    const char *dot = strchr(call_name, '.');
+    if (!dot || dot == call_name)
+        return NULL;
+    size_t alias_len = (size_t)(dot - call_name);
+    const char *rest = dot + 1;
+    if (!rest || *rest == '\0')
+        return NULL;
+    if (unit->imports && unit->import_count > 0)
+    {
+        for (int i = 0; i < unit->import_count; ++i)
+        {
+            const ModulePath *imp = &unit->imports[i];
+            if (!imp)
+                continue;
+            if (imp->alias)
+            {
+                size_t alias_name_len = strlen(imp->alias);
+                if (alias_name_len == alias_len && strncmp(imp->alias, call_name, alias_len) == 0)
+                {
+                    size_t full_len = strlen(imp->full_name);
+                    size_t rest_len = strlen(rest);
+                    char *combined = (char *)xmalloc(full_len + 1 + rest_len + 1);
+                    memcpy(combined, imp->full_name, full_len);
+                    combined[full_len] = '.';
+                    memcpy(combined + full_len + 1, rest, rest_len + 1);
+                    return combined;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+static int module_name_matches(const char *full, const char *candidate, size_t len)
+{
+    if (!full || !candidate)
+        return 0;
+    return strlen(full) == len && strncmp(full, candidate, len) == 0;
+}
+
+static int unit_allows_module_call(const Node *unit, const char *qualified_name)
+{
+    if (!unit || unit->kind != ND_UNIT || !qualified_name)
+        return 0;
+    const char *dot = strrchr(qualified_name, '.');
+    if (!dot || dot == qualified_name)
+        return 0;
+    size_t module_len = (size_t)(dot - qualified_name);
+    if (module_name_matches(unit->module_path.full_name, qualified_name, module_len))
+        return 1;
+    if (unit->imports && unit->import_count > 0)
+    {
+        for (int i = 0; i < unit->import_count; ++i)
+        {
+            const ModulePath *imp = &unit->imports[i];
+            if (imp->alias)
+            {
+                size_t alias_len = strlen(imp->alias);
+                if (alias_len == module_len && strncmp(imp->alias, qualified_name, module_len) == 0)
+                    return 1;
+            }
+            if (module_name_matches(imp->full_name, qualified_name, module_len))
+                return 1;
+        }
+    }
+    return 0;
+}
 
 static int type_is_int(Type *t)
 {
-    return t && (t->kind == TY_I8 || t->kind == TY_U8 || t->kind == TY_I16 ||
-                 t->kind == TY_U16 || t->kind == TY_I32 || t->kind == TY_U32 ||
-                 t->kind == TY_I64 || t->kind == TY_U64);
+    t = canonicalize_type_deep(t);
+    if (!t)
+        return 0;
+    switch (t->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+    case TY_I16:
+    case TY_U16:
+    case TY_I32:
+    case TY_U32:
+    case TY_I64:
+    case TY_U64:
+    case TY_CHAR:
+    case TY_BOOL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int type_is_builtin(const Type *t)
+{
+    if (!t)
+        return 1;
+    switch (t->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+    case TY_I16:
+    case TY_U16:
+    case TY_I32:
+    case TY_U32:
+    case TY_I64:
+    case TY_U64:
+    case TY_F32:
+    case TY_F64:
+    case TY_F128:
+    case TY_VOID:
+    case TY_CHAR:
+    case TY_BOOL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static void describe_type(const Type *t, char *buf, size_t bufsz)
+{
+    if (!buf || bufsz == 0)
+        return;
+    if (!t)
+    {
+        snprintf(buf, bufsz, "i32");
+        return;
+    }
+    switch (t->kind)
+    {
+    case TY_I8:
+        snprintf(buf, bufsz, "i8");
+        return;
+    case TY_U8:
+        snprintf(buf, bufsz, "u8");
+        return;
+    case TY_I16:
+        snprintf(buf, bufsz, "i16");
+        return;
+    case TY_U16:
+        snprintf(buf, bufsz, "u16");
+        return;
+    case TY_I32:
+        snprintf(buf, bufsz, "i32");
+        return;
+    case TY_U32:
+        snprintf(buf, bufsz, "u32");
+        return;
+    case TY_I64:
+        snprintf(buf, bufsz, "i64");
+        return;
+    case TY_U64:
+        snprintf(buf, bufsz, "u64");
+        return;
+    case TY_F32:
+        snprintf(buf, bufsz, "f32");
+        return;
+    case TY_F64:
+        snprintf(buf, bufsz, "f64");
+        return;
+    case TY_F128:
+        snprintf(buf, bufsz, "f128");
+        return;
+    case TY_VOID:
+        snprintf(buf, bufsz, "void");
+        return;
+    case TY_CHAR:
+        snprintf(buf, bufsz, "char");
+        return;
+    case TY_BOOL:
+        snprintf(buf, bufsz, "bool");
+        return;
+    case TY_PTR:
+        if (!t->pointee)
+        {
+            snprintf(buf, bufsz, "ptr");
+            return;
+        }
+        else
+        {
+            char inner[128];
+            describe_type(t->pointee, inner, sizeof(inner));
+            snprintf(buf, bufsz, "ptr to %s", inner);
+            return;
+        }
+    case TY_STRUCT:
+        snprintf(buf, bufsz, "struct %s", t->struct_name ? t->struct_name : "<anonymous>");
+        return;
+    default:
+        snprintf(buf, bufsz, "type kind %d", t->kind);
+        return;
+    }
+}
+
+static int type_is_exportable(const Type *t)
+{
+    if (!t)
+        return 1;
+    if (type_is_builtin(t))
+        return 1;
+    if (t->kind == TY_PTR)
+        return 1;
+    if (t->kind == TY_STRUCT)
+        return t->is_exposed != 0;
+    return 1;
+}
+
+static int check_exposed_function_signature(const Node *fn)
+{
+    if (!fn || fn->kind != ND_FUNC || !fn->is_exposed)
+        return 0;
+    Type *ret_type = fn->ret_type ? fn->ret_type : &ty_i32;
+    if (!type_is_exportable(ret_type))
+    {
+        char buf[128];
+        describe_type(ret_type, buf, sizeof(buf));
+        diag_error_at(fn->src, fn->line, fn->col,
+                      "exposed function '%s' cannot return hidden type '%s'",
+                      fn->name ? fn->name : "<unnamed>", buf);
+        return 1;
+    }
+    for (int i = 0; i < fn->param_count; i++)
+    {
+        Type *param_type = fn->param_types ? fn->param_types[i] : NULL;
+        if (!type_is_exportable(param_type))
+        {
+            char buf[128];
+            describe_type(param_type, buf, sizeof(buf));
+            const char *param_name = (fn->param_names && fn->param_names[i]) ? fn->param_names[i] : "<param>";
+            diag_error_at(fn->src, fn->line, fn->col,
+                          "exposed function '%s' parameter '%s' uses hidden type '%s'",
+                          fn->name ? fn->name : "<unnamed>", param_name, buf);
+            return 1;
+        }
+    }
+    return 0;
 }
 static int type_equal(Type *a, Type *b)
 {
+    a = canonicalize_type_deep(a);
+    b = canonicalize_type_deep(b);
     if (a == b)
         return 1;
     if (!a || !b)
@@ -118,6 +469,292 @@ static int type_equal(Type *a, Type *b)
         return a == b;
     }
     return 1;
+}
+
+static void populate_symbol_from_function(Symbol *s, Node *fn)
+{
+    if (!s || !fn || fn->kind != ND_FUNC)
+        return;
+
+    s->kind = SYM_FUNC;
+    s->name = fn->name;
+    s->backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+    s->is_extern = 0;
+    s->abi = "C";
+    s->sig.is_varargs = 0;
+
+    Type *decl_ret = fn->ret_type ? fn->ret_type : &ty_i32;
+    if (fn->metadata.ret_token)
+    {
+        Type *meta_ret = metadata_token_to_type(fn->metadata.ret_token);
+        if (!meta_ret)
+        {
+            meta_ret = decl_ret;
+            diag_warning_at(fn->src, fn->line, fn->col,
+                            "unsupported metadata return type '%s'; using declared return type",
+                            fn->metadata.ret_token);
+        }
+        if (!type_equal(decl_ret, meta_ret))
+        {
+            char decl_buf[64];
+            char meta_buf[64];
+            describe_type(decl_ret, decl_buf, sizeof(decl_buf));
+            describe_type(meta_ret, meta_buf, sizeof(meta_buf));
+            diag_error_at(fn->src, fn->line, fn->col,
+                          "return type mismatch between declaration ('%s') and metadata ('%s')",
+                          decl_buf, meta_buf);
+            exit(1);
+        }
+        s->sig.ret = meta_ret;
+    }
+    else
+    {
+        s->sig.ret = decl_ret;
+    }
+
+    if (fn->metadata.params_line)
+    {
+        int count = fn->metadata.param_type_count;
+        s->sig.param_count = count;
+        if (count > 0)
+        {
+            Type **meta_params = (Type **)xcalloc((size_t)count, sizeof(Type *));
+            for (int i = 0; i < count; ++i)
+            {
+                const char *tok = (fn->metadata.param_type_names && i < count) ? fn->metadata.param_type_names[i] : NULL;
+                Type *meta_ty = metadata_token_to_type(tok);
+                if (!meta_ty)
+                {
+                    if (fn->param_types && i < fn->param_count)
+                        meta_ty = fn->param_types[i];
+                    diag_warning_at(fn->src, fn->line, fn->col,
+                                    "unsupported metadata parameter type '%s'; using declared type for parameter %d",
+                                    tok ? tok : "<null>", i + 1);
+                }
+                if (!meta_ty)
+                {
+                    diag_error_at(fn->src, fn->line, fn->col,
+                                  "unable to determine type for parameter %d", i + 1);
+                    exit(1);
+                }
+                meta_params[i] = meta_ty;
+            }
+            s->sig.params = meta_params;
+        }
+        else
+        {
+            s->sig.params = NULL;
+        }
+    }
+    else
+    {
+        s->sig.param_count = fn->param_count;
+        s->sig.params = fn->param_types;
+    }
+}
+
+static void populate_symbol_from_global(Symbol *s, Node *decl)
+{
+    if (!s || !decl || decl->kind != ND_VAR_DECL)
+        return;
+
+    s->kind = SYM_GLOBAL;
+    s->name = decl->var_name;
+    s->backend_name = (decl->metadata.backend_name && decl->metadata.backend_name[0])
+                          ? decl->metadata.backend_name
+                          : decl->var_name;
+    s->is_extern = 0;
+    s->abi = "C";
+    s->sig.ret = NULL;
+    s->sig.params = NULL;
+    s->sig.param_count = 0;
+    s->sig.is_varargs = 0;
+    s->is_noreturn = 0;
+    s->var_type = decl->var_type;
+    s->is_const = decl->var_is_const;
+}
+
+static void sema_register_function_local(SemaContext *sc, Node *unit_node, Node *fn)
+{
+    if (!sc || !sc->syms || !fn || fn->kind != ND_FUNC)
+        return;
+
+    const char *module_full = NULL;
+    if (unit_node && unit_node->kind == ND_UNIT)
+        module_full = unit_node->module_path.full_name;
+
+    if (module_full && !fn->metadata.backend_name && !fn->is_entrypoint)
+    {
+        char *backend = module_backend_name(module_full, fn->name);
+        if (backend)
+            fn->metadata.backend_name = backend;
+    }
+
+    Symbol s = {0};
+    populate_symbol_from_function(&s, fn);
+    symtab_add(sc->syms, s);
+
+    if (fn->metadata.backend_name && strcmp(fn->metadata.backend_name, fn->name) != 0)
+    {
+        Symbol backend_alias = s;
+        backend_alias.name = fn->metadata.backend_name;
+        backend_alias.backend_name = s.backend_name;
+        symtab_add(sc->syms, backend_alias);
+    }
+
+    if (fn->is_exposed && module_full)
+    {
+        char *qualified = make_qualified_name(&unit_node->module_path, fn->name);
+        if (qualified)
+        {
+            Symbol alias = s;
+            alias.name = qualified;
+            alias.backend_name = s.backend_name;
+            symtab_add(sc->syms, alias);
+        }
+    }
+}
+
+static void sema_register_global_local(SemaContext *sc, Node *unit_node, Node *decl)
+{
+    if (!sc || !sc->syms || !decl || decl->kind != ND_VAR_DECL || !decl->var_is_global)
+        return;
+
+    const char *module_full = NULL;
+    if (unit_node && unit_node->kind == ND_UNIT)
+        module_full = unit_node->module_path.full_name;
+
+    if (module_full && !decl->metadata.backend_name)
+    {
+        char *backend = module_backend_name(module_full, decl->var_name);
+        if (backend)
+            decl->metadata.backend_name = backend;
+    }
+
+    decl->var_type = canonicalize_type_deep(decl->var_type);
+
+    Symbol s = {0};
+    populate_symbol_from_global(&s, decl);
+
+    if (!s.name)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "global variable missing name");
+        exit(1);
+    }
+
+    const Symbol *existing = symtab_get(sc->syms, s.name);
+    if (existing)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "duplicate symbol '%s'", s.name);
+        exit(1);
+    }
+
+    symtab_add(sc->syms, s);
+
+    if (s.backend_name && strcmp(s.backend_name, s.name) != 0)
+    {
+        Symbol alias = s;
+        alias.name = s.backend_name;
+        symtab_add(sc->syms, alias);
+    }
+
+    if (decl->is_exposed && module_full)
+    {
+        char *qualified = make_qualified_name(&unit_node->module_path, decl->var_name);
+        if (qualified)
+        {
+            Symbol alias = s;
+            alias.name = qualified;
+            symtab_add(sc->syms, alias);
+        }
+    }
+}
+
+static void sema_register_function_foreign(SemaContext *sc, const Node *unit_node, Node *fn)
+{
+    if (!sc || !sc->syms || !unit_node || unit_node->kind != ND_UNIT || !fn || fn->kind != ND_FUNC)
+        return;
+    if (!fn->is_exposed)
+        return;
+
+    const char *module_full = unit_node->module_path.full_name;
+    if (!module_full || !*module_full)
+        return;
+
+    if (!fn->metadata.backend_name && !fn->is_entrypoint)
+    {
+        char *backend = module_backend_name(module_full, fn->name);
+        if (backend)
+            fn->metadata.backend_name = backend;
+    }
+
+    Symbol s = {0};
+    populate_symbol_from_function(&s, fn);
+    s.is_extern = 1;
+
+    if (fn->metadata.backend_name && strcmp(fn->metadata.backend_name, fn->name) != 0)
+    {
+        Symbol backend_alias = s;
+        backend_alias.name = fn->metadata.backend_name;
+        backend_alias.backend_name = s.backend_name;
+        symtab_add(sc->syms, backend_alias);
+    }
+
+    char *qualified = make_qualified_name(&unit_node->module_path, fn->name);
+    if (qualified)
+    {
+        Symbol alias = s;
+        alias.name = qualified;
+        alias.backend_name = s.backend_name;
+        symtab_add(sc->syms, alias);
+    }
+}
+
+static void sema_register_global_foreign(SemaContext *sc, const Node *unit_node, Node *decl)
+{
+    if (!sc || !sc->syms || !unit_node || unit_node->kind != ND_UNIT || !decl || decl->kind != ND_VAR_DECL || !decl->var_is_global)
+        return;
+    if (!decl->is_exposed)
+        return;
+
+    const char *module_full = unit_node->module_path.full_name;
+    if (!module_full || !*module_full)
+        return;
+
+    if (!decl->metadata.backend_name)
+    {
+        char *backend = module_backend_name(module_full, decl->var_name);
+        if (backend)
+            decl->metadata.backend_name = backend;
+    }
+
+    decl->var_type = canonicalize_type_deep(decl->var_type);
+
+    Symbol s = {0};
+    populate_symbol_from_global(&s, decl);
+    s.is_extern = 1;
+
+    symtab_add(sc->syms, s);
+
+    if (s.backend_name && strcmp(s.backend_name, s.name) != 0)
+    {
+        Symbol alias = s;
+        alias.name = s.backend_name;
+        symtab_add(sc->syms, alias);
+    }
+
+    if (decl->is_exposed)
+    {
+        char *qualified = make_qualified_name(&unit_node->module_path, decl->var_name);
+        if (qualified)
+        {
+            Symbol alias = s;
+            alias.name = qualified;
+            symtab_add(sc->syms, alias);
+        }
+    }
 }
 
 static int struct_find_field(Type *st, const char *name)
@@ -138,6 +775,7 @@ static void check_expr(SemaContext *sc, Node *e);
 
 static int type_is_signed_int(Type *t)
 {
+    t = canonicalize_type_deep(t);
     if (!t)
         return 0;
     switch (t->kind)
@@ -146,6 +784,7 @@ static int type_is_signed_int(Type *t)
     case TY_I16:
     case TY_I32:
     case TY_I64:
+    case TY_CHAR:
         return 1;
     default:
         return 0;
@@ -154,6 +793,7 @@ static int type_is_signed_int(Type *t)
 
 static int type_is_unsigned_int(Type *t)
 {
+    t = canonicalize_type_deep(t);
     if (!t)
         return 0;
     switch (t->kind)
@@ -162,10 +802,33 @@ static int type_is_unsigned_int(Type *t)
     case TY_U16:
     case TY_U32:
     case TY_U64:
+    case TY_BOOL:
         return 1;
     default:
         return 0;
     }
+}
+
+static int type_is_float(Type *t)
+{
+    t = canonicalize_type_deep(t);
+    if (!t)
+        return 0;
+    switch (t->kind)
+    {
+    case TY_F32:
+    case TY_F64:
+    case TY_F128:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int type_is_pointer(Type *t)
+{
+    t = canonicalize_type_deep(t);
+    return t && t->kind == TY_PTR;
 }
 
 static int64_t type_int_min(Type *t)
@@ -182,6 +845,10 @@ static int64_t type_int_min(Type *t)
         return INT32_MIN;
     case TY_I64:
         return INT64_MIN;
+    case TY_CHAR:
+        return SCHAR_MIN;
+    case TY_BOOL:
+        return 0;
     default:
         return 0;
     }
@@ -203,48 +870,163 @@ static int64_t type_int_max(Type *t)
         return INT64_MAX;
     case TY_U8:
         return UINT8_MAX;
+    case TY_BOOL:
+        return 1;
     case TY_U16:
         return UINT16_MAX;
     case TY_U32:
         return UINT32_MAX;
     case TY_U64:
         return INT64_MAX;
+    case TY_CHAR:
+        return SCHAR_MAX;
     default:
         return 0;
     }
 }
 
-static int literal_fits_type(Type *target, const Node *rhs)
+static int type_bit_width(Type *t)
 {
-    if (!target || !rhs)
+    t = canonicalize_type_deep(t);
+    if (!t)
         return 0;
-    if (rhs->kind != ND_INT)
-        return 0;
-    if (!type_is_int(target))
-        return 0;
-    int64_t v = rhs->int_val;
-    if (type_is_unsigned_int(target))
+    switch (t->kind)
     {
-        if (v < 0)
-            return 0;
-        return (uint64_t)v <= (uint64_t)type_int_max(target);
+    case TY_BOOL:
+        return 1;
+    case TY_I8:
+    case TY_U8:
+    case TY_CHAR:
+        return 8;
+    case TY_I16:
+    case TY_U16:
+        return 16;
+    case TY_I32:
+    case TY_U32:
+        return 32;
+    case TY_I64:
+    case TY_U64:
+        return 64;
+    default:
+        return 0;
     }
-    if (type_is_signed_int(target))
-        return v >= type_int_min(target) && v <= type_int_max(target);
-    return 0;
+}
+
+static int coerce_int_literal_to_type(Node *literal, Type *target, const char *context)
+{
+    if (!literal || !target)
+        return 0;
+    if (literal->kind != ND_INT)
+        return 0;
+
+    Type *canon_target = canonicalize_type_deep(target);
+    if (!type_is_int(canon_target))
+        return 0;
+
+    int64_t original = literal->int_val;
+    int64_t coerced = original;
+    int warn = 0;
+
+    int64_t min = type_is_unsigned_int(canon_target) ? 0 : type_int_min(canon_target);
+    int64_t max = type_int_max(canon_target);
+
+    if (type_is_unsigned_int(canon_target))
+    {
+        if (original < 0 || (uint64_t)original > (uint64_t)max)
+            warn = 1;
+    }
+    else if (type_is_signed_int(canon_target))
+    {
+        if (original < min || original > max)
+            warn = 1;
+    }
+
+    int bits = type_bit_width(canon_target);
+    if ((warn || literal->type != canon_target) && bits > 0 && bits < 64)
+    {
+        uint64_t mask = (1ULL << bits) - 1ULL;
+        uint64_t truncated = ((uint64_t)original) & mask;
+        if (type_is_unsigned_int(canon_target))
+        {
+            coerced = (int64_t)truncated;
+        }
+        else
+        {
+            uint64_t sign_bit = 1ULL << (bits - 1);
+            if (truncated & sign_bit)
+                truncated |= ~mask;
+            coerced = (int64_t)truncated;
+        }
+    }
+    else if (warn)
+    {
+        if (type_is_unsigned_int(canon_target))
+        {
+            if (original < 0)
+                coerced = 0;
+            else if (original > max)
+                coerced = max;
+        }
+        else
+        {
+            if (original < min)
+                coerced = min;
+            else if (original > max)
+                coerced = max;
+        }
+    }
+
+    literal->int_val = coerced;
+    literal->type = canon_target;
+
+    if (warn)
+    {
+        char ty_name[64];
+        describe_type(canon_target, ty_name, sizeof(ty_name));
+        if (context && *context)
+        {
+            diag_warning_at(literal->src, literal->line, literal->col,
+                            "integer literal %lld does not fit in %s; value converted for %s",
+                            (long long)original, ty_name, context);
+        }
+        else
+        {
+            diag_warning_at(literal->src, literal->line, literal->col,
+                            "integer literal %lld does not fit in %s; value converted",
+                            (long long)original, ty_name);
+        }
+    }
+
+    return 1;
 }
 
 static int can_assign(Type *target, Node *rhs)
 {
     if (!target || !rhs)
         return 0;
-    if (rhs->type && type_equal(target, rhs->type))
-        return 1;
-    if (literal_fits_type(target, rhs))
+    Type *canon_target = canonicalize_type_deep(target);
+    if (!canon_target)
+        return 0;
+    if (canon_target->kind == TY_PTR && rhs->kind == ND_NULL)
     {
-        rhs->type = target;
+        rhs->type = canon_target;
         return 1;
     }
+    if (rhs->type && type_equal(canon_target, rhs->type))
+        return 1;
+    if (rhs->kind == ND_COND)
+    {
+        if (!rhs->rhs || !rhs->body)
+            return 0;
+        if (!can_assign(canon_target, rhs->rhs))
+            return 0;
+        if (!can_assign(canon_target, rhs->body))
+            return 0;
+        rhs->type = canon_target;
+        return 1;
+    }
+    if (coerce_int_literal_to_type(rhs, canon_target, "assignment"))
+        return 1;
     return 0;
 }
 
@@ -252,6 +1034,7 @@ static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target
 {
     if (!init || !target)
         return;
+    target = canonicalize_type_deep(target);
     if (init->kind != ND_INIT_LIST)
     {
         check_expr(sc, init);
@@ -394,13 +1177,13 @@ static void scope_pop(SemaContext *sc)
 }
 static int scope_find(SemaContext *sc, const char *name)
 {
-    for (struct Scope *s = sc->scope; s; s = s->parent)
+    if (!sc || !sc->scope)
+        return 0;
+    struct Scope *s = sc->scope;
+    for (int i = 0; i < s->local_count; i++)
     {
-        for (int i = 0; i < s->local_count; i++)
-        {
-            if (strcmp(s->locals[i].name, name) == 0)
-                return 1;
-        }
+        if (strcmp(s->locals[i].name, name) == 0)
+            return 1;
     }
     return 0;
 }
@@ -421,6 +1204,7 @@ static void scope_add(SemaContext *sc, const char *name, Type *ty,
 {
     if (!sc->scope)
         scope_push(sc);
+    ty = canonicalize_type_deep(ty);
     struct Scope *s = sc->scope;
     if (s->local_count < 128)
     {
@@ -443,12 +1227,47 @@ static int scope_is_const(SemaContext *sc, const char *name)
     return 0;
 }
 
+static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global, int *is_const)
+{
+    if (is_global)
+        *is_global = 0;
+    if (is_const)
+        *is_const = 0;
+    if (!sc || !name)
+        return NULL;
+
+    Type *local_ty = scope_get_type(sc, name);
+    if (local_ty)
+    {
+        if (is_const)
+            *is_const = scope_is_const(sc, name);
+        return canonicalize_type_deep(local_ty);
+    }
+
+    if (!sc->syms)
+        return NULL;
+
+    const Symbol *sym = symtab_get(sc->syms, name);
+    if (sym && sym->kind == SYM_GLOBAL)
+    {
+        if (is_global)
+            *is_global = 1;
+        if (is_const)
+            *is_const = sym->is_const;
+        return canonicalize_type_deep(sym->var_type);
+    }
+
+    return NULL;
+}
+
 static const char *nodekind_name(NodeKind k)
 {
     switch (k)
     {
     case ND_INT:
         return "ND_INT";
+    case ND_FLOAT:
+        return "ND_FLOAT";
     case ND_ADD:
         return "ND_ADD";
     case ND_RET:
@@ -514,32 +1333,62 @@ static void check_expr(SemaContext *sc, Node *e)
             e->type = &ty_i32;
         return;
     }
+    if (e->kind == ND_FLOAT)
+    {
+        if (!e->type)
+            e->type = &ty_f64;
+        return;
+    }
     if (e->kind == ND_STRING)
     {
         static Type char_ptr = {.kind = TY_PTR, .pointee = &ty_char};
         e->type = &char_ptr;
         return;
     }
+    if (e->kind == ND_NULL)
+    {
+        static Type null_ptr = {.kind = TY_PTR, .pointee = &ty_void};
+        e->type = &null_ptr;
+        return;
+    }
     if (e->kind == ND_VAR)
     {
-        Type *t = scope_get_type(sc, e->var_ref);
+        const char *orig_name = e->var_ref;
+        int is_global = 0;
+        int is_const = 0;
+        Type *t = resolve_variable(sc, orig_name, &is_global, &is_const);
         if (!t)
         {
             diag_error_at(e->src, e->line, e->col, "unknown variable '%s'",
-                          e->var_ref);
+                          orig_name ? orig_name : "<null>");
             exit(1);
         }
+
         e->type = t;
+        e->var_is_global = is_global;
+        e->var_is_const = is_const;
+
+        if (is_global && sc && sc->syms)
+        {
+            const Symbol *sym = symtab_get(sc->syms, orig_name);
+            if (!sym)
+                sym = symtab_get(sc->syms, e->var_ref);
+            if (sym && sym->kind == SYM_GLOBAL && sym->backend_name)
+                e->var_ref = sym->backend_name;
+        }
         return;
     }
     if (e->kind == ND_SIZEOF)
     {
         // size of a type known at parse-time; stored in e->var_type
-        Type *ty = e->var_type ? e->var_type : &ty_i32;
+        Type *ty = e->var_type ? canonicalize_type_deep(e->var_type) : &ty_i32;
+        if (ty && ty->kind == TY_IMPORT)
+            ty = canonicalize_type_deep(ty);
         int sz = 0;
         switch (ty->kind)
         {
         case TY_I8: case TY_U8: case TY_CHAR: sz = 1; break;
+    case TY_BOOL: sz = 1; break;
         case TY_I16: case TY_U16: sz = 2; break;
         case TY_I32: case TY_U32: case TY_F32: sz = 4; break;
         case TY_I64: case TY_U64: case TY_F64: case TY_PTR: sz = 8; break;
@@ -563,8 +1412,8 @@ static void check_expr(SemaContext *sc, Node *e)
             check_expr(sc, e->lhs);
             target = e->lhs->type;
         }
+        target = canonicalize_type_deep(target);
         // Build a string literal node carrying the formatted type name
-        const char *prefix = NULL;
         char buf[256];
         buf[0] = '\0';
         if (!target)
@@ -573,37 +1422,41 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         else
         {
-            // Built-ins tag
-            const char *tn = NULL;
             switch (target->kind)
             {
-            case TY_I8: tn = "i8"; prefix = "<built-in>"; break;
-            case TY_U8: tn = "u8"; prefix = "<built-in>"; break;
-            case TY_I16: tn = "i16"; prefix = "<built-in>"; break;
-            case TY_U16: tn = "u16"; prefix = "<built-in>"; break;
-            case TY_I32: tn = "i32"; prefix = "<built-in>"; break;
-            case TY_U32: tn = "u32"; prefix = "<built-in>"; break;
-            case TY_I64: tn = "i64"; prefix = "<built-in>"; break;
-            case TY_U64: tn = "u64"; prefix = "<built-in>"; break;
-            case TY_F32: tn = "f32"; prefix = "<built-in>"; break;
-            case TY_F64: tn = "f64"; prefix = "<built-in>"; break;
-            case TY_F128: tn = "f128"; prefix = "<built-in>"; break;
-            case TY_VOID: tn = "void"; prefix = "<built-in>"; break;
-            case TY_CHAR: tn = "char"; prefix = "<built-in>"; break;
-            case TY_PTR:
-                tn = "ptr"; prefix = "<built-in>"; break;
             case TY_STRUCT:
-                prefix = target->struct_name ? target->struct_name : "<struct>";
-                tn = "struct";
+            {
+                const char *mod = module_registry_find_struct_module(target);
+                const char *name = target->struct_name ? target->struct_name : "<struct>";
+                if (mod && *mod)
+                    snprintf(buf, sizeof(buf), "%s.%s::struct", mod, name);
+                else
+                    snprintf(buf, sizeof(buf), "%s::struct", name);
                 break;
-            default:
-                prefix = "<built-in>"; tn = "?"; break;
             }
-            // If parse recorded an alias name in var_ref, show as "<char*/alias>::string" style
-            if (e->var_ref)
+            case TY_I8: snprintf(buf, sizeof(buf), "<built-in>::i8"); break;
+            case TY_U8: snprintf(buf, sizeof(buf), "<built-in>::u8"); break;
+            case TY_I16: snprintf(buf, sizeof(buf), "<built-in>::i16"); break;
+            case TY_U16: snprintf(buf, sizeof(buf), "<built-in>::u16"); break;
+            case TY_I32: snprintf(buf, sizeof(buf), "<built-in>::i32"); break;
+            case TY_U32: snprintf(buf, sizeof(buf), "<built-in>::u32"); break;
+            case TY_I64: snprintf(buf, sizeof(buf), "<built-in>::i64"); break;
+            case TY_U64: snprintf(buf, sizeof(buf), "<built-in>::u64"); break;
+            case TY_F32: snprintf(buf, sizeof(buf), "<built-in>::f32"); break;
+            case TY_F64: snprintf(buf, sizeof(buf), "<built-in>::f64"); break;
+            case TY_F128: snprintf(buf, sizeof(buf), "<built-in>::f128"); break;
+            case TY_VOID: snprintf(buf, sizeof(buf), "<built-in>::void"); break;
+            case TY_CHAR: snprintf(buf, sizeof(buf), "<built-in>::char"); break;
+            case TY_BOOL: snprintf(buf, sizeof(buf), "<built-in>::bool"); break;
+            case TY_PTR: snprintf(buf, sizeof(buf), "<built-in>::ptr"); break;
+            default:
+                snprintf(buf, sizeof(buf), "<built-in>::?");
+                break;
+            }
+            if (e->var_ref && target->kind != TY_STRUCT)
+            {
                 snprintf(buf, sizeof(buf), "<char*/alias>::%s", e->var_ref);
-            else
-                snprintf(buf, sizeof(buf), "%s::%s", prefix ? prefix : "<built-in>", tn);
+            }
         }
         // Convert to string literal
         Node *s = (Node *)xcalloc(1, sizeof(Node));
@@ -629,7 +1482,7 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, e->lhs);
-        Type *base = e->lhs->type;
+        Type *base = canonicalize_type_deep(e->lhs->type);
         if (e->is_pointer_deref)
         {
             if (!base || base->kind != TY_PTR || !base->pointee)
@@ -638,7 +1491,7 @@ static void check_expr(SemaContext *sc, Node *e)
                               "'->' requires pointer to struct");
                 exit(1);
             }
-            base = base->pointee;
+            base = canonicalize_type_deep(base->pointee);
         }
         else
         {
@@ -692,6 +1545,12 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, target);
+        if (target->kind == ND_VAR && target->var_is_global)
+        {
+            diag_error_at(target->src, target->line, target->col,
+                          "address-of operator is not supported for global variables");
+            exit(1);
+        }
         if (!target->type)
         {
             diag_error_at(target->src, target->line, target->col,
@@ -705,23 +1564,138 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!type_equal(e->lhs->type, e->rhs->type))
+
+        if (e->lhs && e->rhs && e->lhs->kind == ND_STRING && e->rhs->kind == ND_STRING)
         {
+            size_t lhs_len = (size_t)(e->lhs->str_len >= 0 ? e->lhs->str_len : 0);
+            size_t rhs_len = (size_t)(e->rhs->str_len >= 0 ? e->rhs->str_len : 0);
+            size_t total = lhs_len + rhs_len;
+            char *merged = (char *)xmalloc(total + 1);
+            if (lhs_len > 0 && e->lhs->str_data)
+                memcpy(merged, e->lhs->str_data, lhs_len);
+            if (rhs_len > 0 && e->rhs->str_data)
+                memcpy(merged + lhs_len, e->rhs->str_data, rhs_len);
+            merged[total] = '\0';
+
+            Node *lhs_old = e->lhs;
+            Node *rhs_old = e->rhs;
+
+            e->kind = ND_STRING;
+            e->lhs = NULL;
+            e->rhs = NULL;
+            e->str_data = merged;
+            e->str_len = (int)total;
+            static Type char_ptr = {.kind = TY_PTR, .pointee = &ty_char};
+            e->type = &char_ptr;
+
+            ast_free(lhs_old);
+            ast_free(rhs_old);
+            return;
+        }
+
+        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
+        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        int lhs_is_ptr = type_is_pointer(lhs_type);
+        int rhs_is_ptr = type_is_pointer(rhs_type);
+        if (lhs_is_ptr || rhs_is_ptr)
+        {
+            if (lhs_is_ptr && rhs_is_ptr)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "pointer addition requires an integer offset, not another pointer");
+                exit(1);
+            }
+            if (lhs_is_ptr && type_is_int(rhs_type))
+            {
+                e->type = lhs_type;
+                return;
+            }
+            if (rhs_is_ptr && type_is_int(lhs_type))
+            {
+                e->type = rhs_type;
+                return;
+            }
             diag_error_at(e->src, e->line, e->col,
-                          "'+' requires both operands to have the same type");
+                          "pointer addition requires exactly one pointer and one integer operand");
             exit(1);
         }
-        e->type = e->lhs->type;
+        if (!type_equal(lhs_type, rhs_type))
+        {
+            if (type_is_int(rhs_type) && coerce_int_literal_to_type(e->lhs, rhs_type, "+"))
+                lhs_type = canonicalize_type_deep(e->lhs->type);
+            if (!type_equal(lhs_type, rhs_type) && type_is_int(lhs_type) && coerce_int_literal_to_type(e->rhs, lhs_type, "+"))
+                rhs_type = canonicalize_type_deep(e->rhs->type);
+            if (!type_equal(lhs_type, rhs_type))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "'+' requires both operands to have the same type");
+                exit(1);
+            }
+        }
+        e->type = lhs_type;
         return;
     }
     if (e->kind == ND_SUB)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!type_equal(e->lhs->type, e->rhs->type))
+        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
+        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        int lhs_is_ptr = type_is_pointer(lhs_type);
+        int rhs_is_ptr = type_is_pointer(rhs_type);
+        if (lhs_is_ptr || rhs_is_ptr)
         {
+            if (lhs_is_ptr && rhs_is_ptr)
+            {
+                if (!type_equal(lhs_type, rhs_type))
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "pointer subtraction requires both operands to point to the same type");
+                    exit(1);
+                }
+                e->type = &ty_i64;
+                return;
+            }
+            if (lhs_is_ptr && type_is_int(rhs_type))
+            {
+                e->type = lhs_type;
+                return;
+            }
             diag_error_at(e->src, e->line, e->col,
-                          "'-' requires both operands to have the same type");
+                          "pointer subtraction requires a pointer minus an integer or pointer minus pointer of the same type");
+            exit(1);
+        }
+        if (!type_equal(lhs_type, rhs_type))
+        {
+            if (type_is_int(rhs_type) && coerce_int_literal_to_type(e->lhs, rhs_type, "-"))
+                lhs_type = canonicalize_type_deep(e->lhs->type);
+            if (!type_equal(lhs_type, rhs_type) && type_is_int(lhs_type) && coerce_int_literal_to_type(e->rhs, lhs_type, "-"))
+                rhs_type = canonicalize_type_deep(e->rhs->type);
+            if (!type_equal(lhs_type, rhs_type))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "'-' requires both operands to have the same type");
+                exit(1);
+            }
+        }
+        e->type = lhs_type;
+        return;
+    }
+    if (e->kind == ND_NEG)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col, "negation missing operand");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        if (!(type_is_int(e->lhs->type) || type_is_float(e->lhs->type)))
+        {
+            diag_error_at(e->src, e->line, e->col, "unary '-' requires integer or floating-point operand");
             exit(1);
         }
         e->type = e->lhs->type;
@@ -731,17 +1705,30 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!type_equal(e->lhs->type, e->rhs->type))
+        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
+        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        if (!type_equal(lhs_type, rhs_type))
         {
-            diag_error_at(e->src, e->line, e->col,
-                          "'%s' requires both operands to have the same type",
-                          e->kind == ND_MUL ? "*" : "/");
-            exit(1);
+            const char *op = (e->kind == ND_MUL) ? "*" : "/";
+            if (type_is_int(rhs_type) && coerce_int_literal_to_type(e->lhs, rhs_type, op))
+                lhs_type = canonicalize_type_deep(e->lhs->type);
+            if (!type_equal(lhs_type, rhs_type) && type_is_int(lhs_type) && coerce_int_literal_to_type(e->rhs, lhs_type, op))
+                rhs_type = canonicalize_type_deep(e->rhs->type);
+            if (!type_equal(lhs_type, rhs_type))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "'%s' requires both operands to have the same type", op);
+                exit(1);
+            }
         }
-        if (!type_is_int(e->lhs->type))
+        int lhs_is_int = type_is_int(e->lhs->type);
+        int lhs_is_float = type_is_float(e->lhs->type);
+        if (!(lhs_is_int || lhs_is_float))
         {
             diag_error_at(e->src, e->line, e->col,
-                          "integer type required for '%s'",
+                          "numeric type required for '%s'",
                           e->kind == ND_MUL ? "*" : "/");
             exit(1);
         }
@@ -762,21 +1749,74 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = e->lhs->type;
         return;
     }
+    if (e->kind == ND_BITAND || e->kind == ND_BITOR || e->kind == ND_BITXOR)
+    {
+        check_expr(sc, e->lhs);
+        check_expr(sc, e->rhs);
+        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
+        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        const char *op_symbol = (e->kind == ND_BITAND) ? "&" : (e->kind == ND_BITOR) ? "|" : "^";
+        if (!type_is_int(lhs_type) || !type_is_int(rhs_type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "'%s' requires integer operands", op_symbol);
+            exit(1);
+        }
+        if (!type_equal(lhs_type, rhs_type))
+        {
+            if (type_is_int(rhs_type) && coerce_int_literal_to_type(e->lhs, rhs_type, op_symbol))
+                lhs_type = canonicalize_type_deep(e->lhs->type);
+            if (!type_equal(lhs_type, rhs_type) && type_is_int(lhs_type) && coerce_int_literal_to_type(e->rhs, lhs_type, op_symbol))
+                rhs_type = canonicalize_type_deep(e->rhs->type);
+        }
+        if (!type_equal(lhs_type, rhs_type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "'%s' requires both operands to have the same type", op_symbol);
+            exit(1);
+        }
+        e->type = lhs_type;
+        return;
+    }
+    if (e->kind == ND_BITNOT)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "bitwise '~' requires an operand");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        Type *operand_type = canonicalize_type_deep(e->lhs->type);
+        e->lhs->type = operand_type;
+        if (!type_is_int(operand_type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "bitwise '~' requires integer operand");
+            exit(1);
+        }
+        e->type = operand_type;
+        return;
+    }
     if (e->kind == ND_GT_EXPR || e->kind == ND_LT || e->kind == ND_LE || e->kind == ND_GE)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        // Allow integer-vs-integer or pointer-vs-pointer relational comparisons.
+    // Allow integer, floating-point, or pointer relational comparisons when categories match.
         int lhs_is_int = type_is_int(e->lhs->type);
         int rhs_is_int = type_is_int(e->rhs->type);
+        int lhs_is_float = type_is_float(e->lhs->type);
+        int rhs_is_float = type_is_float(e->rhs->type);
         int lhs_is_ptr = (e->lhs->type && e->lhs->type->kind == TY_PTR);
         int rhs_is_ptr = (e->rhs->type && e->rhs->type->kind == TY_PTR);
-        if (!((lhs_is_int && rhs_is_int) || (lhs_is_ptr && rhs_is_ptr)))
+        if (!((lhs_is_int && rhs_is_int) || (lhs_is_float && rhs_is_float) || (lhs_is_ptr && rhs_is_ptr)))
         {
-            diag_error_at(e->src, e->line, e->col, "relational operator requires integer or pointer operands of the same category");
+            diag_error_at(e->src, e->line, e->col, "relational operator requires integer, floating-point, or pointer operands of the same category");
             exit(1);
         }
-        e->type = &ty_i32;
+        e->type = type_bool();
         return;
     }
     if (e->kind == ND_LAND || e->kind == ND_LOR)
@@ -789,25 +1829,27 @@ static void check_expr(SemaContext *sc, Node *e)
                           e->kind == ND_LAND ? "&&" : "||");
             exit(1);
         }
-        e->type = &ty_i32;
+        e->type = type_bool();
         return;
     }
     if (e->kind == ND_EQ || e->kind == ND_NE)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        // Allow integer==integer or pointer==pointer comparisons.
+    // Allow integer, floating-point, or pointer equality when categories match.
         int lhs_is_int = type_is_int(e->lhs->type);
         int rhs_is_int = type_is_int(e->rhs->type);
+        int lhs_is_float = type_is_float(e->lhs->type);
+        int rhs_is_float = type_is_float(e->rhs->type);
         int lhs_is_ptr = (e->lhs->type && e->lhs->type->kind == TY_PTR);
         int rhs_is_ptr = (e->rhs->type && e->rhs->type->kind == TY_PTR);
-        if (!((lhs_is_int && rhs_is_int) || (lhs_is_ptr && rhs_is_ptr)))
+        if (!((lhs_is_int && rhs_is_int) || (lhs_is_float && rhs_is_float) || (lhs_is_ptr && rhs_is_ptr)))
         {
             diag_error_at(e->src, e->line, e->col,
-                          "equality requires both operands to be integers or pointers");
+                          "equality requires both operands to be integers, floats, or pointers");
             exit(1);
         }
-        e->type = &ty_i32;
+        e->type = type_bool();
         return;
     }
     if (e->kind == ND_CAST)
@@ -840,8 +1882,22 @@ static void check_expr(SemaContext *sc, Node *e)
                           "subscripted value is not an array or pointer");
             exit(1);
         }
-        // For simplicity, treat as int in expressions (like char promotes to int)
-        e->type = &ty_i32;
+        // If the pointer points to a struct, result type is the struct type
+        Type *elem_type = canonicalize_type_deep(e->lhs->type->pointee);
+        if (elem_type && elem_type->kind == TY_STRUCT)
+        {
+            e->type = elem_type;
+        }
+        else if (elem_type && elem_type->kind == TY_CHAR)
+        {
+            // char* promotes to int for indexing
+            e->type = &ty_i32;
+        }
+        else
+        {
+            // Default: use pointee type
+            e->type = elem_type ? elem_type : &ty_i32;
+        }
         return;
     }
     if (e->kind == ND_ASSIGN)
@@ -865,11 +1921,11 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         if (lhs_base->kind == ND_VAR)
         {
-            if (scope_is_const(sc, lhs_base->var_ref))
+            if (lhs_base->var_is_const)
             {
                 diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
                               "cannot assign to constant variable '%s'",
-                              lhs_base->var_ref);
+                              lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
                 exit(1);
             }
         }
@@ -878,7 +1934,7 @@ static void check_expr(SemaContext *sc, Node *e)
         if (!lhs_type)
         {
             if (lhs_base->kind == ND_VAR)
-                lhs_type = scope_get_type(sc, lhs_base->var_ref);
+                lhs_type = resolve_variable(sc, lhs_base->var_ref, NULL, NULL);
             else if (lhs_base->kind == ND_MEMBER)
                 lhs_type = lhs_base->type;
             else if (lhs_base->kind == ND_INDEX && lhs_base->lhs && lhs_base->lhs->type && lhs_base->lhs->type->kind == TY_PTR)
@@ -890,7 +1946,7 @@ static void check_expr(SemaContext *sc, Node *e)
             {
                 diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
                               "unknown variable '%s' on left-hand side of assignment",
-                              lhs_base->var_ref);
+                              lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
                 exit(1);
             }
         }
@@ -913,22 +1969,34 @@ static void check_expr(SemaContext *sc, Node *e)
         e->kind == ND_POSTDEC)
     {
         // operand must be an lvalue variable of integer type (simplified)
-        if (!e->lhs || e->lhs->kind != ND_VAR)
+        if (!e->lhs)
         {
             diag_error_at(e->src, e->line, e->col,
                           "operand of ++/-- must be a variable");
             exit(1);
         }
-        if (scope_is_const(sc, e->lhs->var_ref))
+        check_expr(sc, e->lhs);
+        if (e->lhs->kind != ND_VAR)
         {
-            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
-                          "cannot modify constant variable '%s'", e->lhs->var_ref);
+            diag_error_at(e->src, e->line, e->col,
+                          "operand of ++/-- must be a variable");
             exit(1);
         }
-        Type *t = scope_get_type(sc, e->lhs->var_ref);
-        if (!t || !type_is_int(t))
+        if (e->lhs->var_is_const)
         {
-            diag_error_at(e->src, e->line, e->col, "++/-- requires integer variable");
+            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
+                          "cannot modify constant variable '%s'",
+                          e->lhs->var_ref ? e->lhs->var_ref : "<unnamed>");
+            exit(1);
+        }
+        Type *t = e->lhs->type;
+        if (!t)
+            t = resolve_variable(sc, e->lhs->var_ref, NULL, NULL);
+        t = canonicalize_type_deep(t);
+        e->lhs->type = t;
+        if (!t || (!type_is_int(t) && !type_is_pointer(t)))
+        {
+            diag_error_at(e->src, e->line, e->col, "++/-- requires integer or pointer variable");
             exit(1);
         }
         e->type = t;
@@ -937,11 +2005,34 @@ static void check_expr(SemaContext *sc, Node *e)
     if (e->kind == ND_CALL)
     {
         // lookup symbol
+        if (sc->unit)
+        {
+            char *alias_resolved = resolve_import_alias(sc->unit, e->call_name);
+            if (alias_resolved)
+                e->call_name = alias_resolved;
+        }
         const Symbol *sym = symtab_get(sc->syms, e->call_name);
         if (!sym)
         {
-            diag_error_at(e->src, e->line, e->col, "unknown function '%s'",
-                          e->call_name);
+            if (unit_allows_module_call(sc->unit, e->call_name))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "missing metadata for function '%s'",
+                              e->call_name);
+            }
+            else
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "unknown function '%s'",
+                              e->call_name);
+            }
+            exit(1);
+        }
+        if (sym->kind != SYM_FUNC)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "symbol '%s' is not callable",
+                          e->call_name ? e->call_name : "<unnamed>");
             exit(1);
         }
         // check args types minimally
@@ -949,7 +2040,57 @@ static void check_expr(SemaContext *sc, Node *e)
         {
             check_expr(sc, e->args[i]);
         }
-        e->type = sym->sig.ret;
+
+        int expected = sym->sig.param_count;
+        if (!sym->sig.is_varargs)
+        {
+            if (e->arg_count != expected)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "function '%s' expects %d argument(s) but %d provided",
+                              sym->name ? sym->name : e->call_name,
+                              expected, e->arg_count);
+                exit(1);
+            }
+        }
+        else if (e->arg_count < expected)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "function '%s' expects at least %d argument(s) before varargs",
+                          sym->name ? sym->name : e->call_name,
+                          expected);
+            exit(1);
+        }
+
+        int check_count = expected;
+        if (sym->sig.is_varargs && e->arg_count > expected)
+            check_count = expected;
+        if (!sym->sig.is_varargs && e->arg_count < check_count)
+            check_count = e->arg_count;
+
+        for (int i = 0; i < check_count; ++i)
+        {
+            Type *expected_ty = (sym->sig.params && i < expected) ? sym->sig.params[i] : NULL;
+            if (!expected_ty)
+                continue;
+            if (!can_assign(expected_ty, e->args[i]))
+            {
+                char want[64];
+                char got[64];
+                describe_type(expected_ty, want, sizeof(want));
+                describe_type(e->args[i]->type, got, sizeof(got));
+                diag_error_at(e->args[i]->src, e->args[i]->line, e->args[i]->col,
+                              "argument %d type mismatch: expected %s, got %s",
+                              i + 1, want, got);
+                exit(1);
+            }
+        }
+
+        Type *ret_type = sym->sig.ret ? sym->sig.ret : &ty_i32;
+        e->type = ret_type;
+        const char *backend = sym->backend_name ? sym->backend_name : sym->name;
+        if (backend)
+            e->call_name = backend;
         return;
     }
     if (e->kind == ND_COND)
@@ -970,172 +2111,325 @@ static void check_expr(SemaContext *sc, Node *e)
             diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col, "ternary condition must be integer or pointer");
             exit(1);
         }
-        // Branch types must match exactly for now
-        if (!type_equal(e->rhs->type, e->body->type))
+        Type *then_type = canonicalize_type_deep(e->rhs->type);
+        Type *else_type = canonicalize_type_deep(e->body->type);
+        e->rhs->type = then_type;
+        e->body->type = else_type;
+
+        if (type_equal(then_type, else_type))
         {
-            diag_error_at(e->src, e->line, e->col, "ternary branches must have the same type");
-            exit(1);
+            e->type = then_type;
+            return;
         }
-        e->type = e->rhs->type;
-        return;
+
+        if (then_type && then_type->kind == TY_PTR && e->body->kind == ND_NULL)
+        {
+            e->body->type = then_type;
+            e->type = then_type;
+            return;
+        }
+        if (else_type && else_type->kind == TY_PTR && e->rhs->kind == ND_NULL)
+        {
+            e->rhs->type = else_type;
+            e->type = else_type;
+            return;
+        }
+
+        if (else_type && coerce_int_literal_to_type(e->rhs, else_type, "conditional branch"))
+        {
+            then_type = canonicalize_type_deep(e->rhs->type);
+        }
+        if (then_type && coerce_int_literal_to_type(e->body, then_type, "conditional branch"))
+        {
+            else_type = canonicalize_type_deep(e->body->type);
+        }
+
+        if (type_equal(then_type, else_type))
+        {
+            e->type = then_type;
+            return;
+        }
+
+        diag_error_at(e->src, e->line, e->col, "ternary branches must have compatible types");
+        exit(1);
     }
     diag_error_at(e->src, e->line, e->col, "unsupported expression: %s",
                   nodekind_name(e->kind));
     exit(1);
 }
 
-static int sema_check_function(SemaContext *sc, Node *fn)
+static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *found_ret);
+
+static int sema_check_block(SemaContext *sc, Node *block, Node *fn, int *found_ret, int push_scope)
 {
-    if (!fn->ret_type)
-        fn->ret_type = &ty_i32;
-    Node *body = fn->body;
-    if (!body)
+    if (!block)
+        return 0;
+    if (block->kind != ND_BLOCK)
+        return sema_check_statement(sc, block, fn, found_ret);
+    if (push_scope)
+        scope_push(sc);
+    for (int i = 0; i < block->stmt_count; ++i)
     {
-        diag_error_at(fn->src, fn->line, fn->col, "missing function body");
-        return 1;
-    }
-    // bind parameters in a new scope
-    scope_push(sc);
-    for (int i = 0; i < fn->param_count; i++)
-        scope_add(sc, fn->param_names[i], fn->param_types[i], 0);
-    Node *ret = NULL;
-    if (body->kind == ND_RET)
-    {
-        ret = body;
-    }
-    else if (body->kind == ND_BLOCK)
-    {
-        for (int i = 0; i < body->stmt_count; i++)
+        Node *stmt = block->stmts[i];
+        if (sema_check_statement(sc, stmt, fn, found_ret))
         {
-            Node *s = body->stmts[i];
-            if (s->kind == ND_RET)
-            {
-                ret = s;
-                break;
-            }
-            if (s->kind == ND_VAR_DECL)
-            {
-                if (scope_find(sc, s->var_name))
-                {
-                    diag_error_at(s->src, s->line, s->col, "redeclaration of '%s'",
-                                  s->var_name);
-                    scope_pop(sc);
-                    return 1;
-                }
-                scope_add(sc, s->var_name, s->var_type, s->var_is_const);
-                if (s->rhs)
-                {
-                    if (s->rhs->kind == ND_INIT_LIST)
-                    {
-                        check_initializer_for_type(sc, s->rhs, s->var_type);
-                    }
-                    else
-                    {
-                        check_expr(sc, s->rhs);
-                        if (s->var_type && !can_assign(s->var_type, s->rhs))
-                        {
-                            diag_error_at(s->rhs->src, s->rhs->line, s->rhs->col,
-                                          "cannot initialize '%s' with incompatible type",
-                                          s->var_name);
-                            scope_pop(sc);
-                            return 1;
-                        }
-                        if (s->var_type)
-                            s->rhs->type = s->var_type;
-                    }
-                }
-            }
-            else if (s->kind == ND_EXPR_STMT)
-            {
-                if (s->lhs)
-                    check_expr(sc, s->lhs);
-            }
-            else if (s->kind == ND_IF)
-            { /* minimal: type-check cond */
-                check_expr(sc, s->lhs);
-            }
-            else if (s->kind == ND_WHILE)
-            {
-                check_expr(sc, s->lhs);
-            }
-        }
-        // For void functions, no explicit return is required.
-        if (!ret && (!fn->ret_type || fn->ret_type->kind != TY_VOID))
-        {
-            diag_error_at(fn->src, fn->line, fn->col,
-                          "function body must contain a return statement");
-            scope_pop(sc);
+            if (push_scope)
+                scope_pop(sc);
             return 1;
         }
     }
-    else
+    if (push_scope)
+        scope_pop(sc);
+    return 0;
+}
+
+static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *found_ret)
+{
+    if (!stmt)
+        return 0;
+    switch (stmt->kind)
     {
-        // support while-loops in blocks or as top-level stmt
-        if (body->kind == ND_WHILE)
+    case ND_BLOCK:
+        return sema_check_block(sc, stmt, fn, found_ret, 1);
+    case ND_VAR_DECL:
+    {
+        if (scope_find(sc, stmt->var_name))
         {
-            check_expr(sc, body->lhs);
-            if (!type_is_int(body->lhs->type))
+            diag_error_at(stmt->src, stmt->line, stmt->col, "redeclaration of '%s'",
+                          stmt->var_name);
+            return 1;
+        }
+        stmt->var_type = canonicalize_type_deep(stmt->var_type);
+        scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const);
+        if (stmt->rhs)
+        {
+            if (stmt->rhs->kind == ND_INIT_LIST)
             {
-                diag_error_at(body->lhs->src, body->lhs->line, body->lhs->col,
+                check_initializer_for_type(sc, stmt->rhs, stmt->var_type);
+            }
+            else
+            {
+                check_expr(sc, stmt->rhs);
+                if (stmt->var_type && !can_assign(stmt->var_type, stmt->rhs))
+                {
+                    diag_error_at(stmt->rhs->src, stmt->rhs->line, stmt->rhs->col,
+                                  "cannot initialize '%s' with incompatible type",
+                                  stmt->var_name);
+                    return 1;
+                }
+                if (stmt->var_type)
+                    stmt->rhs->type = stmt->var_type;
+            }
+        }
+        return 0;
+    }
+    case ND_EXPR_STMT:
+        if (stmt->lhs)
+            check_expr(sc, stmt->lhs);
+        return 0;
+    case ND_IF:
+        if (stmt->lhs)
+            check_expr(sc, stmt->lhs);
+        if (stmt->rhs && sema_check_statement(sc, stmt->rhs, fn, found_ret))
+            return 1;
+        if (stmt->body && sema_check_statement(sc, stmt->body, fn, found_ret))
+            return 1;
+        return 0;
+    case ND_WHILE:
+        if (stmt->lhs)
+        {
+            check_expr(sc, stmt->lhs);
+            if (!type_is_int(stmt->lhs->type))
+            {
+                diag_error_at(stmt->lhs->src, stmt->lhs->line, stmt->lhs->col,
                               "while condition must be integer");
                 return 1;
             }
-            // recursively allow body
-            if (body->rhs && body->rhs->kind == ND_BLOCK)
-            {
-                for (int i = 0; i < body->rhs->stmt_count;
-                     i++)
-                { /* minimal: ensure expressions type-check */
-                    Node *s = body->rhs->stmts[i];
-                    if (s->kind == ND_EXPR_STMT)
-                        check_expr(sc, s->lhs);
-                }
-            }
-            diag_error_at(fn->src, fn->line, fn->col,
-                          "function body must contain a return statement");
-            scope_pop(sc);
-            return 1;
         }
-        diag_error_at(fn->src, fn->line, fn->col, "unsupported function body kind");
-        return 1;
-    }
-    if (ret)
-    {
+        if (stmt->rhs && sema_check_statement(sc, stmt->rhs, fn, found_ret))
+            return 1;
+        return 0;
+    case ND_RET:
         if (fn->ret_type && fn->ret_type->kind == TY_VOID)
         {
-            // In void functions, allow bare 'ret;' but forbid returning a value
-            if (ret->lhs)
+            if (stmt->lhs)
             {
-                diag_error_at(ret->src, ret->line, ret->col,
+                diag_error_at(stmt->src, stmt->line, stmt->col,
                               "cannot return a value from a void function");
                 return 1;
             }
         }
         else
         {
-            if (!ret->lhs)
+            if (!stmt->lhs)
             {
-                diag_error_at(ret->src, ret->line, ret->col,
+                diag_error_at(stmt->src, stmt->line, stmt->col,
                               "non-void function must return a value");
                 return 1;
             }
-            Node *e = ret->lhs;
-            check_expr(sc, e);
-            ret->type = e->type;
-            // Enforce that the returned expression type matches the function's
-            // declared return type (including pointers). If a cast was used,
-            // 'e->type' should already be the cast target.
+            check_expr(sc, stmt->lhs);
+            stmt->type = stmt->lhs->type;
             Type *decl = fn->ret_type ? fn->ret_type : &ty_i32;
-            if (!type_equal(ret->type, decl))
+            if (!type_equal(stmt->type, decl))
             {
-                diag_error_at(ret->src, ret->line, ret->col,
+                diag_error_at(stmt->src, stmt->line, stmt->col,
                               "return type mismatch: returning %d but function returns %d",
-                              ret->type ? ret->type->kind : -1, decl ? decl->kind : -1);
+                              stmt->type ? stmt->type->kind : -1,
+                              decl ? decl->kind : -1);
                 return 1;
             }
         }
+        if (found_ret)
+            *found_ret = 1;
+        return 0;
+    default:
+        return 0;
     }
+}
+
+static int sema_global_initializer_is_const(const Node *expr)
+{
+    if (!expr)
+        return 1;
+
+    switch (expr->kind)
+    {
+    case ND_INT:
+    case ND_FLOAT:
+    case ND_NULL:
+        return 1;
+    case ND_NEG:
+    case ND_CAST:
+        return sema_global_initializer_is_const(expr->lhs);
+    case ND_INIT_LIST:
+        return expr->init.is_zero;
+    default:
+        return 0;
+    }
+}
+
+static int sema_check_global_decl(SemaContext *sc, Node *decl)
+{
+    if (!decl || decl->kind != ND_VAR_DECL || !decl->var_is_global)
+        return 0;
+
+    if (!decl->var_name)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "global variable requires a name");
+        return 1;
+    }
+
+    decl->var_type = canonicalize_type_deep(decl->var_type);
+    Type *ty = decl->var_type;
+    if (!ty)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "unable to determine type for global '%s'",
+                      decl->var_name);
+        return 1;
+    }
+    if (ty->kind == TY_VOID)
+    {
+        diag_error_at(decl->src, decl->line, decl->col,
+                      "global '%s' cannot have type void",
+                      decl->var_name);
+        return 1;
+    }
+    if (ty->kind == TY_STRUCT)
+    {
+        if (ty->strct.size_bytes <= 0)
+        {
+            diag_error_at(decl->src, decl->line, decl->col,
+                          "struct global '%s' has incomplete size",
+                          decl->var_name);
+            return 1;
+        }
+
+        if (!decl->rhs)
+            return 0;
+
+        if (decl->rhs->kind != ND_INIT_LIST || !decl->rhs->init.is_zero)
+        {
+            diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                          "struct global '%s' requires an all-zero initializer",
+                          decl->var_name);
+            return 1;
+        }
+
+        decl->rhs->type = ty;
+        return 0;
+    }
+
+    if (!decl->rhs)
+        return 0;
+
+    if (decl->rhs->kind == ND_INIT_LIST)
+    {
+        if (!decl->rhs->init.is_zero)
+        {
+            diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                          "non-zero initializer lists are not supported for global variables");
+            return 1;
+        }
+        decl->rhs->type = ty;
+        return 0;
+    }
+
+    check_expr(sc, decl->rhs);
+    if (!can_assign(ty, decl->rhs))
+    {
+        diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                      "cannot initialize global '%s' with incompatible type",
+                      decl->var_name);
+        return 1;
+    }
+    decl->rhs->type = ty;
+
+    if (!sema_global_initializer_is_const(decl->rhs))
+    {
+        diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                      "global initializer for '%s' must be a constant expression",
+                      decl->var_name);
+        return 1;
+    }
+
+    return 0;
+}
+
+static int sema_check_function(SemaContext *sc, Node *fn)
+{
+    if (!fn->ret_type)
+        fn->ret_type = &ty_i32;
+    if (fn->is_chancecode)
+        return 0;
+    Node *body = fn->body;
+    if (!body)
+    {
+        diag_error_at(fn->src, fn->line, fn->col, "missing function body");
+        return 1;
+    }
+    scope_push(sc);
+    for (int i = 0; i < fn->param_count; i++)
+    {
+        fn->param_types[i] = canonicalize_type_deep(fn->param_types[i]);
+        scope_add(sc, fn->param_names[i], fn->param_types[i], 0);
+    }
+    int has_return = 0;
+    int rc;
+    if (body->kind == ND_BLOCK)
+        rc = sema_check_block(sc, body, fn, &has_return, 0);
+    else
+        rc = sema_check_statement(sc, body, fn, &has_return);
     scope_pop(sc);
+    if (rc)
+        return rc;
+    if ((!fn->ret_type || fn->ret_type->kind != TY_VOID) && !has_return)
+    {
+        diag_error_at(fn->src, fn->line, fn->col,
+                      "function body must contain a return statement");
+        return 1;
+    }
     return 0;
 }
 
@@ -1146,20 +2440,15 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         diag_error("null unit");
         return 1;
     }
+    const Node *previous_unit = sc->unit;
+    sc->unit = unit;
     if (unit->kind == ND_FUNC)
     {
         // single function case
         // add symbol so calls can resolve
-        Symbol s = {0};
-        s.kind = SYM_FUNC;
-        s.name = unit->name;
-        s.is_extern = 0;
-        s.abi = "C";
-        s.sig.ret = unit->ret_type ? unit->ret_type : &ty_i32;
-        s.sig.params = NULL;
-        s.sig.param_count = 0;
-        s.sig.is_varargs = 0;
-        symtab_add(sc->syms, s);
+        sema_register_function_local(sc, NULL, unit);
+        if (check_exposed_function_signature(unit))
+            return 1;
         return sema_check_function(sc, unit);
     }
     if (unit->kind != ND_UNIT)
@@ -1167,33 +2456,77 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         fprintf(stderr, "sema: expected unit\n");
         return 1;
     }
-    // First pass: add all function symbols
+    // First pass: register functions and globals
     for (int i = 0; i < unit->stmt_count; i++)
     {
-        Node *fn = unit->stmts[i];
-        if (!fn || fn->kind != ND_FUNC)
+        Node *decl = unit->stmts[i];
+        if (!decl)
+            continue;
+        if (decl->kind == ND_FUNC)
         {
-            diag_error("non-function in unit");
+            sema_register_function_local(sc, unit, decl);
+        }
+        else if (decl->kind == ND_VAR_DECL && decl->var_is_global)
+        {
+            sema_register_global_local(sc, unit, decl);
+        }
+        else
+        {
+            diag_error_at(decl ? decl->src : unit->src,
+                          decl ? decl->line : unit->line,
+                          decl ? decl->col : unit->col,
+                          "unsupported top-level declaration");
             return 1;
         }
-        Symbol s = {0};
-        s.kind = SYM_FUNC;
-        s.name = fn->name;
-        s.is_extern = 0;
-        s.abi = "C";
-        s.sig.ret = fn->ret_type ? fn->ret_type : &ty_i32;
-        s.sig.params = NULL;
-        s.sig.param_count = 0;
-        s.sig.is_varargs = 0;
-        symtab_add(sc->syms, s);
     }
-    // Second pass: type-check bodies
+
+    // Second pass: validate globals and type-check function bodies
     for (int i = 0; i < unit->stmt_count; i++)
     {
-        if (sema_check_function(sc, unit->stmts[i]))
-            return 1;
+        Node *decl = unit->stmts[i];
+        if (!decl)
+            continue;
+        if (decl->kind == ND_FUNC)
+        {
+            if (check_exposed_function_signature(decl))
+                return 1;
+            if (sema_check_function(sc, decl))
+                return 1;
+        }
+        else if (decl->kind == ND_VAR_DECL && decl->var_is_global)
+        {
+            if (sema_check_global_decl(sc, decl))
+                return 1;
+        }
     }
+    sc->unit = previous_unit;
     return 0;
+}
+
+void sema_register_foreign_unit_symbols(SemaContext *sc, Node *unit)
+{
+    if (!sc || !unit)
+        return;
+
+    if (unit->kind == ND_UNIT)
+    {
+        for (int i = 0; i < unit->stmt_count; ++i)
+        {
+            Node *decl = unit->stmts[i];
+            if (!decl)
+                continue;
+            if (decl->kind == ND_FUNC)
+                sema_register_function_foreign(sc, unit, decl);
+            else if (decl->kind == ND_VAR_DECL && decl->var_is_global)
+                sema_register_global_foreign(sc, unit, decl);
+        }
+        return;
+    }
+
+    if (unit->kind == ND_FUNC)
+    {
+        sema_register_function_foreign(sc, NULL, unit);
+    }
 }
 
 // Simple constant evaluation for current subset

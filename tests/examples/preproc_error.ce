@@ -1,0 +1,10 @@
+module Test.PreprocError;
+
+#define ERROR_MSG "forced preprocessing error"
+
+#error ERROR_MSG
+
+expose fun main() -> i32
+{
+    ret 0;
+}

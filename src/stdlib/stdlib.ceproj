@@ -1,0 +1,4 @@
+# Chance sample project
+type=Library
+output=stdlib.cclib
+ce=string.ce, memory.ce

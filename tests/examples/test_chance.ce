@@ -1,4 +1,19 @@
-fun test_chance() -> i32
+module Test.Chance;
+
+expose struct SmallTest
+{
+    i32 testVar;
+    u8 smallValue;
+};
+
+expose enum Idk
+{
+    First = 1,
+    Second = 2,
+    Third = 3
+};
+
+expose fun test_chance() -> i32
 {
     ret 67;
 }

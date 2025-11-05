@@ -1,0 +1,7 @@
+# Chance sample project
+type=Console
+backend=x86
+output=build/SampleTests
+ce=call_printf.ce, test_chance.ce
+cclib=libtest.cclib, stdlib.cclib
+obj=test_win.o
