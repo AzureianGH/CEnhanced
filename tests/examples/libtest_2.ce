@@ -7,5 +7,5 @@ expose fun other_test_fun(i32 num) -> i32
 
 expose fun get_info() -> char*
 {
-    ret 
+    ret (__MODULE__ + "::" + __FUNCTION__ + "()");
 }

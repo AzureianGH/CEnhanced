@@ -360,6 +360,8 @@ expose fun main() -> i32
     assert(counter_b == counter_a + 1, "__COUNTER__ increments sequentially");
     assert(strcmp(__FUNCTION__, "main") == 0, "__FUNCTION__ matches main");
     assert(strcmp("hello" + "world", "helloworld") == 0, "constant string merging");
+
+    printf(LibTest.Another.get_info());
     
     ret final_sum; // expect 168
 }
