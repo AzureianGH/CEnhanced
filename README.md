@@ -1,6 +1,6 @@
 # CHance Front-End
 
-This repository contains the CHance language front-end and driver (`chancec`). It takes `.ce` sources, performs lexing, parsing, semantic analysis, and emits Chance bytecode (`.ccb`). When requested it hands that bytecode to [`ChanceCode`](../ChanceCode) to obtain assembly, objects, or executables, and it can package reusable metadata into `.cclib` libraries.
+This repository contains the CHance language front-end and driver (`chancec`). It takes `.ce` sources, performs lexing, parsing, semantic analysis, and emits Chance bytecode (`.ccb`). When requested it hands that bytecode to [`ChanceCode`](https://github.com/AzureianGH/ChanceCode) to obtain assembly, objects, or executables, and it can package reusable metadata into `.cclib` libraries.
 
 The codebase is intentionally compact so new language features can be added by touching a small set of files. The architecture notes in `docs/` walk through the full pipeline.
 
