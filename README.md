@@ -34,7 +34,7 @@ The codebase is intentionally compact so new language features can be added by t
 - CMake 3.23+
 - A C11 compiler (tested with MSVC 17.x, Clang, and MinGW-w64 GCC)
 - Optional: NASM or a system assembler for converting backend output into binaries
-- This repository expects [`ChanceCode`](../ChanceCode) to be checked out as a sibling directory so headers under `ChanceCode/include` are available.
+- This repository expects [`ChanceCode`](https://github.com/AzureianGH/ChanceCode) to be checked out as a sibling directory so headers under `ChanceCode/include` are available.
 
 On Windows the provided tasks and scripts assume PowerShell. `build.bat` delegates to the `mingw-release` preset and falls back to a local MinGW build.
 
