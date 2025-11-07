@@ -4162,9 +4162,9 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
     }
     else
     {
-    const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
-    if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s",
-                backend_name, ret_name, param_count, local_count, varargs_suffix))
+        const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
+        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s",
+                                backend_name, ret_name, param_count, local_count, varargs_suffix))
             return 1;
     }
 

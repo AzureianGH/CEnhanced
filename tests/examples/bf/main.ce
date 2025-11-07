@@ -1,0 +1,102 @@
+module BF.Interpreter;
+
+bring Std as Std;
+
+extend from "C" i32 printf(char *, ...);
+extend from "C" i32 read(i32, char *, int);
+
+hide alias u8ptr = u8*;
+hide alias string = char*;
+
+[EntryPoint]
+expose fun main() -> i32
+{
+    string code = "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.";
+
+    // Allocate memory for the Brainfuck tape
+    i32 tape_size = 30000;
+    u8ptr tape = Std.Memory.alloc(tape_size) as u8ptr;
+    Std.Memory.memset(tape as void*, 0, tape_size);
+
+    // Tape pointer
+    u8ptr ptr = tape;
+
+    // Program counter
+    i32 pc = 0;
+    i32 len = 0;
+    while (code[len] != 0) len++;
+
+    // buffer for reading input
+    char* input_buf = Std.Memory.alloc(1) as char*;
+
+    while (pc < len)
+    {
+        char instr = code[pc] as char;
+
+        if (instr == '>')
+        {
+            ptr = ptr + 1;
+        }
+        else if (instr == '<')
+        {
+            ptr = ptr - 1;
+        }
+        else if (instr == '+')
+        {
+            ptr[0] = (ptr[0] + 1) as u8;
+        }
+        else if (instr == '-')
+        {
+            ptr[0] = (ptr[0] - 1) as u8;
+        }
+        else if (instr == '.')
+        {
+            printf("%c", ptr[0] as i32);
+        }
+        else if (instr == ',')
+        {
+            // read 1 byte from stdin (fd = 0)
+            i32 nread = read(0, input_buf, 1);
+            if (nread > 0)
+            {
+                ptr[0] = input_buf[0] as u8;
+            }
+            else
+            {
+                ptr[0] = 0; // EOF -> set to 0
+            }
+        }
+        else if (instr == '[')
+        {
+            if (ptr[0] == 0)
+            {
+                i32 bracket = 1;
+                while (bracket > 0)
+                {
+                    pc = pc + 1;
+                    if (code[pc] == '[') bracket = bracket + 1;
+                    if (code[pc] == ']') bracket = bracket - 1;
+                }
+            }
+        }
+        else if (instr == ']')
+        {
+            if (ptr[0] != 0)
+            {
+                i32 bracket = 1;
+                while (bracket > 0)
+                {
+                    pc = pc - 1;
+                    if (code[pc] == ']') bracket = bracket + 1;
+                    if (code[pc] == '[') bracket = bracket - 1;
+                }
+            }
+        }
+
+        pc = pc + 1;
+    }
+
+    Std.Memory.dealloc(tape as void*);
+
+    ret 0;
+}

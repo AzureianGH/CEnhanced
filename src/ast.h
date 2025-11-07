@@ -140,7 +140,8 @@ typedef struct Type
     struct Type *pointee; // for TY_PTR
     // For TY_STRUCT
     const char *struct_name;
-    struct {
+    struct
+    {
         const char **field_names;
         struct Type **field_types;
         int *field_offsets;
@@ -203,15 +204,15 @@ typedef enum
     ND_TYPEOF,
     ND_EQ,
     ND_NE,
-    ND_COND, // ternary conditional expr: lhs ? rhs : body
-    ND_MEMBER, // struct/enum member access
+    ND_COND,      // ternary conditional expr: lhs ? rhs : body
+    ND_MEMBER,    // struct/enum member access
     ND_INIT_LIST, // brace initializer
-    ND_SHL,      // <<
-    ND_SHR,      // >>
-    ND_BITAND,   // &
-    ND_BITOR,    // |
-    ND_BITXOR,   // ^
-    ND_BITNOT,   // ~
+    ND_SHL,       // <<
+    ND_SHR,       // >>
+    ND_BITAND,    // &
+    ND_BITOR,     // |
+    ND_BITXOR,    // ^
+    ND_BITNOT,    // ~
 } NodeKind;
 
 const char *node_kind_name(NodeKind kind);
@@ -228,7 +229,7 @@ typedef struct Node
     NodeKind kind;
     struct Node *lhs;
     struct Node *rhs;
-    int64_t int_val; // for ND_INT
+    int64_t int_val;  // for ND_INT
     double float_val; // for ND_FLOAT
     // Source location for diagnostics
     int line;
@@ -274,7 +275,7 @@ typedef struct Node
     // For ND_VAR_DECL
     const char *var_name;
     Type *var_type;
-    int var_is_const; // for ND_VAR_DECL
+    int var_is_const;  // for ND_VAR_DECL
     int var_is_global; // set on declarations/references that live at global scope
     // For ND_BLOCK
     struct Node **stmts;
@@ -289,10 +290,11 @@ typedef struct Node
     int field_offset;
     int is_pointer_deref; // 1 if base was pointer (for -> semantics)
     // For ND_INIT_LIST
-    struct {
+    struct
+    {
         struct Node **elems;
         const char **designators; // NULL for positional
-        int *field_indices; // computed during sema, parallel to elems
+        int *field_indices;       // computed during sema, parallel to elems
         int count;
         int is_zero; // for {} or {0} special cases
     } init;
@@ -360,10 +362,10 @@ typedef struct
 {
     bool freestanding;
     bool m32;
-    bool emit_asm;           // for -S (produces .S from chancecodec)
-    bool no_link;            // don't link; emit .ccb only
-    AsmSyntax asm_syntax;    // desired assembly flavor when translating via chancecodec
-    const char *output_path; // Final executable (when linking) or output module path
+    bool emit_asm;               // for -S (produces .S from chancecodec)
+    bool no_link;                // don't link; emit .ccb only
+    AsmSyntax asm_syntax;        // desired assembly flavor when translating via chancecodec
+    const char *output_path;     // Final executable (when linking) or output module path
     const char *obj_output_path; // Optional: explicit intermediate object path
     const char *ccb_output_path; // Optional: explicit .ccb output path override
     TargetOS os;
@@ -417,8 +419,8 @@ typedef struct Symbol
     const char *abi; // e.g., "C"
     FuncSig sig;
     int is_noreturn;
-    Type *var_type;  // valid when kind == SYM_GLOBAL
-    int is_const;    // valid when kind == SYM_GLOBAL
+    Type *var_type; // valid when kind == SYM_GLOBAL
+    int is_const;   // valid when kind == SYM_GLOBAL
 } Symbol;
 
 typedef struct SymTable SymTable;

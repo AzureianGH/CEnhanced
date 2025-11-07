@@ -38,13 +38,32 @@ struct Parser
     int alias_count;
     int alias_cap;
     // named types: structs and typedef-like entries
-    struct NamedType { char *name; int name_len; Type *type; int is_exposed; } *named_types;
-    int nt_count; int nt_cap;
+    struct NamedType
+    {
+        char *name;
+        int name_len;
+        Type *type;
+        int is_exposed;
+    } *named_types;
+    int nt_count;
+    int nt_cap;
     // enum constants: name->value
-    struct EnumConst { char *name; int name_len; int value; } *enum_consts;
-    int ec_count; int ec_cap;
-    struct EnumType { char *name; int name_len; int is_exposed; } *enum_types;
-    int et_count; int et_cap;
+    struct EnumConst
+    {
+        char *name;
+        int name_len;
+        int value;
+    } *enum_consts;
+    int ec_count;
+    int ec_cap;
+    struct EnumType
+    {
+        char *name;
+        int name_len;
+        int is_exposed;
+    } *enum_types;
+    int et_count;
+    int et_cap;
     // module metadata
     char **module_parts;
     int module_part_count;
@@ -301,7 +320,7 @@ static void parse_chancecode_body(Parser *ps, Node *fn)
         size_t buf_cap = 0;
         size_t buf_len = 0;
         int saw_token = 0;
-    const char *prev_end = NULL;
+        const char *prev_end = NULL;
 
         while (1)
         {
@@ -974,9 +993,9 @@ static void named_type_add(Parser *ps, const char *name, int len, Type *ty, int 
     if (ps->nt_count == ps->nt_cap)
     {
         ps->nt_cap = ps->nt_cap ? ps->nt_cap * 2 : 8;
-        ps->named_types = (struct NamedType*)realloc(ps->named_types, ps->nt_cap * sizeof(*ps->named_types));
+        ps->named_types = (struct NamedType *)realloc(ps->named_types, ps->nt_cap * sizeof(*ps->named_types));
     }
-    ps->named_types[ps->nt_count].name = (char*)xmalloc((size_t)len + 1);
+    ps->named_types[ps->nt_count].name = (char *)xmalloc((size_t)len + 1);
     memcpy(ps->named_types[ps->nt_count].name, name, (size_t)len);
     ps->named_types[ps->nt_count].name[len] = '\0';
     ps->named_types[ps->nt_count].name_len = len;
@@ -994,7 +1013,11 @@ static int enum_const_find(Parser *ps, const char *name, int len)
 static int enum_const_get(Parser *ps, const char *name, int len, int *out)
 {
     int i = enum_const_find(ps, name, len);
-    if (i >= 0) { *out = ps->enum_consts[i].value; return 1; }
+    if (i >= 0)
+    {
+        *out = ps->enum_consts[i].value;
+        return 1;
+    }
     return 0;
 }
 static void enum_const_add(Parser *ps, const char *name, int len, int value)
@@ -1002,9 +1025,9 @@ static void enum_const_add(Parser *ps, const char *name, int len, int value)
     if (ps->ec_count == ps->ec_cap)
     {
         ps->ec_cap = ps->ec_cap ? ps->ec_cap * 2 : 8;
-        ps->enum_consts = (struct EnumConst*)realloc(ps->enum_consts, ps->ec_cap * sizeof(*ps->enum_consts));
+        ps->enum_consts = (struct EnumConst *)realloc(ps->enum_consts, ps->ec_cap * sizeof(*ps->enum_consts));
     }
-    ps->enum_consts[ps->ec_count].name = (char*)xmalloc((size_t)len + 1);
+    ps->enum_consts[ps->ec_count].name = (char *)xmalloc((size_t)len + 1);
     memcpy(ps->enum_consts[ps->ec_count].name, name, (size_t)len);
     ps->enum_consts[ps->ec_count].name[len] = '\0';
     ps->enum_consts[ps->ec_count].name_len = len;
@@ -1490,7 +1513,9 @@ static Node *parse_primary(Parser *ps)
         // we'll compute in sema to ensure consistency
         n->lhs = NULL;
         n->rhs = NULL;
-        n->line = t.line; n->col = t.col; n->src = lexer_source(ps->lx);
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
         // temporarily stash the type node via var_type field to carry it to sema
         n->var_type = ty;
         return n;
@@ -1510,7 +1535,7 @@ static Node *parse_primary(Parser *ps)
                 // check if it's an alias so we can preserve the alias name for formatting
                 if (alias_find(ps, p.lexeme, p.length) >= 0)
                 {
-                    alias_name = (char*)xmalloc((size_t)p.length + 1);
+                    alias_name = (char *)xmalloc((size_t)p.length + 1);
                     memcpy(alias_name, p.lexeme, (size_t)p.length);
                     alias_name[p.length] = '\0';
                 }
@@ -1527,7 +1552,9 @@ static Node *parse_primary(Parser *ps)
         n->var_type = arg_type; // carry explicit type if provided
         if (alias_name)
             n->var_ref = alias_name; // stash alias text for sema formatting
-        n->line = t.line; n->col = t.col; n->src = lexer_source(ps->lx);
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
         return n;
     }
     if (t.kind == TK_INT)
@@ -1653,7 +1680,7 @@ static Node *parse_primary(Parser *ps)
             n->src = lexer_source(ps->lx);
             return n;
         }
-    if (t.length == 12 && strncmp(t.lexeme, "__FUNCTION__", 12) == 0)
+        if (t.length == 12 && strncmp(t.lexeme, "__FUNCTION__", 12) == 0)
         {
             if (!ps->current_function_name)
             {
@@ -1678,7 +1705,9 @@ static Node *parse_primary(Parser *ps)
         {
             Node *n = new_node(ND_INT);
             n->int_val = ev;
-            n->line = t.line; n->col = t.col; n->src = lexer_source(ps->lx);
+            n->line = t.line;
+            n->col = t.col;
+            n->src = lexer_source(ps->lx);
             return n;
         }
         // Could be a call: ident '(' ... ')'
@@ -2061,14 +2090,19 @@ static Node *parse_add(Parser *ps)
 static Node *parse_shift(Parser *ps)
 {
     Node *lhs = parse_add(ps);
-    for(;;){
+    for (;;)
+    {
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_SHL || p.kind == TK_SHR)
         {
             Token op = lexer_next(ps->lx);
             Node *rhs = parse_add(ps);
             Node *n = new_node(op.kind == TK_SHL ? ND_SHL : ND_SHR);
-            n->lhs = lhs; n->rhs = rhs; n->line=op.line; n->col=op.col; n->src=lexer_source(ps->lx);
+            n->lhs = lhs;
+            n->rhs = rhs;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
             lhs = n;
             continue;
         }
@@ -2080,18 +2114,27 @@ static Node *parse_shift(Parser *ps)
 static Node *parse_rel(Parser *ps)
 {
     Node *lhs = parse_shift(ps);
-    for(;;){
+    for (;;)
+    {
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_GT || p.kind == TK_LT || p.kind == TK_LTE || p.kind == TK_GTE)
         {
             Token op = lexer_next(ps->lx);
             Node *rhs = parse_shift(ps);
             Node *n = NULL;
-            if(op.kind==TK_GT) n = new_node(ND_GT_EXPR);
-            else if(op.kind==TK_LT) n = new_node(ND_LT);
-            else if(op.kind==TK_LTE) n = new_node(ND_LE);
-            else n = new_node(ND_GE);
-            n->lhs = lhs; n->rhs = rhs; n->line=op.line; n->col=op.col; n->src=lexer_source(ps->lx);
+            if (op.kind == TK_GT)
+                n = new_node(ND_GT_EXPR);
+            else if (op.kind == TK_LT)
+                n = new_node(ND_LT);
+            else if (op.kind == TK_LTE)
+                n = new_node(ND_LE);
+            else
+                n = new_node(ND_GE);
+            n->lhs = lhs;
+            n->rhs = rhs;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
             lhs = n;
             continue;
         }
@@ -2268,8 +2311,8 @@ static Node *parse_cond(Parser *ps)
     expect(ps, TK_COLON, ":");
     Node *else_e = parse_cond(ps); // right-associative
     Node *n = new_node(ND_COND);
-    n->lhs = cond;   // condition
-    n->rhs = then_e; // then
+    n->lhs = cond;    // condition
+    n->rhs = then_e;  // then
     n->body = else_e; // reuse body for else branch
     n->line = q.line;
     n->col = q.col;
@@ -2295,8 +2338,6 @@ static Node *parse_assign(Parser *ps)
     }
     return lhs;
 }
-
-
 
 static Node *parse_expr(Parser *ps) { return parse_assign(ps); }
 
@@ -2655,7 +2696,6 @@ static Node *parse_for(Parser *ps)
     return wh;
 }
 
-
 static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_chancecode)
 {
     expect(ps, TK_KW_FUN, "fun");
@@ -2853,7 +2893,7 @@ static void parse_extend_decl(Parser *ps, int leading_noreturn)
         memcpy(nm, name.lexeme, (size_t)name.length);
         nm[name.length] = '\0';
         s.name = nm;
-    s.backend_name = s.name;
+        s.backend_name = s.name;
         s.is_extern = 1;
         s.abi = xstrdup("C");
         // Default to i32 if return type omitted (should not happen here),
@@ -3394,7 +3434,7 @@ static void parse_alias_decl(Parser *ps, int is_exposed)
         ps->aliases[ps->alias_count].gen_ptr_depth = gen_ptr_depth;
         ps->aliases[ps->alias_count].base_kind = TY_VOID;
         ps->aliases[ps->alias_count].ptr_depth = 0;
-    ps->aliases[ps->alias_count].is_exposed = is_exposed;
+        ps->aliases[ps->alias_count].is_exposed = is_exposed;
         ps->alias_count++;
         return;
     }
@@ -3484,7 +3524,11 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
     for (;;)
     {
         Token t = lexer_peek(ps->lx);
-        if (t.kind == TK_RBRACE) { lexer_next(ps->lx); break; }
+        if (t.kind == TK_RBRACE)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
         Token id = expect(ps, TK_IDENT, "enumerator");
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_ASSIGN)
@@ -3498,17 +3542,17 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
                 cur = 0;
         }
         // add constant (global scope)
-    enum_const_add(ps, id.lexeme, id.length, cur);
-    // Also register scoped name Enum=>Member
-    int scoped_len = name.length + 2 + id.length;
-    char *scoped = (char *)xmalloc((size_t)scoped_len + 1);
-    memcpy(scoped, name.lexeme, (size_t)name.length);
-    scoped[name.length] = '=';
-    scoped[name.length + 1] = '>';
-    memcpy(scoped + name.length + 2, id.lexeme, (size_t)id.length);
-    scoped[scoped_len] = '\0';
-    enum_const_add(ps, scoped, scoped_len, cur);
-    free(scoped);
+        enum_const_add(ps, id.lexeme, id.length, cur);
+        // Also register scoped name Enum=>Member
+        int scoped_len = name.length + 2 + id.length;
+        char *scoped = (char *)xmalloc((size_t)scoped_len + 1);
+        memcpy(scoped, name.lexeme, (size_t)name.length);
+        scoped[name.length] = '=';
+        scoped[name.length + 1] = '>';
+        memcpy(scoped + name.length + 2, id.lexeme, (size_t)id.length);
+        scoped[scoped_len] = '\0';
+        enum_const_add(ps, scoped, scoped_len, cur);
+        free(scoped);
         if (enum_name_heap && ps->module_full_name)
         {
             char *value_name = dup_token_text(id);
@@ -3517,7 +3561,12 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
         }
         // next
         Token sep = lexer_peek(ps->lx);
-        if (sep.kind == TK_COMMA) { lexer_next(ps->lx); cur++; continue; }
+        if (sep.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            cur++;
+            continue;
+        }
         // maybe end
         // if next is '}', we'll loop and close; otherwise, error
         cur++;
@@ -3536,25 +3585,37 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
     Token name = expect(ps, TK_IDENT, "struct name");
     expect(ps, TK_LBRACE, "{");
     // Create a Type object for the struct
-    Type *st = (Type*)xcalloc(1, sizeof(Type));
+    Type *st = (Type *)xcalloc(1, sizeof(Type));
     st->kind = TY_STRUCT;
-    st->struct_name = (char*)xmalloc((size_t)name.length + 1);
-    memcpy((char*)st->struct_name, name.lexeme, (size_t)name.length);
-    ((char*)st->struct_name)[name.length] = '\0';
+    st->struct_name = (char *)xmalloc((size_t)name.length + 1);
+    memcpy((char *)st->struct_name, name.lexeme, (size_t)name.length);
+    ((char *)st->struct_name)[name.length] = '\0';
     st->is_exposed = is_exposed;
     // Parse fields: list of type ident ';'
-    const char **fnames = NULL; Type **ftypes = NULL; int *foff = NULL; int fcnt=0, fcap=0;
+    const char **fnames = NULL;
+    Type **ftypes = NULL;
+    int *foff = NULL;
+    int fcnt = 0, fcap = 0;
     int offset = 0;
     while (1)
     {
         Token t = lexer_peek(ps->lx);
-        if (t.kind == TK_RBRACE) { lexer_next(ps->lx); break; }
+        if (t.kind == TK_RBRACE)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
         if (!(t.kind == TK_KW_CONSTANT || is_type_start(ps, t)))
         {
             diag_error_at(lexer_source(ps->lx), t.line, t.col, "expected field declaration or '}'");
             exit(1);
         }
-        int is_const = 0; if (t.kind == TK_KW_CONSTANT) { lexer_next(ps->lx); is_const = 1; }
+        int is_const = 0;
+        if (t.kind == TK_KW_CONSTANT)
+        {
+            lexer_next(ps->lx);
+            is_const = 1;
+        }
         (void)is_const; // fields ignore const for now
         Type *fty = parse_type_spec(ps);
         Token fname = expect(ps, TK_IDENT, "field name");
@@ -3572,9 +3633,19 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
             }
         }
         expect(ps, TK_SEMI, ";");
-        if (fcnt==fcap) { fcap = fcap?fcap*2:4; fnames=(const char**)realloc(fnames, sizeof(char*)*fcap); ftypes=(Type**)realloc(ftypes, sizeof(Type*)*fcap); foff=(int*)realloc(foff, sizeof(int)*fcap);} 
-        char *nm = (char*)xmalloc((size_t)fname.length+1); memcpy(nm, fname.lexeme, (size_t)fname.length); nm[fname.length]='\0';
-        fnames[fcnt] = nm; ftypes[fcnt] = fty; fcnt++;
+        if (fcnt == fcap)
+        {
+            fcap = fcap ? fcap * 2 : 4;
+            fnames = (const char **)realloc(fnames, sizeof(char *) * fcap);
+            ftypes = (Type **)realloc(ftypes, sizeof(Type *) * fcap);
+            foff = (int *)realloc(foff, sizeof(int) * fcap);
+        }
+        char *nm = (char *)xmalloc((size_t)fname.length + 1);
+        memcpy(nm, fname.lexeme, (size_t)fname.length);
+        nm[fname.length] = '\0';
+        fnames[fcnt] = nm;
+        ftypes[fcnt] = fty;
+        fcnt++;
         int sz = type_sizeof_simple(fty);
         if (fty && fty->kind == TY_STRUCT && sz == 0)
         {
@@ -3583,10 +3654,14 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
                           fname.lexeme);
             exit(1);
         }
-        foff[fcnt-1] = offset;
+        foff[fcnt - 1] = offset;
         offset += sz;
     }
-    st->strct.field_names = fnames; st->strct.field_types = ftypes; st->strct.field_offsets = foff; st->strct.field_count = fcnt; st->strct.size_bytes = offset;
+    st->strct.field_names = fnames;
+    st->strct.field_types = ftypes;
+    st->strct.field_offsets = foff;
+    st->strct.field_count = fcnt;
+    st->strct.size_bytes = offset;
     // register named type
     named_type_add(ps, name.lexeme, name.length, st, is_exposed);
     if (is_exposed && ps->module_full_name)

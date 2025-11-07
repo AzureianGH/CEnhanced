@@ -1398,15 +1398,41 @@ static void check_expr(SemaContext *sc, Node *e)
         int sz = 0;
         switch (ty->kind)
         {
-        case TY_I8: case TY_U8: case TY_CHAR: sz = 1; break;
-    case TY_BOOL: sz = 1; break;
-        case TY_I16: case TY_U16: sz = 2; break;
-        case TY_I32: case TY_U32: case TY_F32: sz = 4; break;
-        case TY_I64: case TY_U64: case TY_F64: case TY_PTR: sz = 8; break;
-        case TY_F128: sz = 16; break;
-        case TY_STRUCT: sz = ty->strct.size_bytes; break;
-        case TY_VOID: sz = 0; break;
-        default: sz = 8; break;
+        case TY_I8:
+        case TY_U8:
+        case TY_CHAR:
+            sz = 1;
+            break;
+        case TY_BOOL:
+            sz = 1;
+            break;
+        case TY_I16:
+        case TY_U16:
+            sz = 2;
+            break;
+        case TY_I32:
+        case TY_U32:
+        case TY_F32:
+            sz = 4;
+            break;
+        case TY_I64:
+        case TY_U64:
+        case TY_F64:
+        case TY_PTR:
+            sz = 8;
+            break;
+        case TY_F128:
+            sz = 16;
+            break;
+        case TY_STRUCT:
+            sz = ty->strct.size_bytes;
+            break;
+        case TY_VOID:
+            sz = 0;
+            break;
+        default:
+            sz = 8;
+            break;
         }
         e->int_val = sz;
         e->type = &ty_i32;
@@ -1429,7 +1455,7 @@ static void check_expr(SemaContext *sc, Node *e)
         buf[0] = '\0';
         if (!target)
         {
-            snprintf(buf, sizeof(buf), "<unknown>::?" );
+            snprintf(buf, sizeof(buf), "<unknown>::?");
         }
         else
         {
@@ -1445,21 +1471,51 @@ static void check_expr(SemaContext *sc, Node *e)
                     snprintf(buf, sizeof(buf), "%s::struct", name);
                 break;
             }
-            case TY_I8: snprintf(buf, sizeof(buf), "<built-in>::i8"); break;
-            case TY_U8: snprintf(buf, sizeof(buf), "<built-in>::u8"); break;
-            case TY_I16: snprintf(buf, sizeof(buf), "<built-in>::i16"); break;
-            case TY_U16: snprintf(buf, sizeof(buf), "<built-in>::u16"); break;
-            case TY_I32: snprintf(buf, sizeof(buf), "<built-in>::i32"); break;
-            case TY_U32: snprintf(buf, sizeof(buf), "<built-in>::u32"); break;
-            case TY_I64: snprintf(buf, sizeof(buf), "<built-in>::i64"); break;
-            case TY_U64: snprintf(buf, sizeof(buf), "<built-in>::u64"); break;
-            case TY_F32: snprintf(buf, sizeof(buf), "<built-in>::f32"); break;
-            case TY_F64: snprintf(buf, sizeof(buf), "<built-in>::f64"); break;
-            case TY_F128: snprintf(buf, sizeof(buf), "<built-in>::f128"); break;
-            case TY_VOID: snprintf(buf, sizeof(buf), "<built-in>::void"); break;
-            case TY_CHAR: snprintf(buf, sizeof(buf), "<built-in>::char"); break;
-            case TY_BOOL: snprintf(buf, sizeof(buf), "<built-in>::bool"); break;
-            case TY_PTR: snprintf(buf, sizeof(buf), "<built-in>::ptr"); break;
+            case TY_I8:
+                snprintf(buf, sizeof(buf), "<built-in>::i8");
+                break;
+            case TY_U8:
+                snprintf(buf, sizeof(buf), "<built-in>::u8");
+                break;
+            case TY_I16:
+                snprintf(buf, sizeof(buf), "<built-in>::i16");
+                break;
+            case TY_U16:
+                snprintf(buf, sizeof(buf), "<built-in>::u16");
+                break;
+            case TY_I32:
+                snprintf(buf, sizeof(buf), "<built-in>::i32");
+                break;
+            case TY_U32:
+                snprintf(buf, sizeof(buf), "<built-in>::u32");
+                break;
+            case TY_I64:
+                snprintf(buf, sizeof(buf), "<built-in>::i64");
+                break;
+            case TY_U64:
+                snprintf(buf, sizeof(buf), "<built-in>::u64");
+                break;
+            case TY_F32:
+                snprintf(buf, sizeof(buf), "<built-in>::f32");
+                break;
+            case TY_F64:
+                snprintf(buf, sizeof(buf), "<built-in>::f64");
+                break;
+            case TY_F128:
+                snprintf(buf, sizeof(buf), "<built-in>::f128");
+                break;
+            case TY_VOID:
+                snprintf(buf, sizeof(buf), "<built-in>::void");
+                break;
+            case TY_CHAR:
+                snprintf(buf, sizeof(buf), "<built-in>::char");
+                break;
+            case TY_BOOL:
+                snprintf(buf, sizeof(buf), "<built-in>::bool");
+                break;
+            case TY_PTR:
+                snprintf(buf, sizeof(buf), "<built-in>::ptr");
+                break;
             default:
                 snprintf(buf, sizeof(buf), "<built-in>::?");
                 break;
@@ -1472,16 +1528,18 @@ static void check_expr(SemaContext *sc, Node *e)
         // Convert to string literal
         Node *s = (Node *)xcalloc(1, sizeof(Node));
         s->kind = ND_STRING;
-        s->src = e->src; s->line = e->line; s->col = e->col;
+        s->src = e->src;
+        s->line = e->line;
+        s->col = e->col;
         s->str_len = (int)strlen(buf);
-        char *heap = (char*)xmalloc((size_t)s->str_len + 1);
+        char *heap = (char *)xmalloc((size_t)s->str_len + 1);
         memcpy(heap, buf, (size_t)s->str_len + 1);
         s->str_data = heap;
         // Replace e with string node semantics: set type to char*
         e->kind = ND_STRING;
         e->str_data = s->str_data;
         e->str_len = s->str_len;
-        static Type char_ptr = { .kind = TY_PTR, .pointee = &ty_char};
+        static Type char_ptr = {.kind = TY_PTR, .pointee = &ty_char};
         e->type = &char_ptr;
         return;
     }
@@ -1528,9 +1586,9 @@ static void check_expr(SemaContext *sc, Node *e)
                           base->struct_name ? base->struct_name : "<anon>");
             exit(1);
         }
-    e->field_index = idx;
-    e->field_offset = base->strct.field_offsets ? base->strct.field_offsets[idx] : 0;
-    e->type = base->strct.field_types ? base->strct.field_types[idx] : NULL;
+        e->field_index = idx;
+        e->field_offset = base->strct.field_offsets ? base->strct.field_offsets[idx] : 0;
+        e->type = base->strct.field_types ? base->strct.field_types[idx] : NULL;
         if (!e->type)
         {
             diag_error_at(e->src, e->line, e->col,
@@ -1768,7 +1826,8 @@ static void check_expr(SemaContext *sc, Node *e)
         Type *rhs_type = canonicalize_type_deep(e->rhs->type);
         e->lhs->type = lhs_type;
         e->rhs->type = rhs_type;
-        const char *op_symbol = (e->kind == ND_BITAND) ? "&" : (e->kind == ND_BITOR) ? "|" : "^";
+        const char *op_symbol = (e->kind == ND_BITAND) ? "&" : (e->kind == ND_BITOR) ? "|"
+                                                                                     : "^";
         if (!type_is_int(lhs_type) || !type_is_int(rhs_type))
         {
             diag_error_at(e->src, e->line, e->col,
@@ -1815,7 +1874,7 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-    // Allow integer, floating-point, or pointer relational comparisons when categories match.
+        // Allow integer, floating-point, or pointer relational comparisons when categories match.
         int lhs_is_int = type_is_int(e->lhs->type);
         int rhs_is_int = type_is_int(e->rhs->type);
         int lhs_is_float = type_is_float(e->lhs->type);
@@ -1847,7 +1906,7 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-    // Allow integer, floating-point, or pointer equality when categories match.
+        // Allow integer, floating-point, or pointer equality when categories match.
         int lhs_is_int = type_is_int(e->lhs->type);
         int rhs_is_int = type_is_int(e->rhs->type);
         int lhs_is_float = type_is_float(e->lhs->type);
