@@ -1762,6 +1762,56 @@ static int ccb_emit_pointer_difference(CcbFunctionBuilder *fb, const Node *expr)
     return 0;
 }
 
+static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCValueType *out_elem_ty, const Type **out_elem_type)
+{
+    if (!fb || !expr || expr->kind != ND_DEREF)
+        return 1;
+
+    const Node *base = expr->lhs;
+    if (!base)
+    {
+        diag_error_at(expr->src, expr->line, expr->col,
+                      "invalid dereference expression");
+        return 1;
+    }
+
+    if (ccb_emit_expr_basic(fb, base))
+        return 1;
+
+    const Type *base_type = base->type;
+    CCValueType base_ty = ccb_type_for_expr(base);
+    if (base_type && base_type->kind == TY_PTR)
+    {
+        base_ty = CC_TYPE_PTR;
+    }
+    else if (base_ty != CC_TYPE_PTR)
+    {
+        diag_error_at(base->src, base->line, base->col,
+                      "dereference operand is not a pointer");
+        return 1;
+    }
+
+    if (ccb_emit_convert_between(fb, base_ty, CC_TYPE_PTR, base))
+        return 1;
+
+    const Type *elem_type = (base_type && base_type->kind == TY_PTR) ? base_type->pointee : NULL;
+    CCValueType elem_cc_ty = map_type_to_cc(elem_type);
+    if (elem_type && elem_type->kind == TY_STRUCT)
+    {
+        // struct loads handled by caller via address-only path
+    }
+    else if (elem_cc_ty == CC_TYPE_INVALID || elem_cc_ty == CC_TYPE_VOID)
+    {
+        elem_cc_ty = CC_TYPE_I32;
+    }
+
+    if (out_elem_ty)
+        *out_elem_ty = elem_cc_ty;
+    if (out_elem_type)
+        *out_elem_type = elem_type;
+    return 0;
+}
+
 static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCValueType *out_elem_ty, const Type **out_elem_type)
 {
     if (!fb || !expr || expr->kind != ND_INDEX)
@@ -3135,6 +3185,33 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         return 0;
     }
+    case ND_DEREF:
+    {
+        CCValueType elem_ty = CC_TYPE_I32;
+        const Type *elem_type = NULL;
+        if (ccb_emit_deref_address(fb, expr, &elem_ty, &elem_type))
+            return 1;
+
+        if (elem_type && elem_type->kind == TY_STRUCT)
+        {
+            // Caller will handle address-only struct accesses
+            return 0;
+        }
+
+        if (!ccb_emit_load_indirect(&fb->body, elem_ty))
+            return 1;
+
+        CCValueType result_ty = map_type_to_cc(expr->type);
+        if (result_ty == CC_TYPE_INVALID)
+            result_ty = elem_ty;
+
+        if (result_ty != CC_TYPE_VOID && result_ty != elem_ty)
+        {
+            if (ccb_emit_convert_between(fb, elem_ty, result_ty, expr))
+                return 1;
+        }
+        return 0;
+    }
     case ND_INDEX:
     {
         CCValueType elem_ty = CC_TYPE_I32;
@@ -3244,6 +3321,12 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         case ND_INDEX:
         {
             if (ccb_emit_index_address(fb, operand, NULL, NULL))
+                return 1;
+            return 0;
+        }
+        case ND_DEREF:
+        {
+            if (ccb_emit_deref_address(fb, operand, NULL, NULL))
                 return 1;
             return 0;
         }
@@ -3547,6 +3630,91 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             {
                 diag_error_at(expr->src, expr->line, expr->col,
                               "failed to allocate temporary for indexed assignment");
+                return 1;
+            }
+
+            if (!ccb_emit_store_local(fb, temp))
+                return 1;
+            if (!ccb_emit_load_local(fb, temp))
+                return 1;
+            if (!ccb_emit_store_indirect(&fb->body, elem_ty))
+                return 1;
+            if (!ccb_emit_load_local(fb, temp))
+                return 1;
+
+            CCValueType result_ty = ccb_type_for_expr(expr);
+            if (result_ty == CC_TYPE_INVALID)
+                result_ty = elem_ty;
+            if (result_ty != CC_TYPE_VOID && result_ty != elem_ty)
+            {
+                if (ccb_emit_convert_between(fb, elem_ty, result_ty, expr))
+                    return 1;
+            }
+            return 0;
+        }
+        case ND_DEREF:
+        {
+            CCValueType elem_ty = CC_TYPE_I32;
+            const Type *elem_type = NULL;
+            if (ccb_emit_deref_address(fb, target, &elem_ty, &elem_type))
+                return 1;
+
+            if (type_is_address_only(elem_type))
+            {
+                Type *ptr_ty = type_ptr((Type *)elem_type);
+                CcbLocal *dst_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                if (!dst_ptr)
+                    return 1;
+                if (!ccb_emit_store_local(fb, dst_ptr))
+                    return 1;
+
+                if (ccb_emit_expr_basic(fb, expr->rhs))
+                    return 1;
+
+                CCValueType rhs_ty = ccb_type_for_expr(expr->rhs);
+                if (rhs_ty != CC_TYPE_PTR)
+                {
+                    if (ccb_emit_convert_between(fb, rhs_ty, CC_TYPE_PTR, expr->rhs))
+                        return 1;
+                }
+
+                CcbLocal *src_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+                if (!src_ptr)
+                    return 1;
+                if (!ccb_emit_store_local(fb, src_ptr))
+                    return 1;
+
+                if (ccb_emit_struct_copy(fb, elem_type, dst_ptr, src_ptr))
+                    return 1;
+
+                CCValueType result_ty = ccb_type_for_expr(expr);
+                if (result_ty != CC_TYPE_VOID)
+                {
+                    if (!ccb_emit_load_local(fb, dst_ptr))
+                        return 1;
+                }
+                return 0;
+            }
+
+            if (ccb_emit_expr_basic(fb, expr->rhs))
+                return 1;
+
+            CCValueType rhs_ty = ccb_type_for_expr(expr->rhs);
+            if (rhs_ty == CC_TYPE_INVALID)
+                rhs_ty = elem_ty;
+
+            if (elem_ty != CC_TYPE_VOID && rhs_ty != elem_ty)
+            {
+                if (ccb_emit_convert_between(fb, rhs_ty, elem_ty, expr->rhs))
+                    return 1;
+            }
+
+            Type *temp_type = elem_type ? (Type *)elem_type : (expr->rhs ? expr->rhs->type : NULL);
+            CcbLocal *temp = ccb_local_add(fb, NULL, temp_type, false, false);
+            if (!temp)
+            {
+                diag_error_at(expr->src, expr->line, expr->col,
+                              "failed to allocate temporary for dereference assignment");
                 return 1;
             }
 

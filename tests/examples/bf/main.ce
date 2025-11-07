@@ -43,15 +43,15 @@ expose fun main() -> i32
         }
         else if (instr == '+')
         {
-            ptr[0] = (ptr[0] + 1) as u8;
+            *ptr = (*ptr + 1) as u8;
         }
         else if (instr == '-')
         {
-            ptr[0] = (ptr[0] - 1) as u8;
+            *ptr = (*ptr - 1) as u8;
         }
         else if (instr == '.')
         {
-            printf("%c", ptr[0] as i32);
+            printf("%c", (*ptr) as i32);
         }
         else if (instr == ',')
         {
@@ -59,16 +59,16 @@ expose fun main() -> i32
             i32 nread = read(0, input_buf, 1);
             if (nread > 0)
             {
-                ptr[0] = input_buf[0] as u8;
+                *ptr = input_buf[0] as u8;
             }
             else
             {
-                ptr[0] = 0; // EOF -> set to 0
+                *ptr = 0; // EOF -> set to 0
             }
         }
         else if (instr == '[')
         {
-            if (ptr[0] == 0)
+            if (*ptr == 0)
             {
                 i32 bracket = 1;
                 while (bracket > 0)
@@ -81,7 +81,7 @@ expose fun main() -> i32
         }
         else if (instr == ']')
         {
-            if (ptr[0] != 0)
+            if (*ptr != 0)
             {
                 i32 bracket = 1;
                 while (bracket > 0)

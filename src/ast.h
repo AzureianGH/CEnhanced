@@ -182,6 +182,7 @@ typedef enum
     ND_ASSIGN,
     ND_IF,
     ND_INDEX,
+    ND_DEREF,
     ND_CAST,
     ND_GT_EXPR,
     ND_LT,

@@ -1299,6 +1299,8 @@ static const char *nodekind_name(NodeKind k)
         return "ND_IF";
     case ND_INDEX:
         return "ND_INDEX";
+    case ND_DEREF:
+        return "ND_DEREF";
     case ND_CAST:
         return "ND_CAST";
     case ND_GT_EXPR:
@@ -1607,7 +1609,7 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         Node *target = e->lhs;
-        if (target->kind != ND_VAR && target->kind != ND_MEMBER && target->kind != ND_INDEX)
+    if (target->kind != ND_VAR && target->kind != ND_MEMBER && target->kind != ND_INDEX && target->kind != ND_DEREF)
         {
             diag_error_at(target->src, target->line, target->col,
                           "operand of '&' must be an lvalue");
@@ -1929,6 +1931,36 @@ static void check_expr(SemaContext *sc, Node *e)
             e->type = e->lhs->type;
         return;
     }
+    if (e->kind == ND_DEREF)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col, "dereference missing operand");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        Type *ptr_type = canonicalize_type_deep(e->lhs->type);
+        if (!ptr_type || ptr_type->kind != TY_PTR || !ptr_type->pointee)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "'*' requires pointer operand");
+            exit(1);
+        }
+        Type *elem_type = canonicalize_type_deep(ptr_type->pointee);
+        if (elem_type && elem_type->kind == TY_STRUCT)
+        {
+            e->type = elem_type;
+        }
+        else if (elem_type && elem_type->kind == TY_CHAR)
+        {
+            e->type = &ty_i32;
+        }
+        else
+        {
+            e->type = elem_type ? elem_type : &ty_i32;
+        }
+        return;
+    }
     if (e->kind == ND_INDEX)
     {
         // lhs must be a pointer; rhs must be integer; result is element type
@@ -1983,7 +2015,7 @@ static void check_expr(SemaContext *sc, Node *e)
         Node *lhs_base = lhs_expr;
         if (lhs_base->kind == ND_CAST && lhs_base->lhs)
             lhs_base = lhs_base->lhs;
-        if (lhs_base->kind != ND_VAR && lhs_base->kind != ND_INDEX && lhs_base->kind != ND_MEMBER)
+    if (lhs_base->kind != ND_VAR && lhs_base->kind != ND_INDEX && lhs_base->kind != ND_MEMBER && lhs_base->kind != ND_DEREF)
         {
             diag_error_at(e->src, e->line, e->col,
                           "lvalue required as left operand of assignment");
@@ -2007,7 +2039,7 @@ static void check_expr(SemaContext *sc, Node *e)
                 lhs_type = resolve_variable(sc, lhs_base->var_ref, NULL, NULL);
             else if (lhs_base->kind == ND_MEMBER)
                 lhs_type = lhs_base->type;
-            else if (lhs_base->kind == ND_INDEX && lhs_base->lhs && lhs_base->lhs->type && lhs_base->lhs->type->kind == TY_PTR)
+            else if ((lhs_base->kind == ND_INDEX || lhs_base->kind == ND_DEREF) && lhs_base->lhs && lhs_base->lhs->type && lhs_base->lhs->type->kind == TY_PTR)
                 lhs_type = lhs_base->lhs->type->pointee;
         }
         if (lhs_base->kind == ND_VAR)

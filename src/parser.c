@@ -150,6 +150,7 @@ struct PendingAttr
 static Token expect(Parser *ps, TokenKind k, const char *what);
 static Node *new_node(NodeKind k);
 static Node *parse_expr(Parser *ps);
+static Node *parse_postfix_suffixes(Parser *ps, Node *expr);
 static int attrs_contains(const struct PendingAttr *attrs, int count, const char *name)
 {
     if (!attrs || count <= 0 || !name)
@@ -1772,9 +1773,9 @@ static Node *parse_primary(Parser *ps)
 // Forward decls for new top-level decls
 static void parse_enum_decl(Parser *ps, int is_exposed);
 static void parse_struct_decl(Parser *ps, int is_exposed);
-static Node *parse_postfix(Parser *ps)
+static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
 {
-    Node *e = parse_primary(ps);
+    Node *e = expr;
     for (;;)
     {
         Token p = lexer_peek(ps->lx);
@@ -1928,6 +1929,12 @@ static Node *parse_postfix(Parser *ps)
     return e;
 }
 
+static Node *parse_postfix(Parser *ps)
+{
+    Node *e = parse_primary(ps);
+    return parse_postfix_suffixes(ps, e);
+}
+
 static Node *parse_unary(Parser *ps)
 {
     Token p = lexer_peek(ps->lx);
@@ -1985,19 +1992,13 @@ static Node *parse_unary(Parser *ps)
     if (p.kind == TK_STAR)
     {
         lexer_next(ps->lx);
-        Node *base = parse_unary(ps);
-        Node *zero = new_node(ND_INT);
-        zero->int_val = 0;
-        zero->line = p.line;
-        zero->col = p.col;
-        zero->src = lexer_source(ps->lx);
-        Node *ix = new_node(ND_INDEX);
-        ix->lhs = base;
-        ix->rhs = zero;
-        ix->line = p.line;
-        ix->col = p.col;
-        ix->src = lexer_source(ps->lx);
-        return ix;
+        Node *operand = parse_unary(ps);
+        Node *deref = new_node(ND_DEREF);
+        deref->lhs = operand;
+        deref->line = p.line;
+        deref->col = p.col;
+        deref->src = lexer_source(ps->lx);
+        return parse_postfix_suffixes(ps, deref);
     }
     if (p.kind == TK_TILDE)
     {

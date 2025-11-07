@@ -126,6 +126,8 @@ const char *node_kind_name(NodeKind kind)
         return "if statement";
     case ND_INDEX:
         return "index expression";
+    case ND_DEREF:
+        return "dereference expression";
     case ND_CAST:
         return "cast expression";
     case ND_GT_EXPR:
