@@ -1647,7 +1647,7 @@ static int collect_functions_from_unit(const Node *unit, LibraryModuleData *mod)
                 }
             }
         }
-        out.is_varargs = 0;
+    out.is_varargs = fn->is_varargs ? 1 : 0;
         out.is_noreturn = fn->is_noreturn;
         out.is_exposed = fn->is_exposed;
         if (append_library_function(mod, &out) != 0)

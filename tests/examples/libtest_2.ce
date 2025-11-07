@@ -1,5 +1,9 @@
 module LibTest.Another;
 
+extend from "C" i32 printf(char *, ...);
+
+hide alias string = char*;
+
 expose fun other_test_fun(i32 num) -> i32
 {
     ret num + 10;
@@ -8,4 +12,30 @@ expose fun other_test_fun(i32 num) -> i32
 expose fun get_info() -> char*
 {
     ret (__MODULE__ + "::" + __FUNCTION__ + "()");
+}
+
+expose fun test_varargs(i32 count, i32 unused, ...) -> i32
+{
+    printf("test_varargs called with count=%d, unused=%d\n", count, unused);
+    va_list list = va_start();
+    i32 total = 0;
+    for (i32 i = 0; i < count; i = i + 1)
+    {
+        i32 val = va_arg(list, i32);
+        printf("  vararg[%d] = %d\n", i, val);
+        total = total + val;
+    }
+    va_end(list);
+    ret total;
+}
+
+expose fun test_diffvarargs(...) -> void
+{
+    va_list list = va_start();
+    i32 first = va_arg(list, i32);
+    f64 second = va_arg(list, f64);
+    string third = va_arg(list, string);
+    printf("test_diffvarargs: first=%d, second=%f, third=%s\n", first, second, third);
+    va_end(list);
+    ret;
 }

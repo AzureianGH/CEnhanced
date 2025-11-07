@@ -1,0 +1,109 @@
+ccbytecode 2
+
+.extern printf params=(ptr) returns=i32 varargs
+
+.func LibTest_Another_other_test_fun ret=i32 params=1 locals=0
+.params i32
+  load_param 0
+  const i32 10
+  binop add i32
+  ret
+.endfunc
+.func LibTest_Another_get_info ret=ptr params=0 locals=0
+  const_str "LibTest.Another::get_info()"
+  ret
+.endfunc
+.func LibTest_Another_test_varargs ret=i32 params=2 locals=4 varargs
+.params i32 i32
+.locals ptr i32 i32 i32
+  const_str "test_varargs called with count=%d, unused=%d\n"
+  load_param 0
+  load_param 1
+  call printf i32 (ptr,i32,i32)
+  drop i32
+  addr_param 2
+  store_local 0
+  const i32 0
+  store_local 1
+  const i32 0
+  store_local 2
+label while_cond0
+  load_local 2
+  load_param 0
+  compare lt i32
+  const i1 0
+  compare ne i1
+  branch while_body1 while_end2
+label while_body1
+  load_local 0
+  load_indirect i32
+  load_local 0
+  convert bitcast ptr i64
+  const i64 8
+  binop add i64
+  convert bitcast i64 ptr
+  store_local 0
+  store_local 3
+  const_str "  vararg[%d] = %d\n"
+  load_local 2
+  load_local 3
+  call printf i32 (ptr,i32,i32)
+  drop i32
+  load_local 1
+  load_local 3
+  binop add i32
+  store_local 1
+  load_local 1
+  drop i32
+  load_local 2
+  const i32 1
+  binop add i32
+  store_local 2
+  load_local 2
+  drop i32
+  jump while_cond0
+label while_end2
+  load_local 0
+  load_local 1
+  ret
+.endfunc
+.func LibTest_Another_test_diffvarargs ret=void params=0 locals=4 varargs
+.locals ptr i32 f64 ptr
+  addr_param 0
+  store_local 0
+  load_local 0
+  load_indirect i32
+  load_local 0
+  convert bitcast ptr i64
+  const i64 8
+  binop add i64
+  convert bitcast i64 ptr
+  store_local 0
+  store_local 1
+  load_local 0
+  load_indirect f64
+  load_local 0
+  convert bitcast ptr i64
+  const i64 8
+  binop add i64
+  convert bitcast i64 ptr
+  store_local 0
+  store_local 2
+  load_local 0
+  load_indirect ptr
+  load_local 0
+  convert bitcast ptr i64
+  const i64 8
+  binop add i64
+  convert bitcast i64 ptr
+  store_local 0
+  store_local 3
+  const_str "test_diffvarargs: first=%d, second=%f, third=%s\n"
+  load_local 1
+  load_local 2
+  load_local 3
+  call printf i32 (ptr,i32,f64,ptr)
+  drop i32
+  load_local 0
+  ret void
+.endfunc

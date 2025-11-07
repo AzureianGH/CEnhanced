@@ -1115,6 +1115,42 @@ static int can_assign(Type *target, Node *rhs)
     return 0;
 }
 
+static void apply_default_vararg_promotion(Node **slot)
+{
+    if (!slot || !*slot)
+        return;
+
+    Node *arg = *slot;
+    if (!arg)
+        return;
+
+    Type *arg_result_ty = canonicalize_type_deep(arg->type);
+    if (arg_result_ty && arg_result_ty->kind == TY_F64)
+        return;
+
+    if (!arg_result_ty && arg->kind == ND_CAST && arg->type)
+        arg_result_ty = canonicalize_type_deep(arg->type);
+
+    if (!arg_result_ty && arg->lhs)
+        arg_result_ty = canonicalize_type_deep(arg->lhs->type);
+
+    if (!arg_result_ty)
+        return;
+
+    if (arg_result_ty->kind == TY_F32)
+    {
+        Type *target = canonicalize_type_deep(type_f64());
+        Node *cast = (Node *)xcalloc(1, sizeof(Node));
+        cast->kind = ND_CAST;
+        cast->lhs = arg;
+        cast->type = target ? target : type_f64();
+        cast->line = arg->line;
+        cast->col = arg->col;
+        cast->src = arg->src;
+        *slot = cast;
+    }
+}
+
 static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target)
 {
     if (!init || !target)
@@ -2348,6 +2384,14 @@ static void check_expr(SemaContext *sc, Node *e)
                               "argument %d type mismatch: expected %s, got %s",
                               i + 1, want, got);
                 exit(1);
+            }
+        }
+
+        if (sym->sig.is_varargs && e->arg_count > expected)
+        {
+            for (int i = expected; i < e->arg_count; ++i)
+            {
+                apply_default_vararg_promotion(&e->args[i]);
             }
         }
 

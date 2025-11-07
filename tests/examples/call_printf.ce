@@ -55,7 +55,7 @@ bring LibTest.Another;
 
 bring Std as Std;
 
-extend from "C" i32 printf(char *, _vaargs_);
+extend from "C" i32 printf(char *, ...);
 extend from "C" i32 write(int, char *, int);
 extend from "C" i32 read(i32, char *, int);
 extend from "C" void *malloc(int);
@@ -364,10 +364,10 @@ expose fun main() -> i32
 
     assert(strcmp(LibTest.Another.get_info(), "LibTest.Another::get_info()") == 0, "LibTest.Another::get_info() works");
 
-    i32 varargs_sum = test_varargs(5, 12345, 10, 20, 30, 40, 50);
+    i32 varargs_sum = LibTest.Another.test_varargs(5, 12345, 10, 20, 30, 40, 50);
     assert(varargs_sum == 150, "varargs sum is 150");
 
-    test_diffvarargs(77, 3.14f, "varargs test");
+    LibTest.Another.test_diffvarargs(77, 3.14f, "varargs test");
 
     i32[3] fixed_array = {10, 20, 30};
     i32 fixed_sum = fixed_array[0] + fixed_array[1] + fixed_array[2];
@@ -385,32 +385,6 @@ expose fun main() -> i32
     
 
     ret final_sum; // expect 168
-}
-
-hide fun test_varargs(i32 count, i32 unused, ...) -> i32
-{
-    printf("test_varargs called with count=%d, unused=%d\n", count, unused);
-    va_list list = va_start();
-    i32 total = 0;
-    for (i32 i = 0; i < count; i = i + 1)
-    {
-        i32 val = va_arg(list, i32);
-        total = total + val;
-    }
-    va_end(list);
-    ret total;
-}
-
-hide fun test_diffvarargs(...) -> void
-{
-    va_list list = va_start();
-    i32 first = va_arg(list, i32);
-    f64 second = va_arg(list, f64);
-    string third = va_arg(list, string);
-    printf("%d\n", first);
-    printf("test_diffvarargs: first=%d, second=%f, third=%s\n", first, second, third);
-    va_end(list);
-    ret;
 }
 
 hide fun construct_thing() -> TC.SmallTest
