@@ -361,19 +361,33 @@ expose fun main() -> i32
     assert(strcmp(__FUNCTION__, "main") == 0, "__FUNCTION__ matches main");
     assert(strcmp("hello" + "world", "helloworld") == 0, "constant string merging");
 
-    printf(LibTest.Another.get_info());
-    
+    printf("%s\n", LibTest.Another.get_info());
+
+    i32 varargs_sum = test_varargs(5, 10, 20, 30, 40, 50);
+    assert(varargs_sum == 150, "varargs sum is 150");
+
     ret final_sum; // expect 168
+}
+
+hide fun test_paramaddress(i32 a, i32 b, i32 c) -> void
+{
+    i64* p = (&a) as i64*;
+    printf("Value in A: %d\n", p[0]);
+    printf("Value in B: %d\n", p[-1]);
+    printf("Value in C: %d\n", p[-2]);
+    ret;
 }
 
 hide fun test_varargs(i32 count, ...) -> i32
 {
+    va_list list = va_start();
     i32 total = 0;
     for (i32 i = 0; i < count; i = i + 1)
     {
-        i32 val = va_arg(i32);
+        i32 val = va_arg(list, i32);
         total = total + val;
     }
+    va_end(list);
     ret total;
 }
 

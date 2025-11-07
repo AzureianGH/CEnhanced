@@ -146,6 +146,15 @@ static void chancecode_buffer_append(char **buffer, size_t *capacity, size_t *le
 static void append_string(char ***arr, int *count, int *cap, char *value);
 static void parse_chancecode_body(Parser *ps, Node *fn);
 
+static int token_is_varargs(Token tok)
+{
+    if (tok.kind == TK_ELLIPSIS)
+        return 1;
+    if (tok.kind == TK_IDENT && tok.length == 8 && strncmp(tok.lexeme, "_vaargs_", 8) == 0)
+        return 1;
+    return 0;
+}
+
 static char *dup_trimmed(const char *text)
 {
     if (!text)
@@ -400,25 +409,32 @@ static void apply_override_metadata(Parser *ps, Node *fn, const struct PendingAt
                 cursor++;
             if (!*cursor)
                 break;
-            const char *key_start = cursor;
-            while (*cursor && *cursor != '=' && !isspace((unsigned char)*cursor))
-                cursor++;
-            size_t key_len = (size_t)(cursor - key_start);
-            if (*cursor != '=')
-            {
-                while (*cursor && !isspace((unsigned char)*cursor))
-                    cursor++;
-                continue;
-            }
-            cursor++;
-            const char *value_start = cursor;
+
+            const char *token_start = cursor;
             while (*cursor && !isspace((unsigned char)*cursor))
                 cursor++;
-            size_t value_len = (size_t)(cursor - value_start);
+            size_t token_len = (size_t)(cursor - token_start);
+            if (token_len == 0)
+                continue;
+
+            const char *eq_pos = (const char *)memchr(token_start, '=', token_len);
+            if (!eq_pos)
+            {
+                if (token_len == 7 && strncmp(token_start, "varargs", 7) == 0)
+                    fn->is_varargs = 1;
+                else if ((token_len == 9 && strncmp(token_start, "no-return", 9) == 0) ||
+                         (token_len == 8 && strncmp(token_start, "noreturn", 8) == 0))
+                    fn->is_noreturn = 1;
+                continue;
+            }
+
+            size_t key_len = (size_t)(eq_pos - token_start);
+            const char *value_start = eq_pos + 1;
+            size_t value_len = token_len - key_len - 1;
             if (value_len == 0)
                 continue;
 
-            if (key_len == 3 && strncmp(key_start, "ret", 3) == 0)
+            if (key_len == 3 && strncmp(token_start, "ret", 3) == 0)
             {
                 char *ret = (char *)xmalloc(value_len + 1);
                 memcpy(ret, value_start, value_len);
@@ -426,7 +442,7 @@ static void apply_override_metadata(Parser *ps, Node *fn, const struct PendingAt
                 free(fn->metadata.ret_token);
                 fn->metadata.ret_token = ret;
             }
-            else if (key_len == 6 && strncmp(key_start, "params", 6) == 0)
+            else if (key_len == 6 && strncmp(token_start, "params", 6) == 0)
             {
                 char buffer[32];
                 if (value_len >= sizeof(buffer))
@@ -453,7 +469,7 @@ static void apply_override_metadata(Parser *ps, Node *fn, const struct PendingAt
                     exit(1);
                 }
             }
-            else if (key_len == 6 && strncmp(key_start, "locals", 6) == 0)
+            else if (key_len == 6 && strncmp(token_start, "locals", 6) == 0)
             {
                 char buffer[32];
                 if (value_len >= sizeof(buffer))
@@ -524,6 +540,30 @@ static void apply_override_metadata(Parser *ps, Node *fn, const struct PendingAt
                 cursor++;
         }
         fn->metadata.params_line = line;
+        int varargs_tokens = 0;
+        int varargs_index = -1;
+        for (int i = 0; i < count; ++i)
+        {
+            if (tokens[i] && (strcmp(tokens[i], "...") == 0 || strcmp(tokens[i], "_vaargs_") == 0))
+            {
+                varargs_tokens++;
+                varargs_index = i;
+            }
+        }
+        if (varargs_tokens > 0)
+        {
+            if (varargs_tokens > 1 || varargs_index != count - 1)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'.params' varargs ('...') must appear once at the end");
+                exit(1);
+            }
+            fn->is_varargs = 1;
+            free(tokens[count - 1]);
+            tokens[count - 1] = NULL;
+            count--;
+        }
+
         fn->metadata.param_type_names = tokens;
         fn->metadata.param_type_count = count;
         if (fn->param_count != count)
@@ -1111,6 +1151,8 @@ static int is_type_start(Parser *ps, Token t)
     }
     if (t.kind == TK_IDENT)
     {
+        if (t.length == 7 && strncmp(t.lexeme, "va_list", 7) == 0)
+            return 1;
         if (alias_find(ps, t.lexeme, t.length) >= 0 || named_type_find(ps, t.lexeme, t.length) >= 0)
             return 1;
         if (parser_find_import_by_alias(ps, t.lexeme, t.length))
@@ -1281,91 +1323,98 @@ static Type *parse_type_spec(Parser *ps)
         }
         else
         {
-            int ai = alias_find(ps, b.lexeme, b.length);
-            if (ai < 0)
+            if (b.length == 7 && strncmp(b.lexeme, "va_list", 7) == 0)
             {
-                Type *nt = named_type_get(ps, b.lexeme, b.length);
-                if (nt)
-                    base = nt;
-                else
-                {
-                    diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
-                                  b.length, b.lexeme);
-                    exit(1);
-                }
+                base = type_va_list();
             }
-            if (ai >= 0)
+            else
             {
-                struct Alias *A = &ps->aliases[ai];
-                if (A->is_generic)
+                int ai = alias_find(ps, b.lexeme, b.length);
+                if (ai < 0)
                 {
-                    Token lt = lexer_next(ps->lx);
-                    if (lt.kind != TK_LT)
+                    Type *nt = named_type_get(ps, b.lexeme, b.length);
+                    if (nt)
+                        base = nt;
+                    else
                     {
-                        diag_error_at(lexer_source(ps->lx), lt.line, lt.col,
-                                      "expected '<' after generic alias '%.*s'", b.length,
-                                      b.lexeme);
+                        diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
+                                      b.length, b.lexeme);
                         exit(1);
                     }
-                    Type *arg = parse_type_spec(ps);
-                    Token gt = lexer_next(ps->lx);
-                    if (gt.kind != TK_GT)
-                    {
-                        diag_error_at(lexer_source(ps->lx), gt.line, gt.col,
-                                      "expected '>' after generic argument");
-                        exit(1);
-                    }
-                    base = make_ptr_chain_dyn(arg, A->gen_ptr_depth);
                 }
-                else
+                if (ai >= 0)
                 {
-                    Type *bk = NULL;
-                    switch (A->base_kind)
+                    struct Alias *A = &ps->aliases[ai];
+                    if (A->is_generic)
                     {
-                    case TY_I8:
-                        bk = &ti8;
-                        break;
-                    case TY_U8:
-                        bk = &tu8;
-                        break;
-                    case TY_I16:
-                        bk = &ti16;
-                        break;
-                    case TY_U16:
-                        bk = &tu16;
-                        break;
-                    case TY_I32:
-                        bk = &ti32;
-                        break;
-                    case TY_U32:
-                        bk = &tu32;
-                        break;
-                    case TY_I64:
-                        bk = &ti64;
-                        break;
-                    case TY_U64:
-                        bk = &tu64;
-                        break;
-                    case TY_F32:
-                        bk = &tf32;
-                        break;
-                    case TY_F64:
-                        bk = &tf64;
-                        break;
-                    case TY_F128:
-                        bk = &tf128;
-                        break;
-                    case TY_VOID:
-                        bk = &tv;
-                        break;
-                    case TY_CHAR:
-                        bk = &tch;
-                        break;
-                    default:
-                        diag_error("unsupported alias base kind");
-                        exit(1);
+                        Token lt = lexer_next(ps->lx);
+                        if (lt.kind != TK_LT)
+                        {
+                            diag_error_at(lexer_source(ps->lx), lt.line, lt.col,
+                                          "expected '<' after generic alias '%.*s'", b.length,
+                                          b.lexeme);
+                            exit(1);
+                        }
+                        Type *arg = parse_type_spec(ps);
+                        Token gt = lexer_next(ps->lx);
+                        if (gt.kind != TK_GT)
+                        {
+                            diag_error_at(lexer_source(ps->lx), gt.line, gt.col,
+                                          "expected '>' after generic argument");
+                            exit(1);
+                        }
+                        base = make_ptr_chain_dyn(arg, A->gen_ptr_depth);
                     }
-                    base = make_ptr_chain_dyn(bk, A->ptr_depth);
+                    else
+                    {
+                        Type *bk = NULL;
+                        switch (A->base_kind)
+                        {
+                        case TY_I8:
+                            bk = &ti8;
+                            break;
+                        case TY_U8:
+                            bk = &tu8;
+                            break;
+                        case TY_I16:
+                            bk = &ti16;
+                            break;
+                        case TY_U16:
+                            bk = &tu16;
+                            break;
+                        case TY_I32:
+                            bk = &ti32;
+                            break;
+                        case TY_U32:
+                            bk = &tu32;
+                            break;
+                        case TY_I64:
+                            bk = &ti64;
+                            break;
+                        case TY_U64:
+                            bk = &tu64;
+                            break;
+                        case TY_F32:
+                            bk = &tf32;
+                            break;
+                        case TY_F64:
+                            bk = &tf64;
+                            break;
+                        case TY_F128:
+                            bk = &tf128;
+                            break;
+                        case TY_VOID:
+                            bk = &tv;
+                            break;
+                        case TY_CHAR:
+                            bk = &tch;
+                            break;
+                        default:
+                            diag_error("unsupported alias base kind");
+                            exit(1);
+                        }
+                        base = make_ptr_chain_dyn(bk, A->ptr_depth);
+                    }
                 }
             }
         }
@@ -1560,6 +1609,45 @@ static Node *parse_primary(Parser *ps)
             Node *n = new_node(ND_INT);
             n->int_val = 0;
             n->type = type_bool();
+            n->line = t.line;
+            n->col = t.col;
+            n->src = lexer_source(ps->lx);
+            return n;
+        }
+        if (t.length == 8 && strncmp(t.lexeme, "va_start", 8) == 0)
+        {
+            expect(ps, TK_LPAREN, "(");
+            expect(ps, TK_RPAREN, ")");
+            Node *n = new_node(ND_VA_START);
+            n->line = t.line;
+            n->col = t.col;
+            n->src = lexer_source(ps->lx);
+            n->type = type_va_list();
+            return n;
+        }
+        if (t.length == 6 && strncmp(t.lexeme, "va_end", 6) == 0)
+        {
+            expect(ps, TK_LPAREN, "(");
+            Node *list_expr = parse_expr(ps);
+            expect(ps, TK_RPAREN, ")");
+            Node *n = new_node(ND_VA_END);
+            n->lhs = list_expr;
+            n->line = t.line;
+            n->col = t.col;
+            n->src = lexer_source(ps->lx);
+            n->type = type_void();
+            return n;
+        }
+        if (t.length == 6 && strncmp(t.lexeme, "va_arg", 6) == 0)
+        {
+            expect(ps, TK_LPAREN, "(");
+            Node *list_expr = parse_expr(ps);
+            expect(ps, TK_COMMA, ",");
+            Type *target_type = parse_type_spec(ps);
+            expect(ps, TK_RPAREN, ")");
+            Node *n = new_node(ND_VA_ARG);
+            n->lhs = list_expr;
+            n->var_type = target_type;
             n->line = t.line;
             n->col = t.col;
             n->src = lexer_source(ps->lx);
@@ -2573,37 +2661,62 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     expect(ps, TK_KW_FUN, "fun");
     Token name = expect(ps, TK_IDENT, "identifier");
     expect(ps, TK_LPAREN, "(");
-    // parameters: [type ident] *(, type ident)
+    // parameters: [type ident] *(, type ident) [,...]
     Type **param_types = NULL;
     const char **param_names = NULL;
     int param_count = 0, param_cap = 0;
-    Token peek = lexer_peek(ps->lx);
-    if (peek.kind != TK_RPAREN)
+    int saw_varargs = 0;
+    while (1)
     {
-        for (;;)
-        {
-            Type *pty = parse_type_spec(ps);
-            Token pn = expect(ps, TK_IDENT, "parameter name");
-            if (param_count == param_cap)
-            {
-                param_cap = param_cap ? param_cap * 2 : 4;
-                param_types = (Type **)realloc(param_types, sizeof(Type *) * param_cap);
-                param_names =
-                    (const char **)realloc(param_names, sizeof(char *) * param_cap);
-            }
-            param_types[param_count] = pty;
-            char *nm = (char *)xmalloc((size_t)pn.length + 1);
-            memcpy(nm, pn.lexeme, (size_t)pn.length);
-            nm[pn.length] = '\0';
-            param_names[param_count] = nm;
-            param_count++;
-            Token c = lexer_peek(ps->lx);
-            if (c.kind == TK_COMMA)
-            {
-                lexer_next(ps->lx);
-                continue;
-            }
+        Token next = lexer_peek(ps->lx);
+        if (next.kind == TK_RPAREN)
             break;
+
+        if (token_is_varargs(next))
+        {
+            if (saw_varargs)
+            {
+                diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                              "varargs ('...') may only appear once in a parameter list");
+                exit(1);
+            }
+            lexer_next(ps->lx);
+            saw_varargs = 1;
+            break;
+        }
+
+        Type *pty = parse_type_spec(ps);
+        Token pn = expect(ps, TK_IDENT, "parameter name");
+        if (param_count == param_cap)
+        {
+            param_cap = param_cap ? param_cap * 2 : 4;
+            param_types = (Type **)realloc(param_types, sizeof(Type *) * param_cap);
+            param_names =
+                (const char **)realloc(param_names, sizeof(char *) * param_cap);
+        }
+        param_types[param_count] = pty;
+        char *nm = (char *)xmalloc((size_t)pn.length + 1);
+        memcpy(nm, pn.lexeme, (size_t)pn.length);
+        nm[pn.length] = '\0';
+        param_names[param_count] = nm;
+        param_count++;
+
+        Token delim = lexer_peek(ps->lx);
+        if (delim.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        break;
+    }
+    if (saw_varargs)
+    {
+        Token after = lexer_peek(ps->lx);
+        if (after.kind != TK_RPAREN)
+        {
+            diag_error_at(lexer_source(ps->lx), after.line, after.col,
+                          "varargs ('...') must be the final parameter");
+            exit(1);
         }
     }
     expect(ps, TK_RPAREN, ")");
@@ -2626,6 +2739,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     fn->param_types = param_types;
     fn->param_names = param_names;
     fn->param_count = param_count;
+    fn->is_varargs = saw_varargs;
     fn->line = name.line;
     fn->col = name.col;
     fn->src = lexer_source(ps->lx);
@@ -2676,34 +2790,39 @@ static void parse_extend_decl(Parser *ps, int leading_noreturn)
         Token peek = lexer_peek(ps->lx);
         if (peek.kind != TK_RPAREN)
         {
-            for (;;)
+            while (1)
             {
                 Token maybe_va = lexer_peek(ps->lx);
-                if (maybe_va.kind == TK_IDENT && maybe_va.length == 8 &&
-                    strncmp(maybe_va.lexeme, "_vaargs_", 8) == 0)
+                if (maybe_va.kind == TK_RPAREN)
+                    break;
+                if (token_is_varargs(maybe_va))
                 {
+                    if (is_varargs)
+                    {
+                        diag_error_at(lexer_source(ps->lx), maybe_va.line, maybe_va.col,
+                                      "varargs ('...') may only appear once in a parameter list");
+                        exit(1);
+                    }
                     lexer_next(ps->lx);
                     is_varargs = 1;
+                    break;
                 }
-                else
+
+                Type *pty = parse_type_spec(ps);
+                if (param_count == param_cap)
                 {
-                    Type *pty = parse_type_spec(ps);
-                    if (param_count == param_cap)
-                    {
-                        param_cap = param_cap ? param_cap * 2 : 4;
-                        param_types =
-                            (Type **)realloc(param_types, sizeof(Type *) * param_cap);
-                    }
-                    param_types[param_count++] = pty;
-                    Token maybe_name = lexer_peek(ps->lx);
-                    if (maybe_name.kind == TK_IDENT &&
-                        !(maybe_name.length == 8 &&
-                          strncmp(maybe_name.lexeme, "_vaargs_", 8) == 0) &&
-                        !is_type_start(ps, maybe_name))
-                    {
-                        lexer_next(ps->lx);
-                    }
+                    param_cap = param_cap ? param_cap * 2 : 4;
+                    param_types =
+                        (Type **)realloc(param_types, sizeof(Type *) * param_cap);
                 }
+                param_types[param_count++] = pty;
+                Token maybe_name = lexer_peek(ps->lx);
+                if (maybe_name.kind == TK_IDENT && !token_is_varargs(maybe_name) &&
+                    !is_type_start(ps, maybe_name))
+                {
+                    lexer_next(ps->lx);
+                }
+
                 Token delim = lexer_peek(ps->lx);
                 if (delim.kind == TK_COMMA)
                 {
@@ -2711,6 +2830,16 @@ static void parse_extend_decl(Parser *ps, int leading_noreturn)
                     continue;
                 }
                 break;
+            }
+        }
+        if (is_varargs)
+        {
+            Token after = lexer_peek(ps->lx);
+            if (after.kind != TK_RPAREN)
+            {
+                diag_error_at(lexer_source(ps->lx), after.line, after.col,
+                              "varargs ('...') must be the final parameter");
+                exit(1);
             }
         }
         expect(ps, TK_RPAREN, ")");
@@ -2764,34 +2893,39 @@ static void parse_extend_decl(Parser *ps, int leading_noreturn)
     Token pstart = lexer_peek(ps->lx);
     if (pstart.kind != TK_RPAREN)
     {
-        for (;;)
+        while (1)
         {
             Token maybe_va = lexer_peek(ps->lx);
-            if (maybe_va.kind == TK_IDENT && maybe_va.length == 8 &&
-                strncmp(maybe_va.lexeme, "_vaargs_", 8) == 0)
+            if (maybe_va.kind == TK_RPAREN)
+                break;
+            if (token_is_varargs(maybe_va))
             {
+                if (is_varargs)
+                {
+                    diag_error_at(lexer_source(ps->lx), maybe_va.line, maybe_va.col,
+                                  "varargs ('...') may only appear once in a parameter list");
+                    exit(1);
+                }
                 lexer_next(ps->lx);
                 is_varargs = 1;
+                break;
             }
-            else
+
+            Type *pty = parse_type_spec(ps);
+            if (param_count == param_cap)
             {
-                Type *pty = parse_type_spec(ps);
-                if (param_count == param_cap)
-                {
-                    param_cap = param_cap ? param_cap * 2 : 4;
-                    param_types =
-                        (Type **)realloc(param_types, sizeof(Type *) * param_cap);
-                }
-                param_types[param_count++] = pty;
-                Token maybe_name = lexer_peek(ps->lx);
-                if (maybe_name.kind == TK_IDENT &&
-                    !(maybe_name.length == 8 &&
-                      strncmp(maybe_name.lexeme, "_vaargs_", 8) == 0) &&
-                    !is_type_start(ps, maybe_name))
-                {
-                    lexer_next(ps->lx);
-                }
+                param_cap = param_cap ? param_cap * 2 : 4;
+                param_types =
+                    (Type **)realloc(param_types, sizeof(Type *) * param_cap);
             }
+            param_types[param_count++] = pty;
+            Token maybe_name = lexer_peek(ps->lx);
+            if (maybe_name.kind == TK_IDENT && !token_is_varargs(maybe_name) &&
+                !is_type_start(ps, maybe_name))
+            {
+                lexer_next(ps->lx);
+            }
+
             Token delim = lexer_peek(ps->lx);
             if (delim.kind == TK_COMMA)
             {
@@ -2806,6 +2940,16 @@ static void parse_extend_decl(Parser *ps, int leading_noreturn)
                               "unexpected end of file in extern parameter list");
                 exit(1);
             }
+        }
+    }
+    if (is_varargs)
+    {
+        Token after = lexer_peek(ps->lx);
+        if (after.kind != TK_RPAREN)
+        {
+            diag_error_at(lexer_source(ps->lx), after.line, after.col,
+                          "varargs ('...') must be the final parameter");
+            exit(1);
         }
     }
     expect(ps, TK_RPAREN, ")");
