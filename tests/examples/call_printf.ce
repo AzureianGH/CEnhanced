@@ -369,6 +369,21 @@ expose fun main() -> i32
 
     test_diffvarargs(77, 3.14f, "varargs test");
 
+    i32[3] fixed_array = {10, 20, 30};
+    i32 fixed_sum = fixed_array[0] + fixed_array[1] + fixed_array[2];
+    assert(fixed_sum == 60, "fixed array sum is 60");
+    assert(sizeof(fixed_array) == sizeof(i32) * 3, "fixed array size is correct");
+
+    i64[] dyn_array = Std.Memory.alloc(sizeof(i64) * 4) as i64[];
+    dyn_array[0] = 100;
+    dyn_array[1] = 200;
+    dyn_array[2] = 300;
+    dyn_array[3] = 400;
+    i64 dyn_sum = dyn_array[0] + dyn_array[1] + dyn_array[2] + dyn_array[3];
+    assert(dyn_sum == 1000, "dynamic array sum is 1000");
+    Std.Memory.dealloc(dyn_array as void*);
+    
+
     ret final_sum; // expect 168
 }
 

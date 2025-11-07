@@ -185,6 +185,8 @@ static int ccb_emit_pointer_add_like(CcbFunctionBuilder *fb, const Node *expr, b
 static int ccb_emit_pointer_difference(CcbFunctionBuilder *fb, const Node *expr);
 static int ccb_emit_struct_zero(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *struct_type);
 static int ccb_emit_struct_initializer(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *struct_type, const Node *init);
+static int ccb_emit_array_zero(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *array_type);
+static int ccb_emit_array_initializer(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *array_type, const Node *init);
 static bool type_is_address_only(const Type *ty);
 static int ccb_emit_pointer_offset(CcbFunctionBuilder *fb, int offset, const Node *node);
 static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type, CcbLocal *dst_ptr, CcbLocal *src_ptr);
@@ -931,6 +933,12 @@ static CCValueType ccb_type_for_expr(const Node *expr)
             return ccb_type_for_expr(expr->lhs);
         return CC_TYPE_I32;
     case ND_VAR:
+        if (expr->var_type && expr->var_type->kind == TY_ARRAY)
+        {
+            if (expr->var_type->array.is_unsized)
+                return CC_TYPE_PTR;
+            return CC_TYPE_PTR;
+        }
         return CC_TYPE_I32;
     case ND_ASSIGN:
         return ccb_type_for_expr(expr->rhs);
@@ -1609,6 +1617,12 @@ static size_t ccb_type_size_bytes(const Type *ty)
         return 16;
     case TY_STRUCT:
         return ty->strct.size_bytes > 0 ? (size_t)ty->strct.size_bytes : 8;
+    case TY_ARRAY:
+        if (ty->array.is_unsized || !ty->array.elem)
+            return 8;
+        if (ty->array.length <= 0)
+            return 0;
+        return (size_t)ty->array.length * ccb_type_size_bytes(ty->array.elem);
     case TY_VOID:
         return 0;
     default:
@@ -1995,7 +2009,13 @@ static int ccb_emit_member_address(CcbFunctionBuilder *fb, const Node *expr, CCV
 
 static bool type_is_address_only(const Type *ty)
 {
-    return ty && ty->kind == TY_STRUCT;
+    if (!ty)
+        return false;
+    if (ty->kind == TY_STRUCT)
+        return true;
+    if (ty->kind == TY_ARRAY)
+        return !ty->array.is_unsized;
+    return false;
 }
 
 static int ccb_emit_pointer_offset(CcbFunctionBuilder *fb, int offset, const Node *node)
@@ -2243,6 +2263,163 @@ static int ccb_emit_struct_initializer(CcbFunctionBuilder *fb, const Node *var_d
             return 1;
 
         if (!ccb_emit_store_indirect(&fb->body, field_ty))
+            return 1;
+    }
+
+    return 0;
+}
+
+static int ccb_emit_array_zero(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *array_type)
+{
+    if (!fb || !var_name || !array_type || array_type->kind != TY_ARRAY || array_type->array.is_unsized)
+        return 0;
+
+    int length = array_type->array.length;
+    if (length <= 0)
+        return 0;
+
+    const Type *elem_type = array_type->array.elem;
+    if (!elem_type)
+        elem_type = type_i32();
+
+    if (type_is_address_only(elem_type))
+    {
+        diag_error_at(var_decl ? var_decl->src : NULL, var_decl ? var_decl->line : 0, var_decl ? var_decl->col : 0,
+                      "array elements with aggregate types cannot be zero-initialized yet");
+        return 1;
+    }
+
+    Node base_ref = {0};
+    base_ref.kind = ND_VAR;
+    base_ref.var_ref = var_name;
+    base_ref.type = type_ptr((Type *)elem_type);
+    base_ref.var_type = (Type *)array_type;
+    base_ref.var_is_array = 1;
+    base_ref.var_is_const = var_decl ? var_decl->var_is_const : 0;
+    base_ref.var_is_global = var_decl ? var_decl->var_is_global : 0;
+    base_ref.src = var_decl ? var_decl->src : NULL;
+    base_ref.line = var_decl ? var_decl->line : 0;
+    base_ref.col = var_decl ? var_decl->col : 0;
+
+    for (int i = 0; i < length; ++i)
+    {
+        Node idx_lit = {0};
+        idx_lit.kind = ND_INT;
+        idx_lit.int_val = i;
+        idx_lit.type = type_i32();
+        idx_lit.src = base_ref.src;
+        idx_lit.line = base_ref.line;
+        idx_lit.col = base_ref.col;
+
+        Node idx_expr = {0};
+        idx_expr.kind = ND_INDEX;
+        idx_expr.lhs = &base_ref;
+        idx_expr.rhs = &idx_lit;
+        idx_expr.type = (Type *)elem_type;
+        idx_expr.src = base_ref.src;
+        idx_expr.line = base_ref.line;
+        idx_expr.col = base_ref.col;
+
+        CCValueType elem_ty = map_type_to_cc(elem_type);
+        if (elem_ty == CC_TYPE_INVALID || elem_ty == CC_TYPE_VOID)
+            elem_ty = CC_TYPE_I32;
+
+        if (ccb_emit_index_address(fb, &idx_expr, &elem_ty, NULL))
+            return 1;
+        if (!ccb_emit_const_zero(&fb->body, elem_ty))
+            return 1;
+        if (!ccb_emit_store_indirect(&fb->body, elem_ty))
+            return 1;
+    }
+
+    return 0;
+}
+
+static int ccb_emit_array_initializer(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *array_type, const Node *init)
+{
+    if (!fb || !var_name || !array_type || array_type->kind != TY_ARRAY || array_type->array.is_unsized)
+        return 0;
+    if (!init)
+        return 0;
+    if (init->kind != ND_INIT_LIST)
+    {
+        diag_error_at(init->src, init->line, init->col,
+                      "unsupported initializer for fixed-size array");
+        return 1;
+    }
+
+    const Type *elem_type = array_type->array.elem;
+    if (!elem_type)
+        elem_type = type_i32();
+
+    if (type_is_address_only(elem_type) && !init->init.is_zero)
+    {
+        diag_error_at(init->src, init->line, init->col,
+                      "array initializer lists for aggregate element types are not supported yet");
+        return 1;
+    }
+
+    if (init->init.is_zero || init->init.count == 0)
+        return ccb_emit_array_zero(fb, var_decl, var_name, array_type);
+
+    if (ccb_emit_array_zero(fb, var_decl, var_name, array_type))
+        return 1;
+
+    Node base_ref = {0};
+    base_ref.kind = ND_VAR;
+    base_ref.var_ref = var_name;
+    base_ref.type = type_ptr((Type *)elem_type);
+    base_ref.var_type = (Type *)array_type;
+    base_ref.var_is_array = 1;
+    base_ref.var_is_const = var_decl ? var_decl->var_is_const : 0;
+    base_ref.var_is_global = var_decl ? var_decl->var_is_global : 0;
+    base_ref.src = var_decl ? var_decl->src : NULL;
+    base_ref.line = var_decl ? var_decl->line : 0;
+    base_ref.col = var_decl ? var_decl->col : 0;
+
+    int limit = init->init.count;
+    if (array_type->array.length >= 0 && limit > array_type->array.length)
+        limit = array_type->array.length;
+
+    for (int i = 0; i < limit; ++i)
+    {
+        const Node *value = (init->init.elems && i < init->init.count) ? init->init.elems[i] : NULL;
+        if (!value)
+        {
+            diag_error_at(init->src, init->line, init->col,
+                          "missing initializer expression for array element %d", i);
+            return 1;
+        }
+
+        Node idx_lit = {0};
+        idx_lit.kind = ND_INT;
+        idx_lit.int_val = i;
+        idx_lit.type = type_i32();
+        idx_lit.src = base_ref.src;
+        idx_lit.line = base_ref.line;
+        idx_lit.col = base_ref.col;
+
+        Node idx_expr = {0};
+        idx_expr.kind = ND_INDEX;
+        idx_expr.lhs = &base_ref;
+        idx_expr.rhs = &idx_lit;
+        idx_expr.type = (Type *)elem_type;
+        idx_expr.src = value->src;
+        idx_expr.line = value->line;
+        idx_expr.col = value->col;
+
+        CCValueType elem_ty = map_type_to_cc(elem_type);
+        if (ccb_emit_index_address(fb, &idx_expr, &elem_ty, NULL))
+            return 1;
+
+        if (ccb_emit_expr_basic(fb, value))
+            return 1;
+
+        CCValueType value_ty = ccb_type_for_expr(value);
+        if (ccb_emit_convert_between(fb, value_ty, elem_ty, value))
+            return 1;
+
+        if (!ccb_emit_store_indirect(&fb->body, elem_ty))
             return 1;
     }
 
@@ -3355,7 +3532,8 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         {
             if (expr->var_is_global)
             {
-                if (type_is_address_only(expr->type))
+                int is_array_addr = (expr->var_type && expr->var_type->kind == TY_ARRAY && !expr->var_type->array.is_unsized);
+                if (type_is_address_only(expr->type) || is_array_addr)
                 {
                     if (!ccb_emit_addr_global(&fb->body, expr->var_ref))
                         return 1;
@@ -4025,7 +4203,7 @@ static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
         }
 
         Type *var_type = stmt->var_type;
-        bool address_only = var_type && var_type->kind == TY_STRUCT;
+        bool address_only = type_is_address_only(var_type);
 
         CcbLocal *local = ccb_local_add(fb, stmt->var_name, var_type, address_only, false);
         if (!local)
@@ -4047,6 +4225,15 @@ static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
             if (!ccb_emit_store_local(fb, local))
                 return 1;
 
+            if (var_type && var_type->kind == TY_ARRAY && !var_type->array.is_unsized)
+            {
+                if (init)
+                {
+                    if (ccb_emit_array_initializer(fb, stmt, stmt->var_name, var_type, init))
+                        return 1;
+                }
+                return 0;
+            }
             if (ccb_emit_struct_initializer(fb, stmt, stmt->var_name, var_type, init))
                 return 1;
             return 0;
@@ -4059,7 +4246,7 @@ static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
                 if (!init->init.is_zero)
                 {
                     diag_error_at(init->src, init->line, init->col,
-                                  "initializer lists not supported yet");
+                                  "initializer lists not supported for scalars yet");
                     return 1;
                 }
                 if (!ccb_emit_const_zero(&fb->body, local->value_type))
@@ -4264,13 +4451,13 @@ static int ccb_module_append_global(CcbModule *mod, const Node *decl)
         return 1;
     }
 
-    if (decl->var_type && decl->var_type->kind == TY_STRUCT)
+    if (decl->var_type && type_is_address_only(decl->var_type))
     {
-        int size_bytes = decl->var_type->strct.size_bytes;
+        int size_bytes = (int)ccb_type_size_bytes(decl->var_type);
         if (size_bytes <= 0)
         {
             diag_error_at(decl->src, decl->line, decl->col,
-                          "struct global '%s' has unknown size", decl->var_name);
+                          "global '%s' has unknown size", decl->var_name);
             return 1;
         }
 
@@ -4496,6 +4683,8 @@ static CCValueType map_type_to_cc(const Type *ty)
     case TY_F64:
         return CC_TYPE_F64;
     case TY_PTR:
+        return CC_TYPE_PTR;
+    case TY_ARRAY:
         return CC_TYPE_PTR;
     case TY_VOID:
         return CC_TYPE_VOID;

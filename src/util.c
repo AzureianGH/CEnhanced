@@ -73,6 +73,16 @@ Type *type_ptr(Type *to)
     return t;
 }
 
+Type *type_array(Type *elem, int length)
+{
+    Type *t = (Type *)xcalloc(1, sizeof(Type));
+    t->kind = TY_ARRAY;
+    t->array.elem = elem;
+    t->array.length = length;
+    t->array.is_unsized = (length < 0);
+    return t;
+}
+
 int type_equals(Type *a, Type *b)
 {
     if (a == b)
@@ -83,6 +93,14 @@ int type_equals(Type *a, Type *b)
         return 0;
     if (a->kind == TY_PTR)
         return type_equals(a->pointee, b->pointee);
+    if (a->kind == TY_ARRAY)
+    {
+        if (a->array.length != b->array.length)
+            return 0;
+        if (a->array.is_unsized != b->array.is_unsized)
+            return 0;
+        return type_equals(a->array.elem, b->array.elem);
+    }
     return 1;
 }
 

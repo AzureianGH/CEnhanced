@@ -130,6 +130,7 @@ typedef enum
     TY_BOOL,
     TY_PTR,
     TY_STRUCT,
+    TY_ARRAY,
     TY_VA_LIST,
     TY_IMPORT,
 } TypeKind;
@@ -148,6 +149,12 @@ typedef struct Type
         int field_count;
         int size_bytes;
     } strct;
+    struct
+    {
+        struct Type *elem;
+        int length;
+        int is_unsized;
+    } array;
     int is_exposed; // visibility flag for module system
     const char *import_module;
     const char *import_type_name;
@@ -278,6 +285,7 @@ typedef struct Node
     Type *var_type;
     int var_is_const;  // for ND_VAR_DECL
     int var_is_global; // set on declarations/references that live at global scope
+    int var_is_array;  // for ND_VAR references to array-typed variables
     // For ND_BLOCK
     struct Node **stmts;
     int stmt_count;
@@ -298,6 +306,7 @@ typedef struct Node
         int *field_indices;       // computed during sema, parallel to elems
         int count;
         int is_zero; // for {} or {0} special cases
+        int is_array_literal; // track '[...]' initializers
     } init;
     // Module metadata (only valid for ND_UNIT)
     ModulePath module_path;
@@ -341,6 +350,7 @@ Type *type_char(void);
 Type *type_bool(void);
 Type *type_va_list(void);
 Type *type_ptr(Type *to);
+Type *type_array(Type *elem, int length);
 int type_equals(Type *a, Type *b);
 
 // Codegen options when emitting ChanceCode bytecode (.ccb)

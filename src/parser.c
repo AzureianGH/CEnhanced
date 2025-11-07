@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 
 struct ModuleImport
 {
@@ -1107,8 +1108,14 @@ static int type_sizeof_simple(Type *ty)
         return 0;
     case TY_STRUCT:
         return ty->strct.size_bytes;
-    case TY_IMPORT:
-        return 0;
+        case TY_ARRAY:
+            if (!ty->array.elem)
+                return 8;
+            if (ty->array.is_unsized)
+                return 8;
+            if (ty->array.length <= 0)
+                return 0;
+            return ty->array.length * type_sizeof_simple(ty->array.elem);
     default:
         return 8;
     }
@@ -1461,8 +1468,45 @@ static Type *parse_type_spec(Parser *ps)
                       "expected type specifier");
         exit(1);
     }
-    // pointer suffixes '*': allocate a fresh pointer chain per type
+    // array suffixes '[...]'
     Token p = lexer_peek(ps->lx);
+    while (p.kind == TK_LBRACKET)
+    {
+        lexer_next(ps->lx);
+        Token len_tok = lexer_peek(ps->lx);
+        int length = -1;
+        if (len_tok.kind == TK_RBRACKET)
+        {
+            length = -1;
+        }
+        else
+        {
+            len_tok = lexer_next(ps->lx);
+            if (len_tok.kind != TK_INT)
+            {
+                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                              "array length must be an integer literal");
+                exit(1);
+            }
+            if (len_tok.int_val < 0)
+            {
+                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                              "array length must be non-negative");
+                exit(1);
+            }
+            if (len_tok.int_val > INT_MAX)
+            {
+                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                              "array length is too large");
+                exit(1);
+            }
+            length = (int)len_tok.int_val;
+        }
+        expect(ps, TK_RBRACKET, "]");
+        base = type_array(base, length);
+        p = lexer_peek(ps->lx);
+    }
+    // pointer suffixes '*': allocate a fresh pointer chain per type
     int depth = 0;
     while (p.kind == TK_STAR)
     {
@@ -1505,20 +1549,27 @@ static Node *parse_primary(Parser *ps)
     if (t.kind == TK_KW_SIZEOF)
     {
         expect(ps, TK_LPAREN, "(");
-        // sizeof takes a type spec
-        Type *ty = parse_type_spec(ps);
+        Token peek = lexer_peek(ps->lx);
+        Node *operand_expr = NULL;
+        Type *operand_type = NULL;
+        if (is_type_start(ps, peek))
+        {
+            operand_type = parse_type_spec(ps);
+        }
+        else
+        {
+            operand_expr = parse_expr(ps);
+        }
         expect(ps, TK_RPAREN, ")");
         Node *n = new_node(ND_SIZEOF);
         n->type = type_i32();
-        // store computed size in int_val for constant-folding/codegen ease
-        // we'll compute in sema to ensure consistency
-        n->lhs = NULL;
+        // sizeof never evaluates its operand; sema computes the constant size
+        n->lhs = operand_expr;
         n->rhs = NULL;
         n->line = t.line;
         n->col = t.col;
         n->src = lexer_source(ps->lx);
-        // temporarily stash the type node via var_type field to carry it to sema
-        n->var_type = ty;
+        n->var_type = operand_type;
         return n;
     }
     if (t.kind == TK_KW_TYPEOF)
@@ -2500,6 +2551,7 @@ static Node *parse_stmt(Parser *ps)
         nm[name.length] = '\0';
         decl->var_name = nm;
         decl->var_type = ty;
+        decl->var_is_array = (ty && ty->kind == TY_ARRAY);
         decl->var_is_const = is_const;
         decl->line = name.line;
         decl->col = name.col;
@@ -2600,6 +2652,7 @@ static Node *parse_for(Parser *ps)
             nm[name.length] = '\0';
             decl->var_name = nm;
             decl->var_type = ty;
+            decl->var_is_array = (ty && ty->kind == TY_ARRAY);
             decl->var_is_const = is_const;
             decl->line = name.line;
             decl->col = name.col;
@@ -3249,6 +3302,7 @@ Node *parse_unit(Parser *ps)
             nm[name.length] = '\0';
             decl->var_name = nm;
             decl->var_type = ty;
+            decl->var_is_array = (ty && ty->kind == TY_ARRAY);
             decl->var_is_const = is_const;
             decl->var_is_global = 1;
             decl->is_exposed = visibility;

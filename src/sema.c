@@ -14,6 +14,12 @@ static Type *canonicalize_type_deep(Type *ty)
         if (resolved && resolved != ty->pointee)
             ty->pointee = resolved;
     }
+    else if (ty && ty->kind == TY_ARRAY && ty->array.elem)
+    {
+        Type *resolved_elem = canonicalize_type_deep(ty->array.elem);
+        if (resolved_elem && resolved_elem != ty->array.elem)
+            ty->array.elem = resolved_elem;
+    }
     return ty;
 }
 
@@ -390,6 +396,22 @@ static void describe_type(const Type *t, char *buf, size_t bufsz)
     case TY_VA_LIST:
         snprintf(buf, bufsz, "va_list");
         return;
+    case TY_ARRAY:
+        if (!t->array.elem)
+        {
+            snprintf(buf, bufsz, "array[]");
+            return;
+        }
+        else
+        {
+            char inner[128];
+            describe_type(t->array.elem, inner, sizeof(inner));
+            if (t->array.is_unsized)
+                snprintf(buf, bufsz, "array[] of %s", inner);
+            else
+                snprintf(buf, bufsz, "array[%d] of %s", t->array.length, inner);
+            return;
+        }
     case TY_PTR:
         if (!t->pointee)
         {
@@ -420,6 +442,8 @@ static int type_is_exportable(const Type *t)
         return 1;
     if (t->kind == TY_PTR)
         return 1;
+    if (t->kind == TY_ARRAY)
+        return t->array.elem ? type_is_exportable(t->array.elem) : 0;
     if (t->kind == TY_STRUCT)
         return t->is_exposed != 0;
     return 1;
@@ -467,6 +491,14 @@ static int type_equal(Type *a, Type *b)
         return 0;
     if (a->kind == TY_PTR)
         return type_equal(a->pointee, b->pointee);
+    if (a->kind == TY_ARRAY)
+    {
+        if (a->array.is_unsized != b->array.is_unsized)
+            return 0;
+        if (!a->array.is_unsized && a->array.length != b->array.length)
+            return 0;
+        return type_equal(a->array.elem, b->array.elem);
+    }
     if (a->kind == TY_STRUCT)
     {
         if (a->struct_name && b->struct_name)
@@ -474,6 +506,48 @@ static int type_equal(Type *a, Type *b)
         return a == b;
     }
     return 1;
+}
+
+static int sizeof_type_bytes(Type *ty)
+{
+    ty = canonicalize_type_deep(ty);
+    if (!ty)
+        return 8;
+    switch (ty->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+    case TY_CHAR:
+        return 1;
+    case TY_BOOL:
+        return 1;
+    case TY_I16:
+    case TY_U16:
+        return 2;
+    case TY_I32:
+    case TY_U32:
+    case TY_F32:
+        return 4;
+    case TY_I64:
+    case TY_U64:
+    case TY_F64:
+    case TY_PTR:
+        return 8;
+    case TY_F128:
+        return 16;
+    case TY_STRUCT:
+        return ty->strct.size_bytes;
+    case TY_ARRAY:
+        if (ty->array.is_unsized)
+            return 8;
+        if (ty->array.length <= 0)
+            return 0;
+        return ty->array.length * sizeof_type_bytes(ty->array.elem);
+    case TY_VOID:
+        return 0;
+    default:
+        return 8;
+    }
 }
 
 static void populate_symbol_from_function(Symbol *s, Node *fn)
@@ -833,7 +907,13 @@ static int type_is_float(Type *t)
 static int type_is_pointer(Type *t)
 {
     t = canonicalize_type_deep(t);
-    return t && t->kind == TY_PTR;
+    if (!t)
+        return 0;
+    if (t->kind == TY_PTR)
+        return 1;
+    if (t->kind == TY_ARRAY && t->array.is_unsized)
+        return 1;
+    return 0;
 }
 
 static int64_t type_int_min(Type *t)
@@ -1040,6 +1120,92 @@ static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target
     if (!init || !target)
         return;
     target = canonicalize_type_deep(target);
+    if (target && target->kind == TY_ARRAY)
+    {
+        Type *elem = canonicalize_type_deep(target->array.elem);
+        if (target->array.is_unsized)
+        {
+            if (init->kind == ND_INIT_LIST && !init->init.is_zero)
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "unsized arrays do not support initializer lists");
+                exit(1);
+            }
+            check_expr(sc, init);
+            Type *ptr_ty = type_ptr(elem ? elem : &ty_i32);
+            if (!can_assign(ptr_ty, init))
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "initializer expression is not compatible with dynamic array type");
+                exit(1);
+            }
+            init->type = ptr_ty;
+            return;
+        }
+        if (init->kind == ND_INIT_LIST)
+        {
+            if (init->init.is_zero || init->init.count == 0)
+            {
+                init->type = target;
+                return;
+            }
+
+            int expected_len = target->array.length;
+            if (expected_len >= 0 && init->init.count > expected_len)
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "initializer has %d elements but array length is %d",
+                              init->init.count, expected_len);
+                exit(1);
+            }
+
+            int elem_is_aggregate = elem &&
+                                     (elem->kind == TY_STRUCT ||
+                                      (elem->kind == TY_ARRAY && !elem->array.is_unsized));
+            if (elem_is_aggregate)
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "array initializer lists for aggregate element types are not supported yet");
+                exit(1);
+            }
+
+            for (int i = 0; i < init->init.count; ++i)
+            {
+                Node *elem_init = (init->init.elems && i < init->init.count) ? init->init.elems[i] : NULL;
+                if (!elem_init)
+                {
+                    diag_error_at(init->src, init->line, init->col,
+                                  "missing initializer expression for array element %d", i);
+                    exit(1);
+                }
+                if (elem_init->kind == ND_INIT_LIST)
+                {
+                    diag_error_at(elem_init->src, elem_init->line, elem_init->col,
+                                  "nested initializer lists are not supported for array elements yet");
+                    exit(1);
+                }
+                check_expr(sc, elem_init);
+                Type *expected_elem = elem ? elem : &ty_i32;
+                if (expected_elem && !can_assign(expected_elem, elem_init))
+                {
+                    diag_error_at(elem_init->src, elem_init->line, elem_init->col,
+                                  "initializer element type mismatch");
+                    exit(1);
+                }
+            }
+            init->type = target;
+            return;
+        }
+        check_expr(sc, init);
+        if (!can_assign(target, init))
+        {
+            diag_error_at(init->src, init->line, init->col,
+                          "initializer expression type mismatch");
+            exit(1);
+        }
+        init->type = target;
+        return;
+    }
     if (init->kind != ND_INIT_LIST)
     {
         check_expr(sc, init);
@@ -1376,8 +1542,19 @@ static void check_expr(SemaContext *sc, Node *e)
                           orig_name ? orig_name : "<null>");
             exit(1);
         }
-
-        e->type = t;
+        Type *canon = canonicalize_type_deep(t);
+        e->var_type = canon ? canon : t;
+        if (canon && canon->kind == TY_ARRAY)
+        {
+            e->var_is_array = canon->array.is_unsized ? 0 : 1;
+            Type *elem = canon->array.elem ? canon->array.elem : &ty_i32;
+            e->type = type_ptr(elem);
+        }
+        else
+        {
+            e->var_is_array = 0;
+            e->type = canon ? canon : t;
+        }
         e->var_is_global = is_global;
         e->var_is_const = is_const;
 
@@ -1393,49 +1570,23 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_SIZEOF)
     {
-        // size of a type known at parse-time; stored in e->var_type
-        Type *ty = e->var_type ? canonicalize_type_deep(e->var_type) : &ty_i32;
+        Type *ty = NULL;
+        if (e->var_type)
+        {
+            ty = e->var_type;
+        }
+        else if (e->lhs)
+        {
+            check_expr(sc, e->lhs);
+            if (e->lhs->kind == ND_VAR && e->lhs->var_type)
+                ty = e->lhs->var_type;
+            else if (e->lhs->type)
+                ty = e->lhs->type;
+        }
+        ty = ty ? canonicalize_type_deep(ty) : &ty_i32;
         if (ty && ty->kind == TY_IMPORT)
             ty = canonicalize_type_deep(ty);
-        int sz = 0;
-        switch (ty->kind)
-        {
-        case TY_I8:
-        case TY_U8:
-        case TY_CHAR:
-            sz = 1;
-            break;
-        case TY_BOOL:
-            sz = 1;
-            break;
-        case TY_I16:
-        case TY_U16:
-            sz = 2;
-            break;
-        case TY_I32:
-        case TY_U32:
-        case TY_F32:
-            sz = 4;
-            break;
-        case TY_I64:
-        case TY_U64:
-        case TY_F64:
-        case TY_PTR:
-            sz = 8;
-            break;
-        case TY_F128:
-            sz = 16;
-            break;
-        case TY_STRUCT:
-            sz = ty->strct.size_bytes;
-            break;
-        case TY_VOID:
-            sz = 0;
-            break;
-        default:
-            sz = 8;
-            break;
-        }
+        int sz = sizeof_type_bytes(ty);
         e->int_val = sz;
         e->type = &ty_i32;
         return;
@@ -1622,13 +1773,18 @@ static void check_expr(SemaContext *sc, Node *e)
                           "address-of operator is not supported for global variables");
             exit(1);
         }
+        if (!target->type && target->kind == ND_VAR)
+            target->type = resolve_variable(sc, target->var_ref, NULL, NULL);
         if (!target->type)
         {
             diag_error_at(target->src, target->line, target->col,
                           "cannot determine operand type for '&'");
             exit(1);
         }
-        e->type = type_ptr(target->type);
+        Type *addr_type = target->type;
+        if (target->kind == ND_VAR && target->var_type && target->var_type->kind == TY_ARRAY && !target->var_type->array.is_unsized)
+            addr_type = target->var_type;
+        e->type = type_ptr(addr_type);
         return;
     }
     if (e->kind == ND_ADD)
@@ -2048,6 +2204,13 @@ static void check_expr(SemaContext *sc, Node *e)
             {
                 diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
                               "unknown variable '%s' on left-hand side of assignment",
+                              lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
+                exit(1);
+            }
+            if (lhs_base->var_type && lhs_base->var_type->kind == TY_ARRAY && !lhs_base->var_type->array.is_unsized)
+            {
+                diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
+                              "cannot assign to array variable '%s'",
                               lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
                 exit(1);
             }
