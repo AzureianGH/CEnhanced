@@ -109,6 +109,7 @@ static Type ty_f128 = {.kind = TY_F128};
 static Type ty_void = {.kind = TY_VOID};
 static Type ty_char = {.kind = TY_CHAR};
 static Type ty_bool = {.kind = TY_BOOL};
+static Type ty_va_list = {.kind = TY_VA_LIST};
 
 static Type *metadata_token_to_type(const char *token)
 {
@@ -326,6 +327,7 @@ static int type_is_builtin(const Type *t)
     case TY_VOID:
     case TY_CHAR:
     case TY_BOOL:
+    case TY_VA_LIST:
         return 1;
     default:
         return 0;
@@ -384,6 +386,9 @@ static void describe_type(const Type *t, char *buf, size_t bufsz)
         return;
     case TY_BOOL:
         snprintf(buf, bufsz, "bool");
+        return;
+    case TY_VA_LIST:
+        snprintf(buf, bufsz, "va_list");
         return;
     case TY_PTR:
         if (!t->pointee)
@@ -481,7 +486,7 @@ static void populate_symbol_from_function(Symbol *s, Node *fn)
     s->backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
     s->is_extern = 0;
     s->abi = "C";
-    s->sig.is_varargs = 0;
+    s->sig.is_varargs = fn->is_varargs ? 1 : 0;
 
     Type *decl_ret = fn->ret_type ? fn->ret_type : &ty_i32;
     if (fn->metadata.ret_token)
@@ -1278,6 +1283,12 @@ static const char *nodekind_name(NodeKind k)
         return "ND_STRING";
     case ND_CALL:
         return "ND_CALL";
+    case ND_VA_START:
+        return "ND_VA_START";
+    case ND_VA_ARG:
+        return "ND_VA_ARG";
+    case ND_VA_END:
+        return "ND_VA_END";
     case ND_BLOCK:
         return "ND_BLOCK";
     case ND_VAR_DECL:
@@ -2091,6 +2102,48 @@ static void check_expr(SemaContext *sc, Node *e)
         const char *backend = sym->backend_name ? sym->backend_name : sym->name;
         if (backend)
             e->call_name = backend;
+        return;
+    }
+    if (e->kind == ND_VA_START)
+    {
+        // va_start() -> returns a va_list
+        e->type = type_va_list();
+        return;
+    }
+    if (e->kind == ND_VA_ARG)
+    {
+        // va_arg(list, T) -> yields value of type T
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col, "va_arg requires a va_list expression");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        // ensure lhs is a va_list (best-effort)
+        if (e->lhs->type && canonicalize_type_deep(e->lhs->type) && canonicalize_type_deep(e->lhs->type)->kind != TY_VA_LIST)
+        {
+            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col, "first argument to va_arg must be a va_list");
+            exit(1);
+        }
+        // target type is recorded in parser as e->var_type
+        if (!e->var_type)
+        {
+            diag_error_at(e->src, e->line, e->col, "va_arg missing target type");
+            exit(1);
+        }
+        e->type = canonicalize_type_deep(e->var_type);
+        return;
+    }
+    if (e->kind == ND_VA_END)
+    {
+        // va_end(list) -> void
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col, "va_end requires a va_list expression");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        e->type = &ty_void;
         return;
     }
     if (e->kind == ND_COND)

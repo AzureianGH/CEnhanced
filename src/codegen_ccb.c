@@ -2506,6 +2506,103 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         return 0;
     }
+    case ND_VA_START:
+    {
+        // va_start() -> produce an addr_param pointing at the first vararg
+        if (!fb || !fb->fn)
+        {
+            diag_error_at(expr->src, expr->line, expr->col, "va_start used outside function context");
+            return 1;
+        }
+        // index of first vararg == number of declared parameters
+        size_t first_vararg_index = fb->param_count;
+        if (!string_list_appendf(&fb->body, "  addr_param %zu", first_vararg_index))
+            return 1;
+        return 0;
+    }
+    case ND_VA_ARG:
+    {
+        // va_arg(list, T) -> load value at pointer in 'list' and advance pointer
+        if (!expr->lhs)
+        {
+            diag_error_at(expr->src, expr->line, expr->col, "va_arg requires a va_list expression");
+            return 1;
+        }
+        // Expect lhs to be a variable reference so we can update it
+        if (expr->lhs->kind != ND_VAR || !expr->lhs->var_ref)
+        {
+            diag_error_at(expr->lhs->src, expr->lhs->line, expr->lhs->col, "va_arg first argument must be a va_list variable");
+            return 1;
+        }
+        CcbLocal *list_local = ccb_local_lookup(fb, expr->lhs->var_ref);
+        if (!list_local)
+        {
+            diag_error_at(expr->lhs->src, expr->lhs->line, expr->lhs->col, "unknown va_list variable '%s'", expr->lhs->var_ref);
+            return 1;
+        }
+
+        // load the pointer stored in the va_list variable and deref to get value
+        if (!ccb_emit_load_local(fb, list_local))
+            return 1;
+        CCValueType val_ty = map_type_to_cc(expr->var_type ? expr->var_type : NULL);
+        if (!ccb_emit_load_indirect(&fb->body, val_ty))
+            return 1;
+
+        // Now advance the pointer stored in the va_list variable by sizeof(target)
+        if (!ccb_emit_load_local(fb, list_local))
+            return 1;
+
+        // convert ptr -> i64
+        if (ccb_emit_convert_between(fb, CC_TYPE_PTR, CC_TYPE_I64, expr))
+            return 1;
+
+        // add size constant
+        size_t slot_size = ccb_value_type_size(CC_TYPE_PTR);
+        if (slot_size == 0)
+            slot_size = sizeof(void *);
+        size_t size_bytes = 0;
+        if (expr->var_type && expr->var_type->kind == TY_STRUCT)
+        {
+            size_bytes = ccb_type_size_bytes(expr->var_type);
+        }
+        else
+        {
+            size_bytes = ccb_value_type_size(val_ty);
+        }
+        if (size_bytes == 0)
+            size_bytes = slot_size;
+        if (size_bytes < slot_size)
+            size_bytes = slot_size;
+        else if (size_bytes % slot_size != 0)
+            size_bytes += slot_size - (size_bytes % slot_size);
+        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)size_bytes))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
+            return 1;
+
+        // convert i64 -> ptr
+        if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+            return 1;
+
+        // store updated pointer back into the va_list variable
+        if (!ccb_emit_store_local(fb, list_local))
+            return 1;
+
+        return 0;
+    }
+    case ND_VA_END:
+    {
+        // va_end(list) is a no-op in our IR
+        if (!expr->lhs)
+        {
+            diag_error_at(expr->src, expr->line, expr->col, "va_end requires a va_list expression");
+            return 1;
+        }
+        // Evaluate the operand for side-effects (if any)
+        if (ccb_emit_expr_basic(fb, expr->lhs))
+            return 1;
+        return 0;
+    }
     case ND_BITAND:
     case ND_BITOR:
     case ND_BITXOR:
@@ -4065,8 +4162,9 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
     }
     else
     {
-        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu",
-                                backend_name, ret_name, param_count, local_count))
+    const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
+    if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s",
+                backend_name, ret_name, param_count, local_count, varargs_suffix))
             return 1;
     }
 
@@ -4139,8 +4237,9 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         }
         else
         {
-            if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu", backend_name,
-                                    cc_type_name(fb.ret_type), fb.param_count, fb.local_count))
+            const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
+            if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s", backend_name,
+                                    cc_type_name(fb.ret_type), fb.param_count, fb.local_count, varargs_suffix))
                 rc = 1;
         }
 
@@ -4237,6 +4336,8 @@ static CCValueType map_type_to_cc(const Type *ty)
     case TY_BOOL:
         return CC_TYPE_I1;
     case TY_STRUCT:
+        return CC_TYPE_PTR;
+    case TY_VA_LIST:
         return CC_TYPE_PTR;
     case TY_F128:
         return CC_TYPE_F64;

@@ -96,6 +96,7 @@ typedef enum
     TK_COLON,      // :
     TK_ACCESS,     // =>
     TK_DOT,        // .
+    TK_ELLIPSIS,   // ...
     TK_FLOAT,      // floating-point literal
 } TokenKind;
 
@@ -129,6 +130,7 @@ typedef enum
     TY_BOOL,
     TY_PTR,
     TY_STRUCT,
+    TY_VA_LIST,
     TY_IMPORT,
 } TypeKind;
 
@@ -171,6 +173,9 @@ typedef enum
     ND_STRING,
     ND_NULL,
     ND_CALL,
+    ND_VA_START,
+    ND_VA_ARG,
+    ND_VA_END,
     ND_BLOCK,
     ND_VAR_DECL,
     ND_ASSIGN,
@@ -239,6 +244,7 @@ typedef struct Node
     Type **param_types;
     const char **param_names;
     int param_count;
+    int is_varargs;
     int is_chancecode;
     struct
     {
@@ -330,6 +336,7 @@ Type *type_f64(void);
 Type *type_void(void);
 Type *type_char(void);
 Type *type_bool(void);
+Type *type_va_list(void);
 Type *type_ptr(Type *to);
 int type_equals(Type *a, Type *b);
 

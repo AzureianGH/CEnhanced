@@ -614,6 +614,14 @@ Token lexer_next(Lexer *lx)
     }
     if (c == '.')
     {
+        if (lx->idx + 2 < lx->src.length && lx->src.src[lx->idx + 1] == '.' && lx->src.src[lx->idx + 2] == '.')
+        {
+            const char *start = lx->src.src + lx->idx;
+            getc2(lx);
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_ELLIPSIS, start, 3);
+        }
         getc2(lx);
         return make_tok(lx, TK_DOT, lx->src.src + lx->idx - 1, 1);
     }

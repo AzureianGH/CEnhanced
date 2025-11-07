@@ -54,6 +54,7 @@ static Type TY_F64_SINGLETON = {.kind = TY_F64};
 static Type TY_VOID_SINGLETON = {.kind = TY_VOID};
 static Type TY_CHAR_SINGLETON = {.kind = TY_CHAR};
 static Type TY_BOOL_SINGLETON = {.kind = TY_BOOL};
+static Type TY_VA_LIST_SINGLETON = {.kind = TY_VA_LIST};
 
 Type *type_i32(void) { return &TY_I32_SINGLETON; }
 Type *type_i64(void) { return &TY_I64_SINGLETON; }
@@ -62,6 +63,7 @@ Type *type_f64(void) { return &TY_F64_SINGLETON; }
 Type *type_void(void) { return &TY_VOID_SINGLETON; }
 Type *type_char(void) { return &TY_CHAR_SINGLETON; }
 Type *type_bool(void) { return &TY_BOOL_SINGLETON; }
+Type *type_va_list(void) { return &TY_VA_LIST_SINGLETON; }
 
 Type *type_ptr(Type *to)
 {
@@ -108,6 +110,12 @@ const char *node_kind_name(NodeKind kind)
         return "null literal";
     case ND_CALL:
         return "function call";
+    case ND_VA_START:
+        return "va_start expression";
+    case ND_VA_ARG:
+        return "va_arg expression";
+    case ND_VA_END:
+        return "va_end expression";
     case ND_BLOCK:
         return "block";
     case ND_VAR_DECL:
