@@ -76,7 +76,7 @@ static void usage(const char *prog)
     fprintf(stderr, "  -o <file>         Output executable path (default a.exe)\n");
     fprintf(stderr, "  -S                Emit pseudo-asm alongside exe (.S)\n");
     fprintf(stderr, "  -Sccb             Stop after emitting Chance bytecode (.ccb)\n");
-    fprintf(stderr, "  -O0|-O1|-O2       Select optimization level (default -O0)\n");
+    fprintf(stderr, "  -O0|-O1|-O2|-O3   Select optimization level (default -O0)\n");
     fprintf(stderr, "  -c [obj] | --no-link [obj]\n");
     fprintf(stderr, "                    Compile only; do not link (emit object). Optional obj output path.\n");
     fprintf(stderr, "  --freestanding    Freestanding mode (no default libs)\n");
@@ -2623,9 +2623,9 @@ int main(int argc, char **argv)
             {
                 char *endptr = NULL;
                 long parsed = strtol(level_str, &endptr, 10);
-                if (!endptr || *endptr != '\0' || parsed < 0 || parsed > 2)
+                if (!endptr || *endptr != '\0' || parsed < 0 || parsed > 3)
                 {
-                    fprintf(stderr, "invalid optimization level '%s' (use -O0|-O1|-O2)\n", argv[i]);
+                    fprintf(stderr, "invalid optimization level '%s' (use -O0|-O1|-O2|-O3)\n", argv[i]);
                     return 2;
                 }
                 level = (int)parsed;

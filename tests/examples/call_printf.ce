@@ -382,9 +382,30 @@ expose fun main() -> i32
     i64 dyn_sum = dyn_array[0] + dyn_array[1] + dyn_array[2] + dyn_array[3];
     assert(dyn_sum == 1000, "dynamic array sum is 1000");
     Std.Memory.dealloc(dyn_array as void*);
+
+    TC.SmallTest st = {
+        .smallValue = 9,
+        .testVar = 81
+    };
+
+    i32 passbystruct_result = passbystruct(st);
+    assert(passbystruct_result == 81, "passbystruct result is 81");
+
+    TC.SmallTest retstruct = returnbystruct(st);
+    assert(retstruct.smallValue == 9 && retstruct.testVar == 81, "returnbystruct result matches input");
     
 
     ret final_sum; // expect 168
+}
+
+hide fun passbystruct(TC.SmallTest st) -> i32
+{
+    ret st.testVar as i32;
+}
+
+hide fun returnbystruct(TC.SmallTest st) -> TC.SmallTest
+{
+    ret st;
 }
 
 hide fun construct_thing() -> TC.SmallTest

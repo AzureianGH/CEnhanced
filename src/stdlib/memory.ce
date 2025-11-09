@@ -1,7 +1,9 @@
 module Std.Memory;
 
+#ifndef __NOEXTEND
 extend from "C" void* malloc(i32 size);
 extend from "C" void free(void* ptr);
+#endif
 
 expose fun memcpy(void* dest, void* src, i32 n) -> void*
 {
@@ -109,6 +111,7 @@ expose fun bcopy(void* src, void* dest, i32 n) -> void*
     ret memmove(dest, src, n);
 }
 
+#ifndef __NOEXTEND
 expose fun alloc(i32 size) -> void*
 {
     ret malloc(size);
@@ -142,6 +145,7 @@ expose fun cleanalloc(i32 num, i32 size) -> void*
     memset(ptr, 0, total_size);
     ret ptr;
 }
+#endif
 
 expose fun swap(void* ptr1, void* ptr2, i32 size) -> void
 {

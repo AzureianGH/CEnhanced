@@ -22,7 +22,6 @@ expose fun test_varargs(i32 count, i32 unused, ...) -> i32
     for (i32 i = 0; i < count; i = i + 1)
     {
         i32 val = va_arg(list, i32);
-        printf("  vararg[%d] = %d\n", i, val);
         total = total + val;
     }
     va_end(list);
