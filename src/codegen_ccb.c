@@ -943,6 +943,8 @@ static CCValueType ccb_type_for_expr(const Node *expr)
     case ND_ASSIGN:
         return ccb_type_for_expr(expr->rhs);
     case ND_CALL:
+        if (expr->type)
+            return map_type_to_cc(expr->type);
         return CC_TYPE_I32;
     case ND_CAST:
         if (expr->type)
@@ -3475,6 +3477,12 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             CcbLocal *local = ccb_local_lookup(fb, operand->var_ref);
             if (!local)
             {
+                if (operand->var_is_function || operand->var_is_global)
+                {
+                    if (!ccb_emit_addr_global(&fb->body, operand->var_ref))
+                        return 1;
+                    return 0;
+                }
                 diag_error_at(operand->src, operand->line, operand->col,
                               "unknown local '%s'", operand->var_ref);
                 return 1;
@@ -3555,18 +3563,10 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
     }
     case ND_CALL:
     {
-        if (!expr->call_name || !*expr->call_name)
-        {
-            diag_error_at(expr->src, expr->line, expr->col,
-                          "function call missing symbol name");
-            return 1;
-        }
-
+        const int is_indirect = expr->call_is_indirect;
         CCValueType *arg_types = NULL;
         if (expr->arg_count > 0)
-        {
             arg_types = (CCValueType *)xcalloc((size_t)expr->arg_count, sizeof(CCValueType));
-        }
 
         int rc = 0;
         for (int i = 0; i < expr->arg_count; ++i)
@@ -3581,18 +3581,53 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
                 arg_types[i] = ccb_type_for_expr(arg);
         }
 
-        if (!rc)
+        if (!rc && is_indirect)
         {
-            CCValueType ret_ty = ccb_type_for_expr(expr);
-            char *arg_text = NULL;
-            if (!ccb_format_type_list(arg_types, (size_t)expr->arg_count, &arg_text))
+            if (!expr->lhs)
+            {
+                diag_error_at(expr->src, expr->line, expr->col,
+                              "indirect call missing target expression");
+                rc = 1;
+            }
+            else if (ccb_emit_expr_basic(fb, expr->lhs))
             {
                 rc = 1;
             }
             else
             {
-                if (!string_list_appendf(&fb->body, "  call %s %s %s", expr->call_name,
-                                         cc_type_name(ret_ty), arg_text))
+                CCValueType target_ty = ccb_type_for_expr(expr->lhs);
+                if (target_ty != CC_TYPE_PTR)
+                {
+                    if (ccb_emit_convert_between(fb, target_ty, CC_TYPE_PTR, expr->lhs))
+                        rc = 1;
+                }
+            }
+        }
+
+        if (!rc)
+        {
+            CCValueType ret_ty = ccb_type_for_expr(expr);
+            const char *ret_name = cc_type_name(ret_ty);
+            char *arg_text = NULL;
+            if (!ccb_format_type_list(arg_types, (size_t)expr->arg_count, &arg_text))
+            {
+                rc = 1;
+            }
+            else if (is_indirect)
+            {
+                const char *suffix = expr->call_is_varargs ? " varargs" : "";
+                if (!string_list_appendf(&fb->body, "  call_indirect %s %s%s", ret_name, arg_text, suffix))
+                    rc = 1;
+            }
+            else
+            {
+                if (!expr->call_name || !*expr->call_name)
+                {
+                    diag_error_at(expr->src, expr->line, expr->col,
+                                  "function call missing symbol name");
+                    rc = 1;
+                }
+                else if (!string_list_appendf(&fb->body, "  call %s %s %s", expr->call_name, ret_name, arg_text))
                 {
                     rc = 1;
                 }

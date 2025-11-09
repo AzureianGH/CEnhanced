@@ -73,6 +73,18 @@ Type *type_ptr(Type *to)
     return t;
 }
 
+Type *type_func(void)
+{
+    Type *t = (Type *)xcalloc(1, sizeof(Type));
+    t->kind = TY_FUNC;
+    t->func.params = NULL;
+    t->func.param_count = 0;
+    t->func.ret = NULL;
+    t->func.is_varargs = 0;
+    t->func.has_signature = 0;
+    return t;
+}
+
 Type *type_array(Type *elem, int length)
 {
     Type *t = (Type *)xcalloc(1, sizeof(Type));
@@ -100,6 +112,25 @@ int type_equals(Type *a, Type *b)
         if (a->array.is_unsized != b->array.is_unsized)
             return 0;
         return type_equals(a->array.elem, b->array.elem);
+    }
+    if (a->kind == TY_FUNC)
+    {
+        if (!!a->func.ret != !!b->func.ret)
+            return 0;
+        if (a->func.ret && !type_equals(a->func.ret, b->func.ret))
+            return 0;
+        if (a->func.param_count != b->func.param_count)
+            return 0;
+        if (a->func.is_varargs != b->func.is_varargs)
+            return 0;
+        for (int i = 0; i < a->func.param_count; ++i)
+        {
+            Type *ap = a->func.params ? a->func.params[i] : NULL;
+            Type *bp = b->func.params ? b->func.params[i] : NULL;
+            if (!type_equals(ap, bp))
+                return 0;
+        }
+        return 1;
     }
     return 1;
 }

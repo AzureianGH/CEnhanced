@@ -394,8 +394,32 @@ expose fun main() -> i32
     TC.SmallTest retstruct = returnbystruct(st);
     assert(retstruct.smallValue == 9 && retstruct.testVar == 81, "returnbystruct result matches input");
     
+    fun* funptr_var(i32, i32) -> i32 = &funptr_test;
+
+    fun* (i32, i32, -> i32) funptr_var2 = &funptr_test;
+
+    i32 funptr_result = funptr_var(15, 27);
+    assert(funptr_result == 42, "funptr_test result is 42");
+    i32 funptr_result2 = funptr_var2(20, 22);
+    assert(funptr_result2 == 42, "funptr_test result via second pointer is 42");
+
+    void* rawfunptr = funptr_var as void*;
+    assert(rawfunptr != null, "raw function pointer is not null");
+
+    fun* (i32, i32, -> i32) from_raw = rawfunptr as fun* (i32, i32, -> i32);
+    i32 funptr_result3 = from_raw(7, 35);
+    assert(funptr_result3 == 42, "funptr_test result via raw pointer is 42");
+
+    fun* (TC.SmallTest, -> i32) struct_funptr = &passbystruct;
+    i32 struct_funptr_result = struct_funptr(st);
+    assert(struct_funptr_result == 81, "struct funptr result is 81");
 
     ret final_sum; // expect 168
+}
+
+hide fun funptr_test(i32 a, i32 b) -> i32
+{
+    ret a + b;
 }
 
 hide fun passbystruct(TC.SmallTest st) -> i32

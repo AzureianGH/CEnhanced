@@ -152,6 +152,7 @@ static Token expect(Parser *ps, TokenKind k, const char *what);
 static Node *new_node(NodeKind k);
 static Node *parse_expr(Parser *ps);
 static Node *parse_postfix_suffixes(Parser *ps, Node *expr);
+static Type *parse_type_spec(Parser *ps);
 static int attrs_contains(const struct PendingAttr *attrs, int count, const char *name)
 {
     if (!attrs || count <= 0 || !name)
@@ -1175,6 +1176,11 @@ static int is_type_start(Parser *ps, Token t)
     case TK_KW_BOOL:
     case TK_KW_STACK:
         return 1;
+    case TK_KW_FUN:
+    {
+        Token next = lexer_peek_n(ps->lx, 1);
+        return next.kind == TK_STAR;
+    }
     case TK_KW_STRUCT:
         return 1;
     default:
@@ -1200,6 +1206,157 @@ static int is_type_start(Parser *ps, Token t)
         }
     }
     return 0;
+}
+
+static int type_is_function_pointer(const Type *ty)
+{
+    return ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_FUNC;
+}
+
+static void fun_type_reset_signature(Type *func_ty)
+{
+    if (!func_ty || func_ty->kind != TY_FUNC)
+        return;
+    free(func_ty->func.params);
+    func_ty->func.params = NULL;
+    func_ty->func.param_count = 0;
+    func_ty->func.is_varargs = 0;
+    func_ty->func.ret = NULL;
+    func_ty->func.has_signature = 0;
+}
+
+static int parse_funptr_signature_parens(Parser *ps, Type *func_ty, int allow_arrow_inside)
+{
+    if (!ps || !func_ty || func_ty->kind != TY_FUNC)
+        return 0;
+
+    Token lparen = lexer_next(ps->lx);
+    (void)lparen;
+
+    Type **params = NULL;
+    int param_count = 0;
+    int is_varargs = 0;
+    int ret_parsed = 0;
+
+    for (;;)
+    {
+        Token tok = lexer_peek(ps->lx);
+        if (is_varargs)
+        {
+            if (!(tok.kind == TK_RPAREN || tok.kind == TK_COMMA || (allow_arrow_inside && tok.kind == TK_ARROW)))
+            {
+                diag_error_at(lexer_source(ps->lx), tok.line, tok.col,
+                              "varargs must be the final entry in a function pointer signature");
+                exit(1);
+            }
+        }
+        if (tok.kind == TK_RPAREN)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
+        if (tok.kind == TK_EOF)
+        {
+            diag_error_at(lexer_source(ps->lx), tok.line, tok.col,
+                          "unexpected end of input in function pointer signature");
+            exit(1);
+        }
+        if (tok.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        if (allow_arrow_inside && tok.kind == TK_ARROW)
+        {
+            if (ret_parsed)
+            {
+                diag_error_at(lexer_source(ps->lx), tok.line, tok.col,
+                              "duplicate return type in function pointer signature");
+                exit(1);
+            }
+            lexer_next(ps->lx);
+            Type *ret_ty = parse_type_spec(ps);
+            func_ty->func.ret = ret_ty;
+            ret_parsed = 1;
+            continue;
+        }
+        if (token_is_varargs(tok))
+        {
+            if (is_varargs)
+            {
+                diag_error_at(lexer_source(ps->lx), tok.line, tok.col,
+                              "varargs may only appear once in a function pointer signature");
+                exit(1);
+            }
+            lexer_next(ps->lx);
+            is_varargs = 1;
+            continue;
+        }
+
+        Type *param_ty = parse_type_spec(ps);
+        Token maybe_name = lexer_peek(ps->lx);
+        if (maybe_name.kind == TK_IDENT && !is_type_start(ps, maybe_name) &&
+            !token_is_varargs(maybe_name) && maybe_name.kind != TK_ARROW)
+        {
+            lexer_next(ps->lx);
+        }
+
+        Type **grown = (Type **)realloc(params, (size_t)(param_count + 1) * sizeof(Type *));
+        if (!grown)
+        {
+            diag_error("out of memory while parsing function pointer parameters");
+            exit(1);
+        }
+        params = grown;
+        params[param_count++] = param_ty;
+    }
+
+    free(func_ty->func.params);
+    func_ty->func.params = params;
+    func_ty->func.param_count = param_count;
+    func_ty->func.is_varargs = is_varargs;
+    return ret_parsed;
+}
+
+static void finalize_funptr_signature(Parser *ps, Type *func_ty, const Token *where)
+{
+    if (!func_ty || func_ty->kind != TY_FUNC)
+        return;
+    if (!func_ty->func.ret)
+    {
+        const SourceBuffer *src = ps ? lexer_source(ps->lx) : NULL;
+        diag_error_at(src, where ? where->line : 0, where ? where->col : 0,
+                      "function pointer signature missing return type");
+        exit(1);
+    }
+    func_ty->func.has_signature = 1;
+}
+
+static void parse_trailing_funptr_signature(Parser *ps, Type *ty)
+{
+    if (!type_is_function_pointer(ty))
+        return;
+    Type *func_ty = ty->pointee;
+    if (func_ty->func.has_signature)
+        return;
+    Token next = lexer_peek(ps->lx);
+    if (next.kind != TK_LPAREN)
+        return;
+
+    int ret_parsed_inside = parse_funptr_signature_parens(ps, func_ty, 1);
+    if (!ret_parsed_inside)
+    {
+        Token arrow = lexer_peek(ps->lx);
+        if (arrow.kind != TK_ARROW)
+        {
+            diag_error_at(lexer_source(ps->lx), arrow.line, arrow.col,
+                          "function pointer declaration requires '->' return type");
+            exit(1);
+        }
+        lexer_next(ps->lx);
+        func_ty->func.ret = parse_type_spec(ps);
+    }
+    finalize_funptr_signature(ps, func_ty, &next);
 }
 
 static Type *parse_type_spec(Parser *ps)
@@ -1265,6 +1422,37 @@ static Type *parse_type_spec(Parser *ps)
         }
         else
             base = &ti64;
+    }
+    else if (b.kind == TK_KW_FUN)
+    {
+        Token star = lexer_peek(ps->lx);
+        if (star.kind != TK_STAR)
+        {
+            diag_error_at(lexer_source(ps->lx), star.line, star.col,
+                          "expected '*' after 'fun' in function pointer type");
+            exit(1);
+        }
+        lexer_next(ps->lx); // consume '*'
+        Type *func_ty = type_func();
+        Token after_star = lexer_peek(ps->lx);
+        if (after_star.kind == TK_LPAREN)
+        {
+            int ret_inside = parse_funptr_signature_parens(ps, func_ty, 1);
+            if (!ret_inside)
+            {
+                Token arrow = lexer_peek(ps->lx);
+                if (arrow.kind != TK_ARROW)
+                {
+                    diag_error_at(lexer_source(ps->lx), arrow.line, arrow.col,
+                                  "function pointer type requires '->' return type");
+                    exit(1);
+                }
+                lexer_next(ps->lx);
+                func_ty->func.ret = parse_type_spec(ps);
+            }
+            finalize_funptr_signature(ps, func_ty, &after_star);
+        }
+        base = type_ptr(func_ty);
     }
     else if (b.kind == TK_IDENT)
     {
@@ -1803,6 +1991,15 @@ static Node *parse_primary(Parser *ps)
             call->line = t.line;
             call->col = t.col;
             call->src = lexer_source(ps->lx);
+            Node *target = new_node(ND_VAR);
+            char *target_name = (char *)xmalloc((size_t)t.length + 1);
+            memcpy(target_name, t.lexeme, (size_t)t.length);
+            target_name[t.length] = '\0';
+            target->var_ref = target_name;
+            target->line = t.line;
+            target->col = t.col;
+            target->src = lexer_source(ps->lx);
+            call->lhs = target;
             return call;
         }
         // variable reference
@@ -1958,12 +2155,6 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
             }
             expect(ps, TK_RPAREN, ")");
             char *call_name = call_name_from_expr(e);
-            if (!call_name)
-            {
-                diag_error_at(lexer_source(ps->lx), e ? e->line : p.line, e ? e->col : p.col,
-                              "unsupported call target");
-                exit(1);
-            }
             Node *call = new_node(ND_CALL);
             call->lhs = e;
             call->args = args;
@@ -2552,10 +2743,12 @@ static Node *parse_stmt(Parser *ps)
         decl->var_name = nm;
         decl->var_type = ty;
         decl->var_is_array = (ty && ty->kind == TY_ARRAY);
+    decl->var_is_function = (ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_FUNC);
         decl->var_is_const = is_const;
         decl->line = name.line;
         decl->col = name.col;
         decl->src = lexer_source(ps->lx);
+        parse_trailing_funptr_signature(ps, ty);
         Token p2 = lexer_peek(ps->lx);
         if (p2.kind == TK_ASSIGN)
         {
@@ -2653,6 +2846,7 @@ static Node *parse_for(Parser *ps)
             decl->var_name = nm;
             decl->var_type = ty;
             decl->var_is_array = (ty && ty->kind == TY_ARRAY);
+            decl->var_is_function = (ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_FUNC);
             decl->var_is_const = is_const;
             decl->line = name.line;
             decl->col = name.col;
@@ -3302,7 +3496,9 @@ Node *parse_unit(Parser *ps)
             nm[name.length] = '\0';
             decl->var_name = nm;
             decl->var_type = ty;
+            parse_trailing_funptr_signature(ps, ty);
             decl->var_is_array = (ty && ty->kind == TY_ARRAY);
+            decl->var_is_function = (ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_FUNC);
             decl->var_is_const = is_const;
             decl->var_is_global = 1;
             decl->is_exposed = visibility;

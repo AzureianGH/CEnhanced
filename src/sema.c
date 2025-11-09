@@ -20,7 +20,44 @@ static Type *canonicalize_type_deep(Type *ty)
         if (resolved_elem && resolved_elem != ty->array.elem)
             ty->array.elem = resolved_elem;
     }
+    else if (ty && ty->kind == TY_FUNC && ty->func.params)
+    {
+        for (int i = 0; i < ty->func.param_count; ++i)
+        {
+            Type *resolved_param = canonicalize_type_deep(ty->func.params[i]);
+            if (resolved_param && resolved_param != ty->func.params[i])
+                ty->func.params[i] = resolved_param;
+        }
+        if (ty->func.ret)
+        {
+            Type *resolved_ret = canonicalize_type_deep(ty->func.ret);
+            if (resolved_ret && resolved_ret != ty->func.ret)
+                ty->func.ret = resolved_ret;
+        }
+    }
     return ty;
+}
+
+static Type *make_function_type_from_sig(const FuncSig *sig)
+{
+    if (!sig)
+        return NULL;
+
+    Type *fn_ty = type_func();
+    fn_ty->func.param_count = sig->param_count;
+    if (sig->param_count > 0)
+    {
+        fn_ty->func.params = (Type **)xcalloc((size_t)sig->param_count, sizeof(Type *));
+        for (int i = 0; i < sig->param_count; ++i)
+        {
+            Type *param = canonicalize_type_deep(sig->params ? sig->params[i] : NULL);
+            fn_ty->func.params[i] = param;
+        }
+    }
+    fn_ty->func.ret = canonicalize_type_deep(sig->ret);
+    fn_ty->func.is_varargs = sig->is_varargs;
+    fn_ty->func.has_signature = 1;
+    return fn_ty;
 }
 
 struct SymTable
@@ -425,6 +462,17 @@ static void describe_type(const Type *t, char *buf, size_t bufsz)
             snprintf(buf, bufsz, "ptr to %s", inner);
             return;
         }
+    case TY_FUNC:
+    {
+        char ret_buf[128];
+        if (t->func.ret)
+            describe_type(t->func.ret, ret_buf, sizeof(ret_buf));
+        else
+            snprintf(ret_buf, sizeof(ret_buf), "void");
+        snprintf(buf, bufsz, "fun(%d%s) -> %s", t->func.param_count,
+                 t->func.is_varargs ? ", varargs" : "", ret_buf);
+        return;
+    }
     case TY_STRUCT:
         snprintf(buf, bufsz, "struct %s", t->struct_name ? t->struct_name : "<anonymous>");
         return;
@@ -498,6 +546,25 @@ static int type_equal(Type *a, Type *b)
         if (!a->array.is_unsized && a->array.length != b->array.length)
             return 0;
         return type_equal(a->array.elem, b->array.elem);
+    }
+    if (a->kind == TY_FUNC)
+    {
+        if (a->func.param_count != b->func.param_count)
+            return 0;
+        if (a->func.is_varargs != b->func.is_varargs)
+            return 0;
+        if (!!a->func.ret != !!b->func.ret)
+            return 0;
+        if (a->func.ret && !type_equal(a->func.ret, b->func.ret))
+            return 0;
+        for (int i = 0; i < a->func.param_count; ++i)
+        {
+            Type *ap = a->func.params ? a->func.params[i] : NULL;
+            Type *bp = b->func.params ? b->func.params[i] : NULL;
+            if (!type_equal(ap, bp))
+                return 0;
+        }
+        return 1;
     }
     if (a->kind == TY_STRUCT)
     {
@@ -1434,12 +1501,14 @@ static int scope_is_const(SemaContext *sc, const char *name)
     return 0;
 }
 
-static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global, int *is_const)
+static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global, int *is_const, int *is_function)
 {
     if (is_global)
         *is_global = 0;
     if (is_const)
         *is_const = 0;
+    if (is_function)
+        *is_function = 0;
     if (!sc || !name)
         return NULL;
 
@@ -1462,6 +1531,16 @@ static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global,
         if (is_const)
             *is_const = sym->is_const;
         return canonicalize_type_deep(sym->var_type);
+    }
+
+    if (sym && sym->kind == SYM_FUNC)
+    {
+        if (is_function)
+            *is_function = 1;
+        if (is_const)
+            *is_const = 1;
+        Type *fn_ty = make_function_type_from_sig(&sym->sig);
+        return fn_ty;
     }
 
     return NULL;
@@ -1571,7 +1650,8 @@ static void check_expr(SemaContext *sc, Node *e)
         const char *orig_name = e->var_ref;
         int is_global = 0;
         int is_const = 0;
-        Type *t = resolve_variable(sc, orig_name, &is_global, &is_const);
+        int is_function = 0;
+        Type *t = resolve_variable(sc, orig_name, &is_global, &is_const, &is_function);
         if (!t)
         {
             diag_error_at(e->src, e->line, e->col, "unknown variable '%s'",
@@ -1593,6 +1673,13 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         e->var_is_global = is_global;
         e->var_is_const = is_const;
+        e->var_is_function = is_function;
+
+        if (is_function)
+        {
+            // Function names evaluate to function type; treat as non-addressable value.
+            e->type = canon ? canon : t;
+        }
 
         if (is_global && sc && sc->syms)
         {
@@ -1601,6 +1688,18 @@ static void check_expr(SemaContext *sc, Node *e)
                 sym = symtab_get(sc->syms, e->var_ref);
             if (sym && sym->kind == SYM_GLOBAL && sym->backend_name)
                 e->var_ref = sym->backend_name;
+        }
+        if (is_function && sc && sc->syms)
+        {
+            const Symbol *sym = symtab_get(sc->syms, orig_name);
+            if (!sym)
+                sym = symtab_get(sc->syms, e->var_ref);
+            if (sym && sym->kind == SYM_FUNC)
+            {
+                const char *backend = sym->backend_name ? sym->backend_name : sym->name;
+                if (backend)
+                    e->var_ref = backend;
+            }
         }
         return;
     }
@@ -1803,14 +1902,14 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, target);
-        if (target->kind == ND_VAR && target->var_is_global)
+        if (target->kind == ND_VAR && target->var_is_global && !target->var_is_function)
         {
             diag_error_at(target->src, target->line, target->col,
                           "address-of operator is not supported for global variables");
             exit(1);
         }
         if (!target->type && target->kind == ND_VAR)
-            target->type = resolve_variable(sc, target->var_ref, NULL, NULL);
+            target->type = resolve_variable(sc, target->var_ref, NULL, NULL, NULL);
         if (!target->type)
         {
             diag_error_at(target->src, target->line, target->col,
@@ -2228,7 +2327,7 @@ static void check_expr(SemaContext *sc, Node *e)
         if (!lhs_type)
         {
             if (lhs_base->kind == ND_VAR)
-                lhs_type = resolve_variable(sc, lhs_base->var_ref, NULL, NULL);
+                lhs_type = resolve_variable(sc, lhs_base->var_ref, NULL, NULL, NULL);
             else if (lhs_base->kind == ND_MEMBER)
                 lhs_type = lhs_base->type;
             else if ((lhs_base->kind == ND_INDEX || lhs_base->kind == ND_DEREF) && lhs_base->lhs && lhs_base->lhs->type && lhs_base->lhs->type->kind == TY_PTR)
@@ -2292,7 +2391,7 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         Type *t = e->lhs->type;
         if (!t)
-            t = resolve_variable(sc, e->lhs->var_ref, NULL, NULL);
+            t = resolve_variable(sc, e->lhs->var_ref, NULL, NULL, NULL);
         t = canonicalize_type_deep(t);
         e->lhs->type = t;
         if (!t || (!type_is_int(t) && !type_is_pointer(t)))
@@ -2305,73 +2404,135 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_CALL)
     {
-        // lookup symbol
-        if (sc->unit)
+        Node *target = e->lhs;
+        const char *original_name = e->call_name;
+        const char *resolved_name = original_name;
+
+        if (sc->unit && resolved_name)
         {
-            char *alias_resolved = resolve_import_alias(sc->unit, e->call_name);
+            char *alias_resolved = resolve_import_alias(sc->unit, resolved_name);
             if (alias_resolved)
+            {
+                resolved_name = alias_resolved;
                 e->call_name = alias_resolved;
+            }
         }
-        const Symbol *sym = symtab_get(sc->syms, e->call_name);
-        if (!sym)
+
+        const Symbol *sym_lookup = resolved_name ? symtab_get(sc->syms, resolved_name) : NULL;
+        const Symbol *direct_sym = (sym_lookup && sym_lookup->kind == SYM_FUNC) ? sym_lookup : NULL;
+
+        Type *func_sig = NULL;
+        int call_is_indirect = 0;
+
+        Type *target_type = NULL;
+        int target_is_function_symbol = 0;
+
+        if (direct_sym)
         {
-            if (unit_allows_module_call(sc->unit, e->call_name))
+            func_sig = make_function_type_from_sig(&direct_sym->sig);
+            call_is_indirect = 0;
+        }
+
+        if (!func_sig && target)
+        {
+            check_expr(sc, target);
+            target_type = canonicalize_type_deep(target->type);
+            target_is_function_symbol = (target->kind == ND_VAR && target->var_is_function);
+        }
+        else if (target)
+        {
+            target_is_function_symbol = (target->kind == ND_VAR && target->var_is_function);
+        }
+
+        if (!func_sig && target_type)
+        {
+            if (target_type->kind == TY_PTR && target_type->pointee && target_type->pointee->kind == TY_FUNC)
+            {
+                func_sig = canonicalize_type_deep(target_type->pointee);
+                call_is_indirect = 1;
+            }
+            else if (target_type->kind == TY_FUNC)
+            {
+                func_sig = target_type;
+                call_is_indirect = target_is_function_symbol ? 0 : 1;
+            }
+        }
+
+        if (!func_sig)
+        {
+            if (resolved_name && !sym_lookup && unit_allows_module_call(sc->unit, resolved_name))
             {
                 diag_error_at(e->src, e->line, e->col,
                               "missing metadata for function '%s'",
-                              e->call_name);
+                              resolved_name);
+                exit(1);
             }
-            else
+            if (sym_lookup && sym_lookup->kind != SYM_FUNC)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "symbol '%s' is not callable",
+                              resolved_name ? resolved_name : (original_name ? original_name : "<unnamed>"));
+                exit(1);
+            }
+            if (resolved_name && !direct_sym)
             {
                 diag_error_at(e->src, e->line, e->col,
                               "unknown function '%s'",
-                              e->call_name);
+                              resolved_name);
+                exit(1);
             }
-            exit(1);
-        }
-        if (sym->kind != SYM_FUNC)
-        {
             diag_error_at(e->src, e->line, e->col,
-                          "symbol '%s' is not callable",
-                          e->call_name ? e->call_name : "<unnamed>");
+                          "call target is not callable");
             exit(1);
-        }
-        // check args types minimally
-        for (int i = 0; i < e->arg_count; i++)
-        {
-            check_expr(sc, e->args[i]);
         }
 
-        int expected = sym->sig.param_count;
-        if (!sym->sig.is_varargs)
+        func_sig = canonicalize_type_deep(func_sig);
+        if (!func_sig || func_sig->kind != TY_FUNC)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "call target is not a function type");
+            exit(1);
+        }
+        if (!func_sig->func.has_signature)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "cannot call function pointer without a signature");
+            exit(1);
+        }
+
+        for (int i = 0; i < e->arg_count; ++i)
+            check_expr(sc, e->args[i]);
+
+        const char *diag_name = resolved_name ? resolved_name : (original_name ? original_name : "<call>");
+
+        int expected = func_sig->func.param_count;
+        if (!func_sig->func.is_varargs)
         {
             if (e->arg_count != expected)
             {
                 diag_error_at(e->src, e->line, e->col,
-                              "function '%s' expects %d argument(s) but %d provided",
-                              sym->name ? sym->name : e->call_name,
-                              expected, e->arg_count);
+                              "function call to '%s' expects %d argument(s) but %d provided",
+                              diag_name, expected, e->arg_count);
                 exit(1);
             }
         }
         else if (e->arg_count < expected)
         {
             diag_error_at(e->src, e->line, e->col,
-                          "function '%s' expects at least %d argument(s) before varargs",
-                          sym->name ? sym->name : e->call_name,
-                          expected);
+                          "function call to '%s' expects at least %d argument(s) before varargs",
+                          diag_name, expected);
             exit(1);
         }
 
         int check_count = expected;
-        if (sym->sig.is_varargs && e->arg_count > expected)
+        if (func_sig->func.is_varargs && e->arg_count > expected)
             check_count = expected;
-        if (!sym->sig.is_varargs && e->arg_count < check_count)
+        if (!func_sig->func.is_varargs && e->arg_count < check_count)
             check_count = e->arg_count;
 
         for (int i = 0; i < check_count; ++i)
         {
-            Type *expected_ty = (sym->sig.params && i < expected) ? sym->sig.params[i] : NULL;
+            Type *expected_ty = (func_sig->func.params && i < expected) ? func_sig->func.params[i] : NULL;
             if (!expected_ty)
                 continue;
             if (!can_assign(expected_ty, e->args[i]))
@@ -2387,19 +2548,25 @@ static void check_expr(SemaContext *sc, Node *e)
             }
         }
 
-        if (sym->sig.is_varargs && e->arg_count > expected)
+        if (func_sig->func.is_varargs && e->arg_count > expected)
         {
             for (int i = expected; i < e->arg_count; ++i)
-            {
                 apply_default_vararg_promotion(&e->args[i]);
-            }
         }
 
-        Type *ret_type = sym->sig.ret ? sym->sig.ret : &ty_i32;
+        if (direct_sym)
+        {
+            const char *backend = direct_sym->backend_name ? direct_sym->backend_name : direct_sym->name;
+            if (backend)
+                e->call_name = backend;
+            call_is_indirect = 0;
+        }
+
+        Type *ret_type = func_sig->func.ret ? func_sig->func.ret : &ty_i32;
         e->type = ret_type;
-        const char *backend = sym->backend_name ? sym->backend_name : sym->name;
-        if (backend)
-            e->call_name = backend;
+        e->call_func_type = func_sig;
+        e->call_is_indirect = call_is_indirect;
+        e->call_is_varargs = func_sig->func.is_varargs;
         return;
     }
     if (e->kind == ND_VA_START)

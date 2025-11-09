@@ -128,6 +128,7 @@ typedef enum
     TY_VOID,
     TY_CHAR,
     TY_BOOL,
+    TY_FUNC,
     TY_PTR,
     TY_STRUCT,
     TY_ARRAY,
@@ -155,6 +156,14 @@ typedef struct Type
         int length;
         int is_unsized;
     } array;
+    struct
+    {
+        struct Type **params;
+        int param_count;
+        struct Type *ret;
+        int is_varargs;
+        int has_signature;
+    } func;
     int is_exposed; // visibility flag for module system
     const char *import_module;
     const char *import_type_name;
@@ -280,12 +289,16 @@ typedef struct Node
     const char *call_name;
     struct Node **args;
     int arg_count;
+    Type *call_func_type; // canonicalized function signature when available
+    int call_is_indirect; // 1 for pointer-based calls
+    int call_is_varargs;  // 1 when call accepts varargs (used for indirect calls)
     // For ND_VAR_DECL
     const char *var_name;
     Type *var_type;
     int var_is_const;  // for ND_VAR_DECL
     int var_is_global; // set on declarations/references that live at global scope
     int var_is_array;  // for ND_VAR references to array-typed variables
+    int var_is_function; // for ND_VAR references that name a function symbol
     // For ND_BLOCK
     struct Node **stmts;
     int stmt_count;
@@ -351,6 +364,7 @@ Type *type_bool(void);
 Type *type_va_list(void);
 Type *type_ptr(Type *to);
 Type *type_array(Type *elem, int length);
+Type *type_func(void);
 int type_equals(Type *a, Type *b);
 
 // Codegen options when emitting ChanceCode bytecode (.ccb)
