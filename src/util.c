@@ -4,6 +4,32 @@
 #include <stdarg.h>
 #include "ast.h"
 
+#define ANSI_RESET "\x1b[0m"
+#define ANSI_BOLD_RED "\x1b[1;31m"
+#define ANSI_BOLD_YELLOW "\x1b[1;33m"
+#define ANSI_BOLD_CYAN "\x1b[1;36m"
+#define ANSI_BOLD_WHITE "\x1b[1;37m"
+
+static int diag_use_ansi = 1;
+
+void diag_set_use_ansi(int enable)
+{
+    diag_use_ansi = enable ? 1 : 0;
+}
+
+static const char *diag_color_for(const char *sev)
+{
+    if (!diag_use_ansi || !sev)
+        return "";
+    if (strcmp(sev, "error") == 0)
+        return ANSI_BOLD_RED;
+    if (strcmp(sev, "warning") == 0)
+        return ANSI_BOLD_YELLOW;
+    if (strcmp(sev, "note") == 0)
+        return ANSI_BOLD_CYAN;
+    return ANSI_BOLD_WHITE;
+}
+
 void *xmalloc(size_t sz)
 {
     void *p = malloc(sz);
@@ -251,7 +277,15 @@ static int g_warns = 0;
 static void vdiag_at(const SourceBuffer *src, int line, int col, const char *sev, const char *fmt, va_list ap)
 {
     const char *file = src && src->filename ? src->filename : "<input>";
-    fprintf(stderr, "%s:%d:%d: %s: ", file, line, col, sev);
+    if (diag_use_ansi)
+    {
+        const char *color = diag_color_for(sev);
+        fprintf(stderr, "%s:%d:%d: %s%s%s: ", file, line, col, color, sev, ANSI_RESET);
+    }
+    else
+    {
+        fprintf(stderr, "%s:%d:%d: %s: ", file, line, col, sev);
+    }
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     // Print source line and caret if possible
@@ -285,15 +319,31 @@ static void vdiag_at(const SourceBuffer *src, int line, int col, const char *sev
             int caret = col > 1 ? col - 1 : 0;
             for (int k = 0; k < caret; k++)
                 fputc(' ', stderr);
-            fputc('^', stderr);
-            fputc('\n', stderr);
+            if (diag_use_ansi)
+            {
+                const char *color = diag_color_for(sev);
+                fprintf(stderr, "%s^%s\n", color, ANSI_RESET);
+            }
+            else
+            {
+                fputc('^', stderr);
+                fputc('\n', stderr);
+            }
         }
     }
 }
 
 static void vdiag(const char *sev, const char *fmt, va_list ap)
 {
-    fprintf(stderr, "%s: ", sev);
+    if (diag_use_ansi)
+    {
+        const char *color = diag_color_for(sev);
+        fprintf(stderr, "%s%s%s: ", color, sev, ANSI_RESET);
+    }
+    else
+    {
+        fprintf(stderr, "%s: ", sev);
+    }
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
 }

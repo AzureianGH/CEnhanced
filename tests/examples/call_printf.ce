@@ -4,6 +4,7 @@ bring Test.Chance as TC;
 bring LibTest as LT;
 bring LibTest.Another;
 
+
 #define WARN_MSG "diag warning triggered"
 #define NOTE_MSG "diag note triggered"
 #define ASSERT_OK 1
@@ -53,8 +54,6 @@ bring LibTest.Another;
 #define FEATURE_SENTINEL -10
 #endif
 
-bring Std;
-
 extend from "C" i32 printf(char *, ...);
 extend from "C" i32 write(int, char *, int);
 extend from "C" i32 read(i32, char *, int);
@@ -62,23 +61,9 @@ extend from "C" void *malloc(int);
 extend from "C" void free(void *);
 extend from "C" void exit(int);
 extend from "C" int test();
-
-hide i32 total_test_count = 0;
-
 extend fun test_chance() -> i32;
 
-hide alias string = char*;
-hide alias ptr<T> = T*;
-
-
-hide fun printwrapper() -> i32
-{
-    string fn_name = __FUNCTION__;
-    assert(strcmp(fn_name, "printwrapper") == 0, "__FUNCTION__ matches printwrapper");
-    ret printf("Hello, %s! Number: %d\n", "CHance", 42);
-}
-
-
+bring Std;
 
 expose struct AnElement
 {
@@ -95,8 +80,19 @@ expose struct OtherElement
     AnElement* ptrToSmth;
 };
 
+hide i32 total_test_count = 0;
 OtherElement globalElement = {}; // auto hide members
 
+hide alias string = char*;
+hide alias ptr<T> = T*;
+
+
+hide fun printwrapper() -> i32
+{
+    string fn_name = __FUNCTION__;
+    assert(strcmp(fn_name, "printwrapper") == 0, "__FUNCTION__ matches printwrapper");
+    ret printf("Hello, %s! Number: %d\n", "CHance", 42);
+}
 
 hide fun assert(bool condition, string message) -> void
 {

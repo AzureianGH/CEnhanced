@@ -7,6 +7,13 @@
 #include <ctype.h>
 #include <limits.h>
 
+static int parser_disable_formatting_notes = 0;
+
+void parser_set_disable_formatting_notes(int disable)
+{
+    parser_disable_formatting_notes = disable ? 1 : 0;
+}
+
 struct ModuleImport
 {
     char **parts;
@@ -715,7 +722,7 @@ static Node *parse_metadata_call(Parser *ps, Token open)
     return call;
 }
 
-static void parse_extend_decl(Parser *ps, int leading_noreturn);
+static int parse_extend_decl(Parser *ps, int leading_noreturn);
 
 static Node *new_node(NodeKind k)
 {
@@ -898,9 +905,9 @@ static void parse_module_decl(Parser *ps)
     ps->module_full_name = full;
 }
 
-static void parse_bring_decl(Parser *ps)
+static int parse_bring_decl(Parser *ps)
 {
-    expect(ps, TK_KW_BRING, "bring");
+    Token bring_tok = expect(ps, TK_KW_BRING, "bring");
     char **parts = NULL;
     int count = 0;
     char *full = NULL;
@@ -917,21 +924,22 @@ static void parse_bring_decl(Parser *ps)
     }
     expect(ps, TK_SEMI, ";");
 
-    if (ps->import_count == ps->import_cap)
-    {
-        ps->import_cap = ps->import_cap ? ps->import_cap * 2 : 4;
-        ps->imports = (struct ModuleImport *)realloc(ps->imports, (size_t)ps->import_cap * sizeof(struct ModuleImport));
-        if (!ps->imports)
+        if (ps->import_count >= ps->import_cap)
         {
-            diag_error("out of memory while recording module import");
-            exit(1);
+            ps->import_cap = ps->import_cap ? ps->import_cap * 2 : 4;
+            ps->imports = (struct ModuleImport *)realloc(ps->imports, (size_t)ps->import_cap * sizeof(struct ModuleImport));
+            if (!ps->imports)
+            {
+                diag_error("out of memory while recording module import");
+                exit(1);
+            }
         }
-    }
     ps->imports[ps->import_count].parts = parts;
     ps->imports[ps->import_count].part_count = count;
     ps->imports[ps->import_count].full_name = full;
     ps->imports[ps->import_count].alias = alias;
     ps->import_count++;
+    return bring_tok.line;
 }
 
 static Token expect(Parser *ps, TokenKind k, const char *what)
@@ -964,7 +972,39 @@ static Node *parse_initializer(Parser *ps);
 static void parse_struct_decl(Parser *ps, int is_exposed);
 static void parse_enum_decl(Parser *ps, int is_exposed);
 static void parse_module_decl(Parser *ps);
-static void parse_bring_decl(Parser *ps);
+static int parse_bring_decl(Parser *ps);
+static int parse_extend_decl(Parser *ps, int leading_noreturn);
+
+static int source_only_preprocessor_between(const SourceBuffer *src, int start_line, int end_line)
+{
+    if (!src || !src->src || start_line <= 0 || end_line <= 0)
+        return 0;
+    if (end_line <= start_line + 1)
+        return 1;
+    const char *data = src->src;
+    const char *end = data + src->length;
+    int current_line = 1;
+    const char *line_start = data;
+    for (const char *p = data; p <= end; ++p)
+    {
+        if (p == end || *p == '\n')
+        {
+            if (current_line > start_line && current_line < end_line)
+            {
+                const char *trim = line_start;
+                while (trim < p && (*trim == ' ' || *trim == '\t' || *trim == '\r' || *trim == '\f' || *trim == '\v'))
+                    ++trim;
+                if (trim < p && *trim != '#')
+                    return 0;
+            }
+            if (p == end)
+                break;
+            line_start = p + 1;
+            current_line++;
+        }
+    }
+    return 1;
+}
 
 static int alias_find(Parser *ps, const char *name, int len)
 {
@@ -3051,12 +3091,12 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     return fn;
 }
 
-static void parse_extend_decl(Parser *ps, int leading_noreturn)
+static int parse_extend_decl(Parser *ps, int leading_noreturn)
 {
     // Two forms:
     // 1) extend from "C" i32 printf(char*, _vaargs_);
     // 2) extend fun name(params) -> ret;   // default ABI "C"
-    expect(ps, TK_KW_EXTEND, "extend");
+    Token extend_tok = expect(ps, TK_KW_EXTEND, "extend");
     int is_noreturn = leading_noreturn;
     Token next = lexer_peek(ps->lx);
     if (!is_noreturn && next.kind == TK_KW_NORETURN)
@@ -3157,8 +3197,8 @@ static void parse_extend_decl(Parser *ps, int leading_noreturn)
             ps->ext_cap = ps->ext_cap ? ps->ext_cap * 2 : 8;
             ps->externs = (Symbol *)realloc(ps->externs, ps->ext_cap * sizeof(Symbol));
         }
-        ps->externs[ps->ext_count++] = s;
-        return;
+    ps->externs[ps->ext_count++] = s;
+    return extend_tok.line;
     }
     expect(ps, TK_KW_FROM, "from");
     Token abi = lexer_next(ps->lx);
@@ -3283,8 +3323,8 @@ static void parse_extend_decl(Parser *ps, int leading_noreturn)
         ps->externs = (Symbol *)realloc(ps->externs, ps->ext_cap * sizeof(Symbol));
     }
     ps->externs[ps->ext_count++] = s;
+    return extend_tok.line;
 }
-
 Parser *parser_create(SourceBuffer src)
 {
     Parser *ps = (Parser *)xcalloc(1, sizeof(Parser));
@@ -3307,6 +3347,19 @@ Node *parse_unit(Parser *ps)
     int fn_count = 0;
     struct PendingAttr *attrs = NULL;
     int attr_count = 0, attr_cap = 0;
+    const SourceBuffer *unit_src = lexer_source(ps->lx);
+    int bring_seen = 0;
+    int bring_block_done = 0;
+    int bring_note_emitted = 0;
+    int last_bring_line = 0;
+    int extend_seen = 0;
+    int extend_block_done = 0;
+    int extend_note_emitted = 0;
+    int last_extend_line = 0;
+    int global_seen = 0;
+    int global_block_done = 0;
+    int global_note_emitted = 0;
+    int last_global_line = 0;
 
     for (;;)
     {
@@ -3350,7 +3403,32 @@ Node *parse_unit(Parser *ps)
                               "attributes are not supported on bring declarations");
                 exit(1);
             }
-            parse_bring_decl(ps);
+            if (extend_seen)
+                extend_block_done = 1;
+            if (global_seen)
+                global_block_done = 1;
+            int bring_line = parse_bring_decl(ps);
+            if (!bring_seen)
+            {
+                bring_seen = 1;
+                last_bring_line = bring_line;
+                continue;
+            }
+            if (!parser_disable_formatting_notes && bring_block_done && !bring_note_emitted && last_bring_line > 0)
+            {
+                if (!source_only_preprocessor_between(unit_src, last_bring_line, bring_line))
+                {
+                    diag_note_at(lexer_source(ps->lx), bring_line, t.col,
+                                 "formatting: group 'bring' declarations together (disable with -Nno-formatting)");
+                    bring_note_emitted = 1;
+                }
+                else
+                {
+                    bring_block_done = 0;
+                }
+            }
+            bring_seen = 1;
+            last_bring_line = bring_line;
             continue;
         }
         if (t.kind == TK_EOF)
@@ -3393,17 +3471,48 @@ Node *parse_unit(Parser *ps)
 
         if (t.kind == TK_KW_EXTEND)
         {
+            if (bring_seen)
+                bring_block_done = 1;
+            if (global_seen)
+                global_block_done = 1;
             if (visibility)
             {
                 diag_error_at(lexer_source(ps->lx), vis_tok.line, vis_tok.col,
                               "'hide'/'expose' cannot be applied to 'extend'");
                 exit(1);
             }
-            parse_extend_decl(ps, leading_noreturn);
+            int extend_line = parse_extend_decl(ps, leading_noreturn);
+            if (!extend_seen)
+            {
+                extend_seen = 1;
+                last_extend_line = extend_line;
+                continue;
+            }
+            if (!parser_disable_formatting_notes && extend_block_done && !extend_note_emitted && last_extend_line > 0)
+            {
+                if (!source_only_preprocessor_between(unit_src, last_extend_line, extend_line))
+                {
+                    diag_note_at(lexer_source(ps->lx), extend_line, t.col,
+                                 "formatting: group 'extend' declarations together (disable with -Nno-formatting)");
+                    extend_note_emitted = 1;
+                }
+                else
+                {
+                    extend_block_done = 0;
+                }
+            }
+            extend_seen = 1;
+            last_extend_line = extend_line;
             continue;
         }
         if (t.kind == TK_KW_ENUM)
         {
+            if (bring_seen)
+                bring_block_done = 1;
+            if (extend_seen)
+                extend_block_done = 1;
+            if (global_seen)
+                global_block_done = 1;
             if (attr_count > 0)
             {
                 diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
@@ -3421,6 +3530,12 @@ Node *parse_unit(Parser *ps)
         }
         if (t.kind == TK_KW_STRUCT)
         {
+            if (bring_seen)
+                bring_block_done = 1;
+            if (extend_seen)
+                extend_block_done = 1;
+            if (global_seen)
+                global_block_done = 1;
             if (leading_noreturn)
             {
                 diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
@@ -3432,6 +3547,12 @@ Node *parse_unit(Parser *ps)
         }
         if (t.kind == TK_KW_ALIAS)
         {
+            if (bring_seen)
+                bring_block_done = 1;
+            if (extend_seen)
+                extend_block_done = 1;
+            if (global_seen)
+                global_block_done = 1;
             if (attr_count > 0)
             {
                 diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
@@ -3449,6 +3570,12 @@ Node *parse_unit(Parser *ps)
         }
         if (t.kind == TK_KW_FUN)
         {
+            if (bring_seen)
+                bring_block_done = 1;
+            if (extend_seen)
+                extend_block_done = 1;
+            if (global_seen)
+                global_block_done = 1;
             int has_chancecode = attrs_contains(attrs, attr_count, "ChanceCode");
             Node *fn = parse_function(ps, leading_noreturn, visibility, has_chancecode);
             apply_function_attributes(ps, fn, attrs, attr_count);
@@ -3466,6 +3593,10 @@ Node *parse_unit(Parser *ps)
 
         if (t.kind == TK_KW_CONSTANT || is_type_start(ps, t))
         {
+            if (bring_seen)
+                bring_block_done = 1;
+            if (extend_seen)
+                extend_block_done = 1;
             if (attr_count > 0)
             {
                 diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
@@ -3505,6 +3636,25 @@ Node *parse_unit(Parser *ps)
             decl->line = name.line;
             decl->col = name.col;
             decl->src = lexer_source(ps->lx);
+
+            if (!global_seen)
+            {
+                global_seen = 1;
+            }
+            else if (!parser_disable_formatting_notes && global_block_done && !global_note_emitted && last_global_line > 0)
+            {
+                if (!source_only_preprocessor_between(unit_src, last_global_line, decl->line))
+                {
+                    diag_note_at(lexer_source(ps->lx), decl->line, decl->col,
+                                 "formatting: group global variable declarations together (disable with -Nno-formatting)");
+                    global_note_emitted = 1;
+                }
+                else
+                {
+                    global_block_done = 0;
+                }
+            }
+            last_global_line = decl->line;
 
             Token next_tok = lexer_peek(ps->lx);
             if (next_tok.kind == TK_ASSIGN)

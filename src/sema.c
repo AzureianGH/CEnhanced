@@ -1642,8 +1642,8 @@ static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target
             }
 
             int elem_is_aggregate = elem &&
-                                     (elem->kind == TY_STRUCT ||
-                                      (elem->kind == TY_ARRAY && !elem->array.is_unsized));
+                                    (elem->kind == TY_STRUCT ||
+                                     (elem->kind == TY_ARRAY && !elem->array.is_unsized));
             if (elem_is_aggregate)
             {
                 diag_error_at(init->src, init->line, init->col,
@@ -2507,7 +2507,7 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         Node *target = e->lhs;
-    if (target->kind != ND_VAR && target->kind != ND_MEMBER && target->kind != ND_INDEX && target->kind != ND_DEREF)
+        if (target->kind != ND_VAR && target->kind != ND_MEMBER && target->kind != ND_INDEX && target->kind != ND_DEREF)
         {
             diag_error_at(target->src, target->line, target->col,
                           "operand of '&' must be an lvalue");
@@ -2918,7 +2918,7 @@ static void check_expr(SemaContext *sc, Node *e)
         Node *lhs_base = lhs_expr;
         if (lhs_base->kind == ND_CAST && lhs_base->lhs)
             lhs_base = lhs_base->lhs;
-    if (lhs_base->kind != ND_VAR && lhs_base->kind != ND_INDEX && lhs_base->kind != ND_MEMBER && lhs_base->kind != ND_DEREF)
+        if (lhs_base->kind != ND_VAR && lhs_base->kind != ND_INDEX && lhs_base->kind != ND_MEMBER && lhs_base->kind != ND_DEREF)
         {
             diag_error_at(e->src, e->line, e->col,
                           "lvalue required as left operand of assignment");
@@ -3030,8 +3030,8 @@ static void check_expr(SemaContext *sc, Node *e)
             }
         }
 
-    const Symbol *sym_lookup = resolved_name ? symtab_get(sc->syms, resolved_name) : NULL;
-    const Symbol *direct_sym = (sym_lookup && sym_lookup->kind == SYM_FUNC) ? sym_lookup : NULL;
+        const Symbol *sym_lookup = resolved_name ? symtab_get(sc->syms, resolved_name) : NULL;
+        const Symbol *direct_sym = (sym_lookup && sym_lookup->kind == SYM_FUNC) ? sym_lookup : NULL;
         int args_checked = 0;
 
         Type *func_sig = NULL;
