@@ -1,0 +1,138 @@
+module Game.RPS;
+
+bring Std;
+
+extend from "C" i32 printf(char *, ...);
+extend from "C" i32 read(i32, char*, int);
+extend from "C" void exit(i32);
+
+hide alias string = char*;
+hide alias u8ptr = u8*;
+
+fun mod(i32 a, i32 b) -> i32
+{
+    ret a - (a / b) * b;
+}
+
+// Map RPS moves
+#define ROCK 0
+#define PAPER 1
+#define SCISSORS 2
+
+// AI memory length
+#define MEM_SIZE 100
+
+// Circular buffer for last MEM_SIZE moves
+hide i32[MEM_SIZE] player_history = {0};
+hide i32 history_pos = 0;
+hide i32 total_moves = 0;
+
+// Read single character input from stdin
+hide fun read_char() -> char
+{
+    char c;
+    i32 n = read(0, &c, 1);
+    if (n <= 0)
+        ret '\0'; // end of input
+    if (c == '\n') ret read_char(); // skip newline
+    ret c;
+}
+
+// Convert char input to move
+hide fun parse_move(char c) -> i32
+{
+    if (c == '\0') ret -1; // end of input
+    if (c == 'r' || c == 'R') ret ROCK;
+    if (c == 'p' || c == 'P') ret PAPER;
+    if (c == 's' || c == 'S') ret SCISSORS;
+    ret -1; // invalid
+}
+
+// Predict next player move based on last MEM_SIZE moves
+hide fun predict_player(f32* percent) -> i32
+{
+    i32[3] counts = {0};
+    i32 len = total_moves < MEM_SIZE ? total_moves : MEM_SIZE;
+
+    // Count moves in memory
+    for (i32 i = 0; i < len; i++)
+    {
+        i32 idx = mod(history_pos + MEM_SIZE - i - 1, MEM_SIZE);
+        counts[player_history[idx]] = counts[player_history[idx]] + 1;
+    }
+
+    // Find most frequent move
+    i32 predicted = 0;
+    i32 max = counts[0];
+    if (counts[1] > max) { max = counts[1]; predicted = 1; }
+    if (counts[2] > max) { max = counts[2]; predicted = 2; }
+
+    // Confidence = frequency / len
+    *percent = (len > 0) ? ((max as f32) * 100.0f / len as f32) : 0.0f;
+
+    ret predicted;
+}
+
+// Machine chooses a move to beat predicted player move
+hide fun machine_choice(f32* percent) -> i32
+{
+    i32 pred = predict_player(percent);
+    if (pred == ROCK) ret PAPER;
+    if (pred == PAPER) ret SCISSORS;
+    if (pred == SCISSORS) ret ROCK;
+    ret ROCK;
+}
+
+// Decide winner
+hide fun winner(i32 player, i32 machine) -> string
+{
+    if (player == machine) ret "Tie!";
+    if ((player == ROCK && machine == SCISSORS) ||
+        (player == PAPER && machine == ROCK) ||
+        (player == SCISSORS && machine == PAPER))
+        ret "Player wins!";
+    ret "Machine wins!";
+}
+
+[EntryPoint]
+expose fun main() -> i32
+{
+    printf("=== Rock Paper Scissors with a smarter AI ===\n");
+
+    for (i32 i = 0; i < MEM_SIZE; i++)
+    {
+        player_history[i] = 0;
+    }
+
+    for (;;)
+    {
+        printf("\nChoose [R]ock, [P]aper, [S]cissors, [Q]uit: ");
+
+        char c = read_char();
+        if (c == 'q' || c == 'Q') exit(0);
+
+        i32 p_move = parse_move(c);
+        if (p_move == -1)
+        {
+            printf("Invalid input!\n");
+        }
+        else
+        {
+            // Store move in circular memory
+            player_history[history_pos] = p_move;
+            history_pos = mod(history_pos + 1, MEM_SIZE);
+            total_moves = total_moves + 1;
+
+            f32 prediction_percent = 0.0f;
+            i32 m_move = machine_choice(&prediction_percent);
+
+            string[3] moves = {"Rock", "Paper", "Scissors"};
+
+            printf("Player chose %s, Machine chose %s\n", moves[p_move], moves[m_move]);
+            printf("%s\n", winner(p_move, m_move));
+            printf("AI predicted your next move with %.1f%% confidence.\n", prediction_percent);
+        }
+    }
+
+    ret 0;
+}

@@ -643,6 +643,10 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
         {
             fn->is_entrypoint = 1;
         }
+        else if (strcmp(attr->name, "Inline") == 0)
+        {
+            fn->wants_inline = 1;
+        }
         else
         {
             diag_error_at(lexer_source(ps->lx), attr->line, attr->col,

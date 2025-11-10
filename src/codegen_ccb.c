@@ -192,6 +192,9 @@ static int ccb_emit_pointer_offset(CcbFunctionBuilder *fb, int offset, const Nod
 static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type, CcbLocal *dst_ptr, CcbLocal *src_ptr);
 static bool ccb_emit_load_local(CcbFunctionBuilder *fb, const CcbLocal *local);
 static bool ccb_emit_store_local(CcbFunctionBuilder *fb, const CcbLocal *local);
+static void ccb_scope_enter(CcbFunctionBuilder *fb);
+static void ccb_scope_leave(CcbFunctionBuilder *fb);
+static CCValueType ccb_type_for_expr(const Node *expr);
 static size_t ccb_type_size_bytes(const Type *ty);
 static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym);
 static int ccb_module_emit_externs(CcbModule *mod, const CodegenOptions *opts);
@@ -199,6 +202,7 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
 static bool ccb_instruction_is_pure(const char *line);
 static void ccb_opt_prune_dropped_values(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_const_binops(CcbFunctionBuilder *fb);
+static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, const Node *target_fn);
 
 static void ccb_module_init(CcbModule *mod)
 {
@@ -378,6 +382,160 @@ static void ccb_function_builder_free(CcbFunctionBuilder *fb)
     fb->module = NULL;
     fb->fn = NULL;
     fb->next_label_id = 0;
+}
+
+static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, const Node *target_fn)
+{
+    enum
+    {
+        INLINE_OK = 0,
+        INLINE_FATAL = 1,
+        INLINE_SKIP = 2
+    };
+
+    if (!fb || !call_expr || !target_fn)
+        return INLINE_SKIP;
+
+    Node *mutable_target = (Node *)target_fn;
+    fprintf(stderr, "inline attempt: %s candidate=%d expr=%p\n",
+            target_fn->name ? target_fn->name : "<anon>",
+            target_fn->inline_candidate, (void *)target_fn->inline_expr);
+
+    if (!target_fn->inline_candidate || !target_fn->inline_expr)
+    {
+        if (mutable_target)
+            mutable_target->inline_needs_body = 1;
+        return INLINE_SKIP;
+    }
+    if (call_expr->call_is_indirect)
+    {
+        if (mutable_target)
+            mutable_target->inline_needs_body = 1;
+        return INLINE_SKIP;
+    }
+    if (target_fn->is_varargs || call_expr->call_is_varargs)
+    {
+        if (mutable_target)
+            mutable_target->inline_needs_body = 1;
+        return INLINE_SKIP;
+    }
+    if (call_expr->arg_count != target_fn->param_count)
+    {
+        if (mutable_target)
+            mutable_target->inline_needs_body = 1;
+        return INLINE_SKIP;
+    }
+
+    for (int i = 0; i < target_fn->param_count; ++i)
+    {
+        Type *param_type = NULL;
+        if (target_fn->param_types && i < target_fn->param_count)
+            param_type = target_fn->param_types[i];
+        if (type_is_address_only(param_type))
+        {
+            if (mutable_target)
+                mutable_target->inline_needs_body = 1;
+            return INLINE_SKIP;
+        }
+    }
+
+    ccb_scope_enter(fb);
+    int status = INLINE_FATAL;
+
+    for (int i = 0; i < target_fn->param_count; ++i)
+    {
+        const Node *arg = (call_expr->args && i < call_expr->arg_count) ? call_expr->args[i] : NULL;
+        if (!arg)
+        {
+            diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                          "missing argument for inline call");
+            if (mutable_target)
+                mutable_target->inline_needs_body = 1;
+            goto cleanup;
+        }
+
+        Type *param_type = NULL;
+        if (target_fn->param_types && i < target_fn->param_count)
+            param_type = target_fn->param_types[i];
+        const char *param_name = NULL;
+        if (target_fn->param_names && i < target_fn->param_count)
+        {
+            const char *name = target_fn->param_names[i];
+            if (name && name[0] != '\0')
+                param_name = name;
+        }
+
+        CCValueType param_ty = map_type_to_cc(param_type);
+
+        if (ccb_emit_expr_basic(fb, arg))
+        {
+            if (mutable_target)
+                mutable_target->inline_needs_body = 1;
+            goto cleanup;
+        }
+
+        CCValueType arg_ty = ccb_type_for_expr(arg);
+        if (param_ty == CC_TYPE_INVALID || param_ty == CC_TYPE_VOID)
+            param_ty = arg_ty;
+
+        if (arg_ty != param_ty)
+        {
+            if (ccb_emit_convert_between(fb, arg_ty, param_ty, arg))
+            {
+                if (mutable_target)
+                    mutable_target->inline_needs_body = 1;
+                goto cleanup;
+            }
+            arg_ty = param_ty;
+        }
+
+        CcbLocal *param_local = ccb_local_add(fb, param_name, param_type, false, false);
+        if (!param_local)
+        {
+            diag_error_at(target_fn->src, target_fn->line, target_fn->col,
+                          "failed to allocate local for inline parameter %d", i);
+            if (mutable_target)
+                mutable_target->inline_needs_body = 1;
+            goto cleanup;
+        }
+        param_local->value_type = param_ty;
+
+        if (!ccb_emit_store_local(fb, param_local))
+        {
+            diag_error_at(arg->src, arg->line, arg->col,
+                          "failed to store inline argument");
+            if (mutable_target)
+                mutable_target->inline_needs_body = 1;
+            goto cleanup;
+        }
+    }
+
+    if (ccb_emit_expr_basic(fb, target_fn->inline_expr))
+    {
+        if (mutable_target)
+            mutable_target->inline_needs_body = 1;
+        goto cleanup;
+    }
+
+    CCValueType produced_ty = ccb_type_for_expr(target_fn->inline_expr);
+    CCValueType expected_ty = ccb_type_for_expr(call_expr);
+    if (expected_ty != CC_TYPE_VOID && produced_ty != expected_ty)
+    {
+        if (ccb_emit_convert_between(fb, produced_ty, expected_ty, call_expr))
+        {
+            if (mutable_target)
+                mutable_target->inline_needs_body = 1;
+            goto cleanup;
+        }
+    }
+
+    status = INLINE_OK;
+
+cleanup:
+    ccb_scope_leave(fb);
+    if (status != INLINE_OK && mutable_target)
+        mutable_target->inline_needs_body = 1;
+    return status;
 }
 
 static unsigned long long ccb_mask_for_width(unsigned width)
@@ -1284,16 +1442,6 @@ static char *ccb_escape_string_literal(const char *data, int len)
             break;
         case '"':
             esc = "\\\"";
-            break;
-        case '\n':
-            esc = "\\n";
-            break;
-        case '\r':
-            esc = "\\r";
-            break;
-        case '\t':
-            esc = "\\t";
-            break;
         case '\0':
             esc = "\\0";
             break;
@@ -3564,6 +3712,24 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
     case ND_CALL:
     {
         const int is_indirect = expr->call_is_indirect;
+
+        if (!is_indirect && expr->call_target)
+        {
+            fprintf(stderr, "codegen call: %s inline_candidate=%d expr=%p\n",
+                    expr->call_target->name ? expr->call_target->name : "<anon>",
+                    expr->call_target->inline_candidate,
+                    (void *)expr->call_target->inline_expr);
+        }
+
+        if (!is_indirect && expr->call_target && expr->call_target->inline_candidate)
+        {
+            int inline_rc = ccb_emit_inline_call(fb, expr, expr->call_target);
+            if (inline_rc == 0)
+                return 0;
+            if (inline_rc == 1)
+                return 1;
+        }
+
         CCValueType *arg_types = NULL;
         if (expr->arg_count > 0)
             arg_types = (CCValueType *)xcalloc((size_t)expr->arg_count, sizeof(CCValueType));
@@ -4933,6 +5099,42 @@ int codegen_ccb_write_module(const Node *unit, const CodegenOptions *opts)
     {
         if (unit->kind == ND_UNIT)
         {
+            int inline_count = 0;
+            for (int i = 0; i < unit->stmt_count; ++i)
+            {
+                const Node *decl = unit->stmts[i];
+                if (decl && decl->kind == ND_FUNC && decl->inline_candidate)
+                    inline_count++;
+            }
+
+            const Node **inline_funcs = NULL;
+            char *inline_emitted = NULL;
+            if (!rc && inline_count > 0)
+            {
+                inline_funcs = (const Node **)calloc((size_t)inline_count, sizeof(*inline_funcs));
+                inline_emitted = (char *)calloc((size_t)inline_count, sizeof(*inline_emitted));
+                if (!inline_funcs || !inline_emitted)
+                {
+                    free(inline_funcs);
+                    free(inline_emitted);
+                    inline_funcs = NULL;
+                    inline_emitted = NULL;
+                    inline_count = 0;
+                    rc = 1;
+                }
+                else
+                {
+                    int idx = 0;
+                    for (int i = 0; i < unit->stmt_count; ++i)
+                    {
+                        const Node *decl = unit->stmts[i];
+                        if (!decl || decl->kind != ND_FUNC || !decl->inline_candidate)
+                            continue;
+                        inline_funcs[idx++] = decl;
+                    }
+                }
+            }
+
             for (int i = 0; !rc && i < unit->stmt_count; ++i)
             {
                 const Node *decl = unit->stmts[i];
@@ -4949,9 +5151,37 @@ int codegen_ccb_write_module(const Node *unit, const CodegenOptions *opts)
                 const Node *decl = unit->stmts[i];
                 if (!decl || decl->kind != ND_FUNC)
                     continue;
+                if (decl->inline_candidate)
+                    continue;
                 if (ccb_function_emit_basic(&mod, decl, opts))
                     rc = 1;
             }
+            if (!rc && inline_count > 0)
+            {
+                int emitted_in_pass;
+                do
+                {
+                    emitted_in_pass = 0;
+                    for (int i = 0; !rc && i < inline_count; ++i)
+                    {
+                        if (inline_emitted[i])
+                            continue;
+                        const Node *decl = inline_funcs[i];
+                        if (!decl || !decl->inline_needs_body)
+                            continue;
+                        if (ccb_function_emit_basic(&mod, decl, opts))
+                        {
+                            rc = 1;
+                            break;
+                        }
+                        inline_emitted[i] = 1;
+                        emitted_in_pass = 1;
+                    }
+                } while (!rc && emitted_in_pass);
+            }
+
+            free(inline_emitted);
+            free(inline_funcs);
         }
         else if (unit->kind == ND_FUNC)
         {

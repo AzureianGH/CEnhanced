@@ -6,6 +6,13 @@
 #include <limits.h>
 #include <stdint.h>
 
+enum
+{
+    INLINE_PARAM_LIMIT = 4,
+    INLINE_COST_LIMIT = 40,
+    INLINE_EVAL_MAX_DEPTH = 16
+};
+
 typedef struct
 {
     Symbol symbol;
@@ -19,6 +26,9 @@ typedef struct ImportedFunctionSet
     int count;
     int cap;
 } ImportedFunctionSet;
+
+static void analyze_inline_candidates(Node *root);
+static int inline_try_fold_call(Node *call_expr);
 
 static Type *canonicalize_type_deep(Type *ty)
 {
@@ -57,7 +67,6 @@ static Type *make_function_type_from_sig(const FuncSig *sig)
 {
     if (!sig)
         return NULL;
-
     Type *fn_ty = type_func();
     fn_ty->func.param_count = sig->param_count;
     if (sig->param_count > 0)
@@ -974,6 +983,7 @@ static void populate_symbol_from_function(Symbol *s, Node *fn)
     s->is_extern = 0;
     s->abi = "C";
     s->sig.is_varargs = fn->is_varargs ? 1 : 0;
+    s->ast_node = fn;
 
     Type *decl_ret = fn->ret_type ? fn->ret_type : &ty_i32;
     if (fn->metadata.ret_token)
@@ -1064,6 +1074,7 @@ static void populate_symbol_from_global(Symbol *s, Node *decl)
     s->is_noreturn = 0;
     s->var_type = decl->var_type;
     s->is_const = decl->var_is_const;
+    s->ast_node = decl;
 }
 
 static void sema_register_function_local(SemaContext *sc, Node *unit_node, Node *fn)
@@ -1880,7 +1891,7 @@ static int scope_is_const(SemaContext *sc, const char *name)
     return 0;
 }
 
-static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global, int *is_const, int *is_function)
+static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global, int *is_const, int *is_function, const Symbol **out_sym)
 {
     if (is_global)
         *is_global = 0;
@@ -1888,6 +1899,8 @@ static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global,
         *is_const = 0;
     if (is_function)
         *is_function = 0;
+    if (out_sym)
+        *out_sym = NULL;
     if (!sc || !name)
         return NULL;
 
@@ -1909,6 +1922,8 @@ static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global,
             *is_global = 1;
         if (is_const)
             *is_const = sym->is_const;
+        if (out_sym)
+            *out_sym = sym;
         return canonicalize_type_deep(sym->var_type);
     }
 
@@ -1918,6 +1933,8 @@ static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global,
             *is_function = 1;
         if (is_const)
             *is_const = 1;
+        if (out_sym)
+            *out_sym = sym;
         Type *fn_ty = make_function_type_from_sig(&sym->sig);
         return fn_ty;
     }
@@ -2030,7 +2047,8 @@ static void check_expr(SemaContext *sc, Node *e)
         int is_global = 0;
         int is_const = 0;
         int is_function = 0;
-        Type *t = resolve_variable(sc, orig_name, &is_global, &is_const, &is_function);
+        const Symbol *resolved_sym = NULL;
+        Type *t = resolve_variable(sc, orig_name, &is_global, &is_const, &is_function, &resolved_sym);
         if (!t)
         {
             ImportedFunctionSet *auto_set = sema_find_imported_function_set(sc, orig_name);
@@ -2049,6 +2067,8 @@ static void check_expr(SemaContext *sc, Node *e)
                     e->var_is_global = 0;
                     e->var_is_const = 1;
                     e->var_is_function = 1;
+                    if (sym && sym->kind == SYM_FUNC)
+                        e->referenced_function = sym->ast_node;
                     const char *backend = sym->backend_name ? sym->backend_name : sym->name;
                     if (backend)
                         e->var_ref = backend;
@@ -2099,6 +2119,8 @@ static void check_expr(SemaContext *sc, Node *e)
         e->var_is_global = is_global;
         e->var_is_const = is_const;
         e->var_is_function = is_function;
+        if (resolved_sym && resolved_sym->kind == SYM_FUNC)
+            e->referenced_function = resolved_sym->ast_node;
 
         if (is_function)
         {
@@ -2521,7 +2543,7 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         if (!target->type && target->kind == ND_VAR)
-            target->type = resolve_variable(sc, target->var_ref, NULL, NULL, NULL);
+            target->type = resolve_variable(sc, target->var_ref, NULL, NULL, NULL, NULL);
         if (!target->type)
         {
             diag_error_at(target->src, target->line, target->col,
@@ -2939,7 +2961,7 @@ static void check_expr(SemaContext *sc, Node *e)
         if (!lhs_type)
         {
             if (lhs_base->kind == ND_VAR)
-                lhs_type = resolve_variable(sc, lhs_base->var_ref, NULL, NULL, NULL);
+                lhs_type = resolve_variable(sc, lhs_base->var_ref, NULL, NULL, NULL, NULL);
             else if (lhs_base->kind == ND_MEMBER)
                 lhs_type = lhs_base->type;
             else if ((lhs_base->kind == ND_INDEX || lhs_base->kind == ND_DEREF) && lhs_base->lhs && lhs_base->lhs->type && lhs_base->lhs->type->kind == TY_PTR)
@@ -3003,7 +3025,7 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         Type *t = e->lhs->type;
         if (!t)
-            t = resolve_variable(sc, e->lhs->var_ref, NULL, NULL, NULL);
+            t = resolve_variable(sc, e->lhs->var_ref, NULL, NULL, NULL, NULL);
         t = canonicalize_type_deep(t);
         e->lhs->type = t;
         if (!t || (!type_is_int(t) && !type_is_pointer(t)))
@@ -3113,6 +3135,23 @@ static void check_expr(SemaContext *sc, Node *e)
                           "call target is not a function type");
             exit(1);
         }
+
+        if (!call_is_indirect && direct_sym && direct_sym->kind == SYM_FUNC)
+        {
+            e->call_target = direct_sym->ast_node;
+            fprintf(stderr, "call_target set for %s -> %p inline=%d\n",
+                    resolved_name ? resolved_name : "<null>",
+                    (void *)e->call_target,
+                    e->call_target ? e->call_target->inline_candidate : -1);
+        }
+        else if (!call_is_indirect && target && target->referenced_function)
+        {
+            e->call_target = target->referenced_function;
+        }
+        else
+        {
+            e->call_target = NULL;
+        }
         if (!func_sig->func.has_signature)
         {
             diag_error_at(e->src, e->line, e->col,
@@ -3190,6 +3229,9 @@ static void check_expr(SemaContext *sc, Node *e)
         e->call_func_type = func_sig;
         e->call_is_indirect = call_is_indirect;
         e->call_is_varargs = func_sig->func.is_varargs;
+
+        if (!call_is_indirect)
+            inline_try_fold_call(e);
         return;
     }
     if (e->kind == ND_VA_START)
@@ -3590,7 +3632,10 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         sema_register_function_local(sc, NULL, unit);
         if (check_exposed_function_signature(unit))
             return 1;
-        return sema_check_function(sc, unit);
+        int rc = sema_check_function(sc, unit);
+        if (!rc)
+            analyze_inline_candidates(unit);
+        return rc;
     }
     if (unit->kind != ND_UNIT)
     {
@@ -3640,8 +3685,711 @@ int sema_check_unit(SemaContext *sc, Node *unit)
                 return 1;
         }
     }
+
+    analyze_inline_candidates(unit);
     sc->unit = previous_unit;
     return 0;
+}
+
+static int inline_type_supported(Type *ty)
+{
+    if (!ty)
+        return 1;
+    ty = canonicalize_type_deep(ty);
+    if (!ty)
+        return 1;
+    if (ty->kind == TY_STRUCT || ty->kind == TY_ARRAY)
+        return 0;
+    return 1;
+}
+
+static int inline_type_is_unsigned(Type *ty)
+{
+    ty = canonicalize_type_deep(ty);
+    if (!ty)
+        return 0;
+    switch (ty->kind)
+    {
+    case TY_U8:
+    case TY_U16:
+    case TY_U32:
+    case TY_U64:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int inline_type_bit_width(Type *ty)
+{
+    ty = canonicalize_type_deep(ty);
+    if (!ty)
+        return 0;
+    switch (ty->kind)
+    {
+    case TY_BOOL:
+        return 1;
+    case TY_CHAR:
+    case TY_I8:
+    case TY_U8:
+        return 8;
+    case TY_I16:
+    case TY_U16:
+        return 16;
+    case TY_I32:
+    case TY_U32:
+        return 32;
+    case TY_I64:
+    case TY_U64:
+        return 64;
+    default:
+        return 0;
+    }
+}
+
+static int64_t inline_normalize_value(int64_t value, Type *ty)
+{
+    if (!ty)
+        return value;
+    ty = canonicalize_type_deep(ty);
+    if (!ty)
+        return value;
+    int width = inline_type_bit_width(ty);
+    if (width <= 0)
+        return value;
+    if (width == 1 || ty->kind == TY_BOOL)
+        return value ? 1 : 0;
+    if (width >= 64)
+        return value;
+    uint64_t mask = (1ULL << width) - 1ULL;
+    uint64_t uv = ((uint64_t)value) & mask;
+    if (inline_type_is_unsigned(ty))
+        return (int64_t)uv;
+    uint64_t sign_bit = 1ULL << (width - 1);
+    if (uv & sign_bit)
+        uv |= (~mask);
+    return (int64_t)uv;
+}
+
+static Node *inline_make_conditional(Node *cond, Node *then_expr, Node *else_expr, Type *ret_type)
+{
+    if (!cond || !then_expr || !else_expr)
+        return NULL;
+    Node *n = (Node *)xcalloc(1, sizeof(Node));
+    n->kind = ND_COND;
+    n->lhs = cond;
+    n->rhs = then_expr;
+    n->body = else_expr;
+    n->type = canonicalize_type_deep(ret_type);
+    if (cond->src)
+    {
+        n->src = cond->src;
+        n->line = cond->line;
+        n->col = cond->col;
+    }
+    else if (then_expr->src)
+    {
+        n->src = then_expr->src;
+        n->line = then_expr->line;
+        n->col = then_expr->col;
+    }
+    else if (else_expr->src)
+    {
+        n->src = else_expr->src;
+        n->line = else_expr->line;
+        n->col = else_expr->col;
+    }
+    return n;
+}
+
+static Node *inline_stmt_to_expr(const Node *stmt, Node *tail_expr, Type *ret_type)
+{
+    if (!stmt)
+        return NULL;
+
+    switch (stmt->kind)
+    {
+    case ND_BLOCK:
+    {
+        Node *expr = tail_expr;
+        for (int i = stmt->stmt_count - 1; i >= 0; --i)
+        {
+            expr = inline_stmt_to_expr(stmt->stmts[i], expr, ret_type);
+            if (!expr)
+                return NULL;
+        }
+        return expr;
+    }
+    case ND_RET:
+        if (!stmt->lhs)
+            return NULL;
+        if (tail_expr)
+            return NULL;
+        return stmt->lhs;
+    case ND_IF:
+    {
+        Node *cond = stmt->lhs ? (Node *)stmt->lhs : NULL;
+        if (!cond)
+            return NULL;
+        Node *then_expr = inline_stmt_to_expr(stmt->rhs, NULL, ret_type);
+        if (!then_expr)
+            return NULL;
+        Node *else_expr = NULL;
+        if (stmt->body)
+        {
+            if (tail_expr)
+                return NULL;
+            else_expr = inline_stmt_to_expr(stmt->body, NULL, ret_type);
+            if (!else_expr)
+                return NULL;
+        }
+        else
+        {
+            if (!tail_expr)
+                return NULL;
+            else_expr = tail_expr;
+        }
+        return inline_make_conditional(cond, then_expr, else_expr, ret_type);
+    }
+    default:
+        return NULL;
+    }
+}
+
+static const Node *inline_extract_return_expr(const Node *fn)
+{
+    if (!fn || fn->kind != ND_FUNC || !fn->body)
+        return NULL;
+    const Node *body = fn->body;
+    if (body->kind != ND_BLOCK)
+        return NULL;
+    Node *expr = NULL;
+    for (int i = body->stmt_count - 1; i >= 0; --i)
+    {
+        const Node *stmt = body->stmts ? body->stmts[i] : NULL;
+        expr = inline_stmt_to_expr(stmt, expr, fn->ret_type);
+        if (!expr)
+            return NULL;
+    }
+    return expr;
+}
+
+typedef struct InlineBinding
+{
+    const char *name;
+    int64_t value;
+    Type *type;
+} InlineBinding;
+
+static int inline_lookup_binding(const InlineBinding *bindings, int count, const char *name, int64_t *out_value, Type **out_type)
+{
+    if (!bindings || count <= 0 || !name)
+        return 0;
+    for (int i = 0; i < count; ++i)
+    {
+        if (bindings[i].name && strcmp(bindings[i].name, name) == 0)
+        {
+            if (out_value)
+                *out_value = bindings[i].value;
+            if (out_type)
+                *out_type = bindings[i].type;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int inline_eval_const_expr(const Node *expr,
+                                  const InlineBinding *bindings,
+                                  int binding_count,
+                                  int depth,
+                                  int64_t *out_value);
+
+static int inline_eval_inline_call(const Node *call_expr,
+                                   const InlineBinding *bindings,
+                                   int binding_count,
+                                   int depth,
+                                   int64_t *out_value)
+{
+    if (!call_expr || !out_value)
+        return 0;
+    if (!call_expr->call_target || call_expr->call_is_indirect)
+        return 0;
+    const Node *fn = call_expr->call_target;
+    if (!fn->inline_candidate || !fn->inline_expr)
+        return 0;
+    if (!fn->ret_type || !type_is_int(fn->ret_type))
+        return 0;
+    if (fn->param_count != call_expr->arg_count)
+        return 0;
+    if (fn->param_count > INLINE_PARAM_LIMIT)
+        return 0;
+
+    InlineBinding params[INLINE_PARAM_LIMIT];
+    for (int i = 0; i < fn->param_count; ++i)
+    {
+        const Node *arg = (call_expr->args && i < call_expr->arg_count) ? call_expr->args[i] : NULL;
+        if (!arg)
+            return 0;
+        const char *param_name = (fn->param_names && i < fn->param_count) ? fn->param_names[i] : NULL;
+        if (!param_name)
+            return 0;
+        int64_t arg_value = 0;
+        if (!inline_eval_const_expr(arg, bindings, binding_count, depth + 1, &arg_value))
+            return 0;
+        Type *param_type = (fn->param_types && i < fn->param_count) ? fn->param_types[i] : NULL;
+        params[i].name = param_name;
+        params[i].value = inline_normalize_value(arg_value, param_type);
+        params[i].type = param_type;
+    }
+
+    int64_t result = 0;
+    if (!inline_eval_const_expr(fn->inline_expr, params, fn->param_count, depth + 1, &result))
+        return 0;
+    *out_value = inline_normalize_value(result, fn->ret_type);
+    return 1;
+}
+
+static int inline_eval_const_expr(const Node *expr,
+                                  const InlineBinding *bindings,
+                                  int binding_count,
+                                  int depth,
+                                  int64_t *out_value)
+{
+    if (!expr || !out_value)
+        return 0;
+    if (depth > INLINE_EVAL_MAX_DEPTH)
+        return 0;
+
+    switch (expr->kind)
+    {
+    case ND_INT:
+        *out_value = inline_normalize_value(expr->int_val, expr->type);
+        return 1;
+    case ND_VAR:
+    {
+        int64_t value = 0;
+        Type *ty = expr->type;
+        if (expr->var_ref && inline_lookup_binding(bindings, binding_count, expr->var_ref, &value, &ty))
+        {
+            *out_value = inline_normalize_value(value, ty ? ty : expr->type);
+            return 1;
+        }
+        return 0;
+    }
+    case ND_NEG:
+    {
+        int64_t lhs = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &lhs))
+            return 0;
+        *out_value = inline_normalize_value(-lhs, expr->type);
+        return 1;
+    }
+    case ND_BITNOT:
+    {
+        int64_t lhs = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &lhs))
+            return 0;
+        *out_value = inline_normalize_value(~lhs, expr->type);
+        return 1;
+    }
+    case ND_ADD:
+    case ND_SUB:
+    case ND_MUL:
+    case ND_DIV:
+    case ND_SHL:
+    case ND_SHR:
+    case ND_BITAND:
+    case ND_BITOR:
+    case ND_BITXOR:
+    {
+        int64_t lhs = 0;
+        int64_t rhs = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &lhs))
+            return 0;
+        if (!inline_eval_const_expr(expr->rhs, bindings, binding_count, depth + 1, &rhs))
+            return 0;
+        int64_t result = 0;
+        switch (expr->kind)
+        {
+        case ND_ADD:
+            result = lhs + rhs;
+            break;
+        case ND_SUB:
+            result = lhs - rhs;
+            break;
+        case ND_MUL:
+            result = lhs * rhs;
+            break;
+        case ND_DIV:
+            if (rhs == 0)
+                return 0;
+            result = lhs / rhs;
+            break;
+        case ND_SHL:
+            result = lhs << (int)(rhs & 63);
+            break;
+        case ND_SHR:
+            if (inline_type_is_unsigned(expr->lhs ? expr->lhs->type : NULL))
+                result = ((uint64_t)lhs) >> (int)(rhs & 63);
+            else
+                result = lhs >> (int)(rhs & 63);
+            break;
+        case ND_BITAND:
+            result = lhs & rhs;
+            break;
+        case ND_BITOR:
+            result = lhs | rhs;
+            break;
+        case ND_BITXOR:
+            result = lhs ^ rhs;
+            break;
+        default:
+            return 0;
+        }
+        *out_value = inline_normalize_value(result, expr->type);
+        return 1;
+    }
+    case ND_LAND:
+    {
+        int64_t lhs = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &lhs))
+            return 0;
+        if (!lhs)
+        {
+            *out_value = inline_normalize_value(0, expr->type);
+            return 1;
+        }
+        int64_t rhs = 0;
+        if (!inline_eval_const_expr(expr->rhs, bindings, binding_count, depth + 1, &rhs))
+            return 0;
+        *out_value = inline_normalize_value(rhs ? 1 : 0, expr->type);
+        return 1;
+    }
+    case ND_LOR:
+    {
+        int64_t lhs = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &lhs))
+            return 0;
+        if (lhs)
+        {
+            *out_value = inline_normalize_value(1, expr->type);
+            return 1;
+        }
+        int64_t rhs = 0;
+        if (!inline_eval_const_expr(expr->rhs, bindings, binding_count, depth + 1, &rhs))
+            return 0;
+        *out_value = inline_normalize_value(rhs ? 1 : 0, expr->type);
+        return 1;
+    }
+    case ND_EQ:
+    case ND_NE:
+    case ND_LT:
+    case ND_LE:
+    case ND_GE:
+    case ND_GT_EXPR:
+    {
+        int64_t lhs = 0;
+        int64_t rhs = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &lhs))
+            return 0;
+        if (!inline_eval_const_expr(expr->rhs, bindings, binding_count, depth + 1, &rhs))
+            return 0;
+        int64_t result = 0;
+        switch (expr->kind)
+        {
+        case ND_EQ:
+            result = (lhs == rhs);
+            break;
+        case ND_NE:
+            result = (lhs != rhs);
+            break;
+        case ND_LT:
+            result = lhs < rhs;
+            break;
+        case ND_LE:
+            result = lhs <= rhs;
+            break;
+        case ND_GT_EXPR:
+            result = lhs > rhs;
+            break;
+        case ND_GE:
+            result = lhs >= rhs;
+            break;
+        default:
+            return 0;
+        }
+        *out_value = inline_normalize_value(result ? 1 : 0, expr->type);
+        return 1;
+    }
+    case ND_COND:
+    {
+        int64_t cond = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &cond))
+            return 0;
+        if (cond)
+        {
+            if (!inline_eval_const_expr(expr->rhs, bindings, binding_count, depth + 1, out_value))
+                return 0;
+            *out_value = inline_normalize_value(*out_value, expr->type);
+            return 1;
+        }
+        if (!inline_eval_const_expr(expr->body, bindings, binding_count, depth + 1, out_value))
+            return 0;
+        *out_value = inline_normalize_value(*out_value, expr->type);
+        return 1;
+    }
+    case ND_CAST:
+    {
+        int64_t val = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &val))
+            return 0;
+        *out_value = inline_normalize_value(val, expr->type);
+        return 1;
+    }
+    case ND_CALL:
+        return inline_eval_inline_call(expr, bindings, binding_count, depth + 1, out_value);
+    default:
+        return 0;
+    }
+}
+
+static int inline_try_fold_call(Node *call_expr)
+{
+    if (!call_expr || call_expr->kind != ND_CALL)
+        return 0;
+    if (call_expr->call_is_indirect)
+        return 0;
+    if (!call_expr->call_target)
+        return 0;
+    const Node *fn = call_expr->call_target;
+    if (!fn->inline_candidate || !fn->inline_expr)
+        return 0;
+    if (!fn->ret_type || !type_is_int(fn->ret_type))
+        return 0;
+    if (fn->param_count != call_expr->arg_count)
+        return 0;
+    if (fn->param_count > INLINE_PARAM_LIMIT)
+        return 0;
+
+    InlineBinding bindings[INLINE_PARAM_LIMIT];
+    for (int i = 0; i < fn->param_count; ++i)
+    {
+        const Node *arg = (call_expr->args && i < call_expr->arg_count) ? call_expr->args[i] : NULL;
+        if (!arg)
+            return 0;
+        const char *param_name = (fn->param_names && i < fn->param_count) ? fn->param_names[i] : NULL;
+        if (!param_name)
+            return 0;
+        int64_t value = 0;
+        if (!inline_eval_const_expr(arg, NULL, 0, 0, &value))
+            return 0;
+        Type *param_type = (fn->param_types && i < fn->param_count) ? fn->param_types[i] : NULL;
+        bindings[i].name = param_name;
+        bindings[i].value = inline_normalize_value(value, param_type);
+        bindings[i].type = param_type;
+    }
+
+    int64_t result = 0;
+    if (!inline_eval_const_expr(fn->inline_expr, bindings, fn->param_count, 0, &result))
+        return 0;
+
+    Type *ret_type = canonicalize_type_deep(fn->ret_type);
+    result = inline_normalize_value(result, ret_type);
+
+    call_expr->kind = ND_INT;
+    call_expr->int_val = result;
+    call_expr->lhs = NULL;
+    call_expr->rhs = NULL;
+    call_expr->body = NULL;
+    call_expr->args = NULL;
+    call_expr->arg_count = 0;
+    call_expr->call_target = NULL;
+    call_expr->call_name = NULL;
+    call_expr->call_func_type = NULL;
+    call_expr->call_is_indirect = 0;
+    call_expr->call_is_varargs = 0;
+    call_expr->type = ret_type;
+    return 1;
+}
+
+static int inline_expr_cost(const Node *expr)
+{
+    if (!expr)
+        return 0;
+    int cost = 1;
+    cost += inline_expr_cost(expr->lhs);
+    cost += inline_expr_cost(expr->rhs);
+    cost += inline_expr_cost(expr->body);
+    if (expr->kind == ND_BLOCK && expr->stmts)
+    {
+        for (int i = 0; i < expr->stmt_count; ++i)
+            cost += inline_expr_cost(expr->stmts[i]);
+    }
+    if (expr->kind == ND_CALL && expr->args)
+    {
+        for (int i = 0; i < expr->arg_count; ++i)
+            cost += inline_expr_cost(expr->args[i]);
+    }
+    if (expr->kind == ND_INIT_LIST && expr->init.elems)
+    {
+        for (int i = 0; i < expr->init.count; ++i)
+            cost += inline_expr_cost(expr->init.elems[i]);
+    }
+    return cost;
+}
+
+static void inline_walk_usage(Node *current_fn, const Node *node, const Node *parent)
+{
+    if (!node)
+        return;
+
+    if (node->kind == ND_CALL)
+    {
+        if (node->call_target && node->call_target == current_fn)
+            current_fn->inline_recursive = 1;
+    }
+
+    if (node->kind == ND_VAR && node->referenced_function)
+    {
+        int is_call_target = parent && parent->kind == ND_CALL && parent->lhs == node;
+        if (!is_call_target)
+            node->referenced_function->inline_address_taken = 1;
+    }
+
+    inline_walk_usage(current_fn, node->lhs, node);
+    inline_walk_usage(current_fn, node->rhs, node);
+    inline_walk_usage(current_fn, node->body, node);
+
+    if (node->kind == ND_BLOCK && node->stmts)
+    {
+        for (int i = 0; i < node->stmt_count; ++i)
+            inline_walk_usage(current_fn, node->stmts[i], node);
+    }
+
+    if (node->kind == ND_CALL && node->args)
+    {
+        for (int i = 0; i < node->arg_count; ++i)
+            inline_walk_usage(current_fn, node->args[i], node);
+    }
+
+    if (node->kind == ND_INIT_LIST && node->init.elems)
+    {
+        for (int i = 0; i < node->init.count; ++i)
+            inline_walk_usage(current_fn, node->init.elems[i], node);
+    }
+}
+
+static void analyze_inline_candidates(Node *root)
+{
+    if (!root)
+        return;
+
+    Node **functions = NULL;
+    int fn_count = 0;
+    int fn_cap = 0;
+
+    if (root->kind == ND_FUNC)
+    {
+        fn_cap = 1;
+        functions = (Node **)xcalloc((size_t)fn_cap, sizeof(Node *));
+        functions[fn_count++] = root;
+    }
+    else if (root->kind == ND_UNIT)
+    {
+        for (int i = 0; i < root->stmt_count; ++i)
+        {
+            Node *decl = root->stmts[i];
+            if (!decl || decl->kind != ND_FUNC)
+                continue;
+            if (fn_count == fn_cap)
+            {
+                int new_cap = fn_cap ? fn_cap * 2 : 8;
+                Node **grown = (Node **)realloc(functions, (size_t)new_cap * sizeof(Node *));
+                if (!grown)
+                {
+                    free(functions);
+                    return;
+                }
+                functions = grown;
+                if (new_cap > fn_cap)
+                    memset(functions + fn_cap, 0, (size_t)(new_cap - fn_cap) * sizeof(Node *));
+                fn_cap = new_cap;
+            }
+            functions[fn_count++] = decl;
+        }
+    }
+
+    if (fn_count == 0)
+    {
+        free(functions);
+        return;
+    }
+
+    for (int i = 0; i < fn_count; ++i)
+    {
+        Node *fn = functions[i];
+        fn->inline_candidate = 0;
+        fn->inline_cost = 0;
+        fn->inline_address_taken = 0;
+        fn->inline_recursive = 0;
+        fn->inline_expr = NULL;
+        fn->inline_needs_body = 1;
+    }
+
+    for (int i = 0; i < fn_count; ++i)
+    {
+        Node *fn = functions[i];
+        if (fn->body)
+            inline_walk_usage(fn, fn->body, NULL);
+    }
+
+    for (int i = 0; i < fn_count; ++i)
+    {
+        Node *fn = functions[i];
+        if (!fn->wants_inline)
+            continue;
+        if (fn->is_chancecode)
+            continue;
+        if (fn->inline_address_taken)
+            continue;
+        if (fn->inline_recursive)
+            continue;
+        if (fn->is_varargs)
+            continue;
+        if (fn->param_count > INLINE_PARAM_LIMIT)
+            continue;
+        int params_ok = 1;
+        for (int p = 0; p < fn->param_count; ++p)
+        {
+            Type *pty = (fn->param_types && p < fn->param_count) ? fn->param_types[p] : NULL;
+            if (!inline_type_supported(pty))
+            {
+                params_ok = 0;
+                break;
+            }
+        }
+        if (!params_ok)
+            continue;
+        if (fn->ret_type && fn->ret_type->kind == TY_VOID)
+            continue;
+        if (!inline_type_supported(fn->ret_type))
+            continue;
+        const Node *ret_expr = inline_extract_return_expr(fn);
+        if (!ret_expr)
+            continue;
+        int cost = inline_expr_cost(ret_expr);
+        if (cost > INLINE_COST_LIMIT)
+            continue;
+        fn->inline_candidate = 1;
+        fn->inline_cost = cost;
+        fn->inline_expr = ret_expr;
+        if (!fn->is_exposed && !fn->is_entrypoint)
+            fn->inline_needs_body = 0;
+        fprintf(stderr, "inline candidate: %s cost=%d\n", fn->name ? fn->name : "<anon>", cost);
+    }
+
+    free(functions);
 }
 
 void sema_register_foreign_unit_symbols(SemaContext *sc, Node *target_unit, Node *foreign_unit)
@@ -3683,6 +4431,6 @@ int sema_eval_const_i32(Node *expr)
         return (int)expr->int_val;
     if (expr->kind == ND_ADD)
         return sema_eval_const_i32(expr->lhs) + sema_eval_const_i32(expr->rhs);
-    fprintf(stderr, "const eval: unsupported expr kind %d\n", expr->kind);
+    fprintf(stderr, "const eval: unsupported expression kind %d\n", expr->kind);
     return 0;
 }

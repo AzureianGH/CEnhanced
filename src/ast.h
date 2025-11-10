@@ -282,6 +282,13 @@ typedef struct Node
         int declared_local_count; // parsed from .func locals= value, or -1 when unspecified
         char *ret_token;          // parsed from .func ret= value, if provided
     } metadata;
+    int wants_inline;
+    int inline_candidate;
+    int inline_cost;
+    int inline_address_taken;
+    int inline_recursive;
+    const struct Node *inline_expr;
+    int inline_needs_body;
     // For ND_STRING
     const char *str_data;
     int str_len;
@@ -292,6 +299,7 @@ typedef struct Node
     Type *call_func_type; // canonicalized function signature when available
     int call_is_indirect; // 1 for pointer-based calls
     int call_is_varargs;  // 1 when call accepts varargs (used for indirect calls)
+    const struct Node *call_target; // resolved direct call target when available
     // For ND_VAR_DECL
     const char *var_name;
     Type *var_type;
@@ -299,6 +307,7 @@ typedef struct Node
     int var_is_global; // set on declarations/references that live at global scope
     int var_is_array;  // for ND_VAR references to array-typed variables
     int var_is_function; // for ND_VAR references that name a function symbol
+    struct Node *referenced_function; // points at referenced function definition when resolved
     const ModulePath *module_ref; // tracks originating module for qualified references
     int module_ref_parts;         // number of module path segments consumed in expression
     const char *module_type_name; // resolved type name within module, when applicable
@@ -449,6 +458,7 @@ typedef struct Symbol
     int is_extern;   // 1 if extern (extend from "C")
     const char *abi; // e.g., "C"
     FuncSig sig;
+    struct Node *ast_node; // owning AST node when symbol originates from parsed code
     int is_noreturn;
     Type *var_type; // valid when kind == SYM_GLOBAL
     int is_const;   // valid when kind == SYM_GLOBAL

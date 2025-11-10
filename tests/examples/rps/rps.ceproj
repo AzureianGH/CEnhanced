@@ -1,0 +1,6 @@
+# Chance sample project
+type=Console
+backend=x86
+output=build/rps
+ce=main.ce
+cclib=stdlib.cclib

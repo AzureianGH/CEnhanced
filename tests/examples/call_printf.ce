@@ -3,7 +3,7 @@ module Test.Program;
 bring Test.Chance as TC;
 bring LibTest as LT;
 bring LibTest.Another;
-
+bring Std;
 
 #define WARN_MSG "diag warning triggered"
 #define NOTE_MSG "diag note triggered"
@@ -63,8 +63,6 @@ extend from "C" void exit(int);
 extend from "C" int test();
 extend fun test_chance() -> i32;
 
-bring Std;
-
 expose struct AnElement
 {
     TC.Element internalElement;
@@ -86,6 +84,19 @@ OtherElement globalElement = {}; // auto hide members
 hide alias string = char*;
 hide alias ptr<T> = T*;
 
+[Inline]
+hide fun inlined_function(i32 x) -> i32
+{
+    ret x + 1;
+}
+
+[Inline]
+hide fun inlinable_function(i32 x) -> i32
+{
+    if (x == 0)
+        ret 0;
+    ret x * inlined_function(x);
+}
 
 hide fun printwrapper() -> i32
 {
@@ -405,6 +416,10 @@ expose fun main() -> i32
     fun* (TC.SmallTest, -> i32) struct_funptr = &passbystruct;
     i32 struct_funptr_result = struct_funptr(st);
     assert(struct_funptr_result == 81, "struct funptr result is 81");
+
+    assert(inlinable_function(12) == 156, "inlinable_function(12) == 156");
+
+    assert(inlinable_function(0) == 0, "inlinable_function(0) == 0");
 
     ret final_sum; // expect 168
 }
