@@ -5,6 +5,21 @@
 #include <string.h>
 #include <limits.h>
 #include <stdint.h>
+
+typedef struct
+{
+    Symbol symbol;
+    const char *module_full;
+} ImportedFunctionCandidate;
+
+typedef struct ImportedFunctionSet
+{
+    char *name;
+    ImportedFunctionCandidate *candidates;
+    int count;
+    int cap;
+} ImportedFunctionSet;
+
 static Type *canonicalize_type_deep(Type *ty)
 {
     ty = module_registry_canonical_type(ty);
@@ -106,6 +121,132 @@ const Symbol *symtab_get(SymTable *st, const char *name)
     return NULL;
 }
 
+static int symtab_has_symbol_with_prefix(SymTable *st, const char *prefix)
+{
+    if (!st || !prefix || !*prefix)
+        return 0;
+    size_t prefix_len = strlen(prefix);
+    for (int i = 0; i < st->count; ++i)
+    {
+        const char *candidate = st->items[i].name;
+        if (!candidate)
+            continue;
+        if (strncmp(candidate, prefix, prefix_len) == 0 && candidate[prefix_len] == '.')
+            return 1;
+    }
+    return 0;
+}
+
+static ImportedFunctionSet *sema_find_imported_function_set(SemaContext *sc, const char *name)
+{
+    if (!sc || !name || !sc->imported_funcs)
+        return NULL;
+    for (int i = 0; i < sc->imported_func_count; ++i)
+    {
+        if (sc->imported_funcs[i].name && strcmp(sc->imported_funcs[i].name, name) == 0)
+            return &sc->imported_funcs[i];
+    }
+    return NULL;
+}
+
+static ImportedFunctionSet *sema_ensure_imported_function_set(SemaContext *sc, const char *name)
+{
+    if (!sc || !name)
+        return NULL;
+    ImportedFunctionSet *set = sema_find_imported_function_set(sc, name);
+    if (set)
+        return set;
+    if (sc->imported_func_count == sc->imported_func_cap)
+    {
+        int new_cap = sc->imported_func_cap ? sc->imported_func_cap * 2 : 4;
+        ImportedFunctionSet *grown = (ImportedFunctionSet *)realloc(sc->imported_funcs, (size_t)new_cap * sizeof(ImportedFunctionSet));
+        if (!grown)
+        {
+            diag_error("out of memory while tracking imported functions");
+            exit(1);
+        }
+        for (int i = sc->imported_func_cap; i < new_cap; ++i)
+        {
+            grown[i].name = NULL;
+            grown[i].candidates = NULL;
+            grown[i].count = 0;
+            grown[i].cap = 0;
+        }
+        sc->imported_funcs = grown;
+        sc->imported_func_cap = new_cap;
+    }
+    set = &sc->imported_funcs[sc->imported_func_count++];
+    set->name = xstrdup(name);
+    set->candidates = NULL;
+    set->count = 0;
+    set->cap = 0;
+    return set;
+}
+
+static int funcsig_equal(const FuncSig *a, const FuncSig *b);
+
+static void sema_imported_function_insert(SemaContext *sc, const char *name, const char *module_full, const Symbol *symbol)
+{
+    if (!sc || !name || !symbol)
+        return;
+    ImportedFunctionSet *set = sema_ensure_imported_function_set(sc, name);
+    for (int i = 0; i < set->count; ++i)
+    {
+        if (funcsig_equal(&set->candidates[i].symbol.sig, &symbol->sig))
+        {
+            const char *existing_mod = set->candidates[i].module_full ? set->candidates[i].module_full : "<unknown>";
+            const char *incoming_mod = module_full ? module_full : "<unknown>";
+            diag_error("ambiguous import: function '%s' from module '%s' conflicts with module '%s'", name, existing_mod, incoming_mod);
+            exit(1);
+        }
+    }
+    if (set->count == set->cap)
+    {
+        int new_cap = set->cap ? set->cap * 2 : 4;
+        ImportedFunctionCandidate *grown = (ImportedFunctionCandidate *)realloc(set->candidates, (size_t)new_cap * sizeof(ImportedFunctionCandidate));
+        if (!grown)
+        {
+            diag_error("out of memory while tracking imported function overloads");
+            exit(1);
+        }
+        set->candidates = grown;
+        set->cap = new_cap;
+    }
+    ImportedFunctionCandidate *slot = &set->candidates[set->count++];
+    slot->symbol = *symbol;
+    slot->module_full = module_full;
+}
+
+void sema_track_imported_function(SemaContext *sc, const char *name, const char *module_full, const Symbol *symbol)
+{
+    sema_imported_function_insert(sc, name, module_full, symbol);
+}
+
+static const ImportedFunctionCandidate *sema_get_unique_imported_candidate(SemaContext *sc, const char *name, int emit_error)
+{
+    ImportedFunctionSet *set = sema_find_imported_function_set(sc, name);
+    if (!set)
+        return NULL;
+    if (set->count == 1)
+        return &set->candidates[0];
+    if (emit_error)
+    {
+        if (set->count >= 2)
+        {
+            const char *mod_a = set->candidates[0].module_full ? set->candidates[0].module_full : "<unknown>";
+            const char *mod_b = set->candidates[1].module_full ? set->candidates[1].module_full : "<unknown>";
+            diag_error("ambiguous reference to function '%s'; candidates exist in modules '%s' and '%s'", name, mod_a, mod_b);
+            exit(1);
+        }
+    }
+    return NULL;
+}
+
+static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, const char *name, Node *call_expr, int *args_checked);
+static int call_arguments_match_signature(Node *call_expr, const FuncSig *sig);
+static void check_expr(SemaContext *sc, Node *e);
+static int can_assign(Type *target, Node *rhs);
+
 struct VarBind
 {
     const char *name;
@@ -122,18 +263,34 @@ struct SemaContext
 {
     SymTable *syms;
     struct Scope *scope;
+    const struct Node *unit;
+    ImportedFunctionSet *imported_funcs;
+    int imported_func_count;
+    int imported_func_cap;
 };
 SemaContext *sema_create(void)
 {
     SemaContext *sc = (SemaContext *)xcalloc(1, sizeof(SemaContext));
     sc->syms = symtab_create();
     sc->unit = NULL;
+    sc->imported_funcs = NULL;
+    sc->imported_func_count = 0;
+    sc->imported_func_cap = 0;
     return sc;
 }
 void sema_destroy(SemaContext *sc)
 {
     if (!sc)
         return;
+    if (sc->imported_funcs)
+    {
+        for (int i = 0; i < sc->imported_func_count; ++i)
+        {
+            free(sc->imported_funcs[i].name);
+            free(sc->imported_funcs[i].candidates);
+        }
+        free(sc->imported_funcs);
+    }
     symtab_destroy(sc->syms);
     free(sc);
 }
@@ -328,6 +485,34 @@ static int unit_allows_module_call(const Node *unit, const char *qualified_name)
     return 0;
 }
 
+typedef enum
+{
+    IMPORT_STYLE_NONE = 0,
+    IMPORT_STYLE_ALIAS = 1,
+    IMPORT_STYLE_AUTO = 2
+} ImportStyle;
+
+static ImportStyle unit_import_style(const Node *unit, const char *module_full)
+{
+    if (!unit || unit->kind != ND_UNIT || !module_full || !*module_full)
+        return IMPORT_STYLE_NONE;
+    if (!unit->imports || unit->import_count <= 0)
+        return IMPORT_STYLE_NONE;
+    for (int i = 0; i < unit->import_count; ++i)
+    {
+        const ModulePath *imp = &unit->imports[i];
+        if (!imp || !imp->full_name)
+            continue;
+        if (strcmp(imp->full_name, module_full) == 0)
+        {
+            if (imp->alias && imp->alias[0])
+                return IMPORT_STYLE_ALIAS;
+            return IMPORT_STYLE_AUTO;
+        }
+    }
+    return IMPORT_STYLE_NONE;
+}
+
 static const ModulePath *unit_find_import_for_ident(const Node *unit, const char *name, int *parts_consumed)
 {
     if (parts_consumed)
@@ -405,6 +590,113 @@ static int type_is_builtin(const Type *t)
     default:
         return 0;
     }
+}
+
+static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, const char *name, Node *call_expr, int *args_checked)
+{
+    if (!sc || !name || !call_expr)
+        return NULL;
+    if (strchr(name, '.'))
+        return NULL;
+    ImportedFunctionSet *set = sema_find_imported_function_set(sc, name);
+    if (!set)
+        return NULL;
+
+    if (!args_checked || !*args_checked)
+    {
+        for (int i = 0; i < call_expr->arg_count; ++i)
+        {
+            if (call_expr->args && call_expr->args[i])
+                check_expr(sc, call_expr->args[i]);
+        }
+        if (args_checked)
+            *args_checked = 1;
+    }
+
+    ImportedFunctionCandidate *match = NULL;
+    for (int ci = 0; ci < set->count; ++ci)
+    {
+        ImportedFunctionCandidate *cand = &set->candidates[ci];
+        const FuncSig *sig = &cand->symbol.sig;
+        int provided = call_expr->arg_count;
+        int expected = sig->param_count;
+        if (!sig->is_varargs)
+        {
+            if (provided != expected)
+                continue;
+        }
+        else if (provided < expected)
+        {
+            continue;
+        }
+
+        int ok = 1;
+        for (int pi = 0; pi < expected && ok; ++pi)
+        {
+            if (!sig->params || pi >= sig->param_count)
+                continue;
+            Type *expected_ty = sig->params[pi];
+            if (!expected_ty)
+                continue;
+            if (!call_expr->args || !call_expr->args[pi])
+            {
+                ok = 0;
+                break;
+            }
+            Node *arg_node = call_expr->args[pi];
+            Type *saved_type = arg_node->type;
+            int64_t saved_int = arg_node->int_val;
+            if (!can_assign(expected_ty, arg_node))
+                ok = 0;
+            arg_node->type = saved_type;
+            arg_node->int_val = saved_int;
+        }
+        if (!ok)
+            continue;
+
+        if (!match)
+        {
+            match = cand;
+            continue;
+        }
+
+        if (funcsig_equal(&match->symbol.sig, &cand->symbol.sig))
+        {
+            const char *mod_a = match->module_full ? match->module_full : "<unknown>";
+            const char *mod_b = cand->module_full ? cand->module_full : "<unknown>";
+            diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                          "ambiguous call to '%s'; both modules '%s' and '%s' provide identical overloads",
+                          name, mod_a, mod_b);
+            exit(1);
+        }
+        else
+        {
+            const char *mod_a = match->module_full ? match->module_full : "<unknown>";
+            const char *mod_b = cand->module_full ? cand->module_full : "<unknown>";
+            diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                          "ambiguous call to '%s'; matches found in modules '%s' and '%s'",
+                          name, mod_a, mod_b);
+            exit(1);
+        }
+    }
+
+    if (!match)
+    {
+        diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                      "no overload of '%s' matches provided arguments", name);
+        if (set->count > 0)
+        {
+            for (int i = 0; i < set->count; ++i)
+            {
+                const char *mod = set->candidates[i].module_full ? set->candidates[i].module_full : "<unknown>";
+                diag_note_at(call_expr->src, call_expr->line, call_expr->col,
+                             "candidate: %s.%s", mod, set->candidates[i].symbol.name);
+            }
+        }
+        exit(1);
+    }
+
+    return match;
 }
 
 static void describe_type(const Type *t, char *buf, size_t bufsz)
@@ -601,6 +893,30 @@ static int type_equal(Type *a, Type *b)
         if (a->struct_name && b->struct_name)
             return strcmp(a->struct_name, b->struct_name) == 0;
         return a == b;
+    }
+    return 1;
+}
+
+static int funcsig_equal(const FuncSig *a, const FuncSig *b)
+{
+    if (a == b)
+        return 1;
+    if (!a || !b)
+        return 0;
+    if (a->param_count != b->param_count)
+        return 0;
+    if (a->is_varargs != b->is_varargs)
+        return 0;
+    if (!!a->ret != !!b->ret)
+        return 0;
+    if (a->ret && !type_equal(a->ret, b->ret))
+        return 0;
+    for (int i = 0; i < a->param_count; ++i)
+    {
+        Type *ap = (a->params && i < a->param_count) ? a->params[i] : NULL;
+        Type *bp = (b->params && i < b->param_count) ? b->params[i] : NULL;
+        if (!type_equal(ap, bp))
+            return 0;
     }
     return 1;
 }
@@ -848,7 +1164,7 @@ static void sema_register_global_local(SemaContext *sc, Node *unit_node, Node *d
     }
 }
 
-static void sema_register_function_foreign(SemaContext *sc, const Node *unit_node, Node *fn)
+static void sema_register_function_foreign(SemaContext *sc, const Node *unit_node, Node *fn, int auto_import)
 {
     if (!sc || !sc->syms || !unit_node || unit_node->kind != ND_UNIT || !fn || fn->kind != ND_FUNC)
         return;
@@ -869,6 +1185,9 @@ static void sema_register_function_foreign(SemaContext *sc, const Node *unit_nod
     Symbol s = {0};
     populate_symbol_from_function(&s, fn);
     s.is_extern = 1;
+
+    if (auto_import)
+        sema_imported_function_insert(sc, fn->name, module_full, &s);
 
     if (fn->metadata.backend_name && strcmp(fn->metadata.backend_name, fn->name) != 0)
     {
@@ -1210,6 +1529,36 @@ static int can_assign(Type *target, Node *rhs)
     if (coerce_int_literal_to_type(rhs, canon_target, "assignment"))
         return 1;
     return 0;
+}
+
+static int call_arguments_match_signature(Node *call_expr, const FuncSig *sig)
+{
+    if (!call_expr || !sig)
+        return 0;
+    int provided = call_expr->arg_count;
+    int expected = sig->param_count;
+    if (!sig->is_varargs)
+    {
+        if (provided != expected)
+            return 0;
+    }
+    else if (provided < expected)
+    {
+        return 0;
+    }
+    for (int i = 0; i < expected; ++i)
+    {
+        if (!sig->params || i >= sig->param_count)
+            continue;
+        Type *expected_ty = sig->params[i];
+        if (!expected_ty)
+            continue;
+        if (!call_expr->args || !call_expr->args[i])
+            return 0;
+        if (!can_assign(expected_ty, call_expr->args[i]))
+            return 0;
+    }
+    return 1;
 }
 
 static void apply_default_vararg_promotion(Node **slot)
@@ -1684,6 +2033,37 @@ static void check_expr(SemaContext *sc, Node *e)
         Type *t = resolve_variable(sc, orig_name, &is_global, &is_const, &is_function);
         if (!t)
         {
+            ImportedFunctionSet *auto_set = sema_find_imported_function_set(sc, orig_name);
+            if (auto_set)
+            {
+                if (auto_set->count == 1)
+                {
+                    const Symbol *sym = symtab_get(sc->syms, orig_name);
+                    if (!sym)
+                        sym = &auto_set->candidates[0].symbol;
+                    Type *fn_ty = make_function_type_from_sig(&sym->sig);
+                    fn_ty = canonicalize_type_deep(fn_ty);
+                    e->type = fn_ty;
+                    e->var_type = fn_ty;
+                    e->var_is_array = 0;
+                    e->var_is_global = 0;
+                    e->var_is_const = 1;
+                    e->var_is_function = 1;
+                    const char *backend = sym->backend_name ? sym->backend_name : sym->name;
+                    if (backend)
+                        e->var_ref = backend;
+                    return;
+                }
+                else if (auto_set->count > 1)
+                {
+                    const char *mod_a = auto_set->candidates[0].module_full ? auto_set->candidates[0].module_full : "<unknown>";
+                    const char *mod_b = auto_set->candidates[1].module_full ? auto_set->candidates[1].module_full : "<unknown>";
+                    diag_error_at(e->src, e->line, e->col,
+                                  "ambiguous reference to '%s'; modules '%s' and '%s' both provide candidates",
+                                  orig_name ? orig_name : "<unnamed>", mod_a, mod_b);
+                    exit(1);
+                }
+            }
             int import_parts = 0;
             const ModulePath *imp = unit_find_import_for_ident(sc ? sc->unit : NULL, orig_name, &import_parts);
             if (imp)
@@ -1951,7 +2331,13 @@ static void check_expr(SemaContext *sc, Node *e)
                 return;
             }
 
-            const char *module_full = imp->full_name;
+            const char *module_full = NULL;
+            if (base_node->var_type && base_node->var_type->kind == TY_IMPORT && base_node->var_ref && *base_node->var_ref)
+                module_full = base_node->var_ref;
+            if (imp && imp->alias && imp->alias[0] && base_node->var_ref && strcmp(base_node->var_ref, imp->alias) == 0)
+                module_full = imp->full_name;
+            if (!module_full)
+                module_full = imp->full_name;
             if (!module_full)
             {
                 diag_error_at(e->src, e->line, e->col,
@@ -1981,15 +2367,19 @@ static void check_expr(SemaContext *sc, Node *e)
                 return;
             }
 
-            char *qualified = make_qualified_name(imp, field);
-            if (!qualified)
+            size_t module_len = module_full ? strlen(module_full) : 0;
+            size_t field_len = strlen(field);
+            char *qualified = NULL;
+            if (module_full && *module_full)
             {
-                size_t module_len = strlen(module_full);
-                size_t field_len = strlen(field);
                 qualified = (char *)xmalloc(module_len + 1 + field_len + 1);
                 memcpy(qualified, module_full, module_len);
                 qualified[module_len] = '.';
                 memcpy(qualified + module_len + 1, field, field_len + 1);
+            }
+            else
+            {
+                qualified = make_qualified_name(imp, field);
             }
 
             const Symbol *sym = symtab_get(sc->syms, qualified);
@@ -2032,6 +2422,27 @@ static void check_expr(SemaContext *sc, Node *e)
                     return;
                 }
             }
+
+            if (symtab_has_symbol_with_prefix(sc->syms, qualified))
+            {
+                // Treat this segment as another module placeholder so chained lookups can continue.
+                e->kind = ND_VAR;
+                e->lhs = NULL;
+                e->rhs = NULL;
+                e->var_ref = qualified;
+                e->var_is_function = 0;
+                e->var_is_const = 1;
+                e->var_is_global = 0;
+                e->var_type = &ty_module_placeholder;
+                e->type = &ty_module_placeholder;
+                e->module_ref = imp;
+                e->module_ref_parts = imp->part_count;
+                e->module_type_name = NULL;
+                e->module_type_is_enum = 0;
+                ast_free(base_node);
+                return;
+            }
+
             free(qualified);
 
             diag_error_at(e->src, e->line, e->col,
@@ -2619,8 +3030,9 @@ static void check_expr(SemaContext *sc, Node *e)
             }
         }
 
-        const Symbol *sym_lookup = resolved_name ? symtab_get(sc->syms, resolved_name) : NULL;
-        const Symbol *direct_sym = (sym_lookup && sym_lookup->kind == SYM_FUNC) ? sym_lookup : NULL;
+    const Symbol *sym_lookup = resolved_name ? symtab_get(sc->syms, resolved_name) : NULL;
+    const Symbol *direct_sym = (sym_lookup && sym_lookup->kind == SYM_FUNC) ? sym_lookup : NULL;
+        int args_checked = 0;
 
         Type *func_sig = NULL;
         int call_is_indirect = 0;
@@ -2628,20 +3040,27 @@ static void check_expr(SemaContext *sc, Node *e)
         Type *target_type = NULL;
         int target_is_function_symbol = 0;
 
-        if (direct_sym)
+        if (resolved_name)
+        {
+            ImportedFunctionCandidate *resolved_import = sema_resolve_imported_call(sc, resolved_name, e, &args_checked);
+            if (resolved_import)
+            {
+                direct_sym = &resolved_import->symbol;
+                func_sig = make_function_type_from_sig(&resolved_import->symbol.sig);
+                call_is_indirect = 0;
+            }
+        }
+
+        if (!func_sig && direct_sym)
         {
             func_sig = make_function_type_from_sig(&direct_sym->sig);
             call_is_indirect = 0;
         }
 
-        if (!func_sig && target)
+        if (target)
         {
             check_expr(sc, target);
             target_type = canonicalize_type_deep(target->type);
-            target_is_function_symbol = (target->kind == ND_VAR && target->var_is_function);
-        }
-        else if (target)
-        {
             target_is_function_symbol = (target->kind == ND_VAR && target->var_is_function);
         }
 
@@ -2701,8 +3120,11 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
 
-        for (int i = 0; i < e->arg_count; ++i)
-            check_expr(sc, e->args[i]);
+        if (!args_checked)
+        {
+            for (int i = 0; i < e->arg_count; ++i)
+                check_expr(sc, e->args[i]);
+        }
 
         const char *diag_name = resolved_name ? resolved_name : (original_name ? original_name : "<call>");
 
@@ -3222,29 +3644,35 @@ int sema_check_unit(SemaContext *sc, Node *unit)
     return 0;
 }
 
-void sema_register_foreign_unit_symbols(SemaContext *sc, Node *unit)
+void sema_register_foreign_unit_symbols(SemaContext *sc, Node *target_unit, Node *foreign_unit)
 {
-    if (!sc || !unit)
+    if (!sc || !target_unit || target_unit->kind != ND_UNIT || !foreign_unit)
         return;
 
-    if (unit->kind == ND_UNIT)
+    if (foreign_unit->kind == ND_UNIT)
     {
-        for (int i = 0; i < unit->stmt_count; ++i)
+        const char *module_full = foreign_unit->module_path.full_name;
+        ImportStyle style = unit_import_style(target_unit, module_full);
+        if (style == IMPORT_STYLE_NONE)
+            return;
+        int auto_import = (style == IMPORT_STYLE_AUTO);
+
+        for (int i = 0; i < foreign_unit->stmt_count; ++i)
         {
-            Node *decl = unit->stmts[i];
+            Node *decl = foreign_unit->stmts[i];
             if (!decl)
                 continue;
             if (decl->kind == ND_FUNC)
-                sema_register_function_foreign(sc, unit, decl);
+                sema_register_function_foreign(sc, foreign_unit, decl, auto_import);
             else if (decl->kind == ND_VAR_DECL && decl->var_is_global)
-                sema_register_global_foreign(sc, unit, decl);
+                sema_register_global_foreign(sc, foreign_unit, decl);
         }
         return;
     }
 
-    if (unit->kind == ND_FUNC)
+    if (foreign_unit->kind == ND_FUNC)
     {
-        sema_register_function_foreign(sc, NULL, unit);
+        sema_register_function_foreign(sc, NULL, foreign_unit, 0);
     }
 }
 

@@ -459,17 +459,23 @@ int symtab_add(SymTable *st, Symbol sym);
 const Symbol *symtab_get(SymTable *st, const char *name);
 
 struct Scope; // forward decl for semantic analyzer scope chain
+struct ImportedFunctionSet;
+
 typedef struct
 {
     SymTable *syms;
     struct Scope *scope;
     const struct Node *unit;
+    struct ImportedFunctionSet *imported_funcs;
+    int imported_func_count;
+    int imported_func_cap;
 } SemaContext;
 
 SemaContext *sema_create(void);
 void sema_destroy(SemaContext *sc);
 // returns 0 on success, non-zero on error (prints diagnostics)
 int sema_check_unit(SemaContext *sc, Node *unit);
-void sema_register_foreign_unit_symbols(SemaContext *sc, Node *unit);
+void sema_register_foreign_unit_symbols(SemaContext *sc, Node *target_unit, Node *foreign_unit);
+void sema_track_imported_function(SemaContext *sc, const char *name, const char *module_full, const Symbol *symbol);
 
 #endif // CHANCE_AST_H

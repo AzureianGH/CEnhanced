@@ -1067,6 +1067,7 @@ typedef struct LoadedLibraryFunction
     char *name;
     char *backend_name;
     char *qualified_name;
+    char *module_name;
     Type *return_type;
     Type **param_types;
     int param_count;
@@ -2017,6 +2018,7 @@ static void free_loaded_library_function(LoadedLibraryFunction *fn)
     free(fn->name);
     free(fn->backend_name);
     free(fn->qualified_name);
+    free(fn->module_name);
     free(fn->param_types);
     memset(fn, 0, sizeof(*fn));
 }
@@ -2141,6 +2143,7 @@ static int harvest_functions_from_cclib_module(const CclibModule *module,
         lf.name = xstrdup(fn->name);
         char *qualified = make_qualified_function_name(module_name, fn->name);
         lf.qualified_name = qualified;
+    lf.module_name = xstrdup(module_name);
         const char *backend_src = fn->backend_name;
         char *generated_backend = NULL;
         if (!backend_src || !*backend_src)
@@ -2205,12 +2208,35 @@ static void free_loaded_library(LoadedLibrary *lib)
     memset(lib, 0, sizeof(*lib));
 }
 
-static void symtab_add_library_functions(SymTable *syms,
+static int unit_has_auto_import(const Node *unit, const char *module_full)
+{
+    if (!unit || unit->kind != ND_UNIT || !module_full || !*module_full)
+        return 0;
+    if (!unit->imports || unit->import_count <= 0)
+        return 0;
+    for (int i = 0; i < unit->import_count; ++i)
+    {
+        const ModulePath *imp = &unit->imports[i];
+        if (!imp || !imp->full_name)
+            continue;
+        if (strcmp(imp->full_name, module_full) == 0)
+        {
+            if (imp->alias && imp->alias[0])
+                return 0;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static void symtab_add_library_functions(SemaContext *sc,
+                                         Node *unit,
                                          const LoadedLibraryFunction *funcs,
                                          int func_count)
 {
-    if (!syms || !funcs || func_count <= 0)
+    if (!sc || !sc->syms || !funcs || func_count <= 0)
         return;
+    SymTable *syms = sc->syms;
     for (int i = 0; i < func_count; ++i)
     {
         const LoadedLibraryFunction *lf = &funcs[i];
@@ -2228,6 +2254,27 @@ static void symtab_add_library_functions(SymTable *syms,
         sym.sig.is_varargs = lf->is_varargs;
         sym.is_noreturn = lf->is_noreturn;
         symtab_add(syms, sym);
+
+        if (sym.backend_name && strcmp(sym.backend_name, sym.name) != 0)
+        {
+            Symbol backend_alias = sym;
+            backend_alias.name = sym.backend_name;
+            symtab_add(syms, backend_alias);
+        }
+
+        if (!lf->name)
+            continue;
+        if (!lf->module_name)
+            continue;
+        const char *module_full = lf->module_name;
+
+        if (unit_has_auto_import(unit, module_full))
+        {
+            Symbol unqual = sym;
+            unqual.name = lf->name;
+            unqual.backend_name = sym.backend_name;
+            sema_track_imported_function(sc, lf->name, module_full, &unqual);
+        }
     }
 }
 
@@ -3001,7 +3048,7 @@ int main(int argc, char **argv)
                                          include_dir_count, sc->syms);
         Node *unit = parse_unit(ps);
         parser_export_externs(ps, sc->syms);
-        symtab_add_library_functions(sc->syms, loaded_library_functions, loaded_library_function_count);
+    symtab_add_library_functions(sc, unit, loaded_library_functions, loaded_library_function_count);
 
         units[fi].input_path = xstrdup(input);
         units[fi].src = src;
@@ -3019,7 +3066,7 @@ int main(int argc, char **argv)
         {
             if (target == source)
                 continue;
-            sema_register_foreign_unit_symbols(units[target].sc, units[source].unit);
+            sema_register_foreign_unit_symbols(units[target].sc, units[target].unit, units[source].unit);
         }
     }
 

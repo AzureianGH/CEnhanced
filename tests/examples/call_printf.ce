@@ -53,7 +53,7 @@ bring LibTest.Another;
 #define FEATURE_SENTINEL -10
 #endif
 
-bring Std as Std;
+bring Std;
 
 extend from "C" i32 printf(char *, ...);
 extend from "C" i32 write(int, char *, int);
@@ -255,7 +255,7 @@ expose fun main() -> i32
 
     printf("Result from LibTest: %d\n", LT.test_fun(41));
 
-    printf("Result from LibTest.Another: %d\n", LibTest.Another.other_test_fun(50)); // Will be 60
+    printf("Result from LibTest.Another: %d\n", other_test_fun(50)); // Will be 60
 
     f32 floatval = 3.14f;
     f64 doubleval = 1.23456789;
@@ -357,12 +357,13 @@ expose fun main() -> i32
     assert(strcmp(__FUNCTION__, "main") == 0, "__FUNCTION__ matches main");
     assert(strcmp("hello" + "world", "helloworld") == 0, "constant string merging");
 
-    assert(strcmp(LibTest.Another.get_info(), "LibTest.Another::get_info()") == 0, "LibTest.Another::get_info() works");
+    assert(strcmp(get_info(), "LibTest.Another::get_info()") == 0, "LibTest.Another::get_info() works");
 
-    i32 varargs_sum = LibTest.Another.test_varargs(5, 12345, 10, 20, 30, 40, 50);
+    i32 varargs_sum = test_varargs(5, 12345, 10, 20, 30, 40, 50);
     assert(varargs_sum == 150, "varargs sum is 150");
 
-    LibTest.Another.test_diffvarargs(77, 3.14f, "varargs test");
+    
+    test_diffvarargs(77, 3.14f, "varargs test");
 
     i32[3] fixed_array = {10, 20, 30};
     i32 fixed_sum = fixed_array[0] + fixed_array[1] + fixed_array[2];
