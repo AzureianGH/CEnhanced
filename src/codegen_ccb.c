@@ -202,6 +202,7 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
 static bool ccb_instruction_is_pure(const char *line);
 static void ccb_opt_prune_dropped_values(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_const_binops(CcbFunctionBuilder *fb);
+static const char *ccb_binop_symbol(const char *op);
 static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, const Node *target_fn);
 
 static void ccb_module_init(CcbModule *mod)
@@ -357,7 +358,7 @@ static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, co
         return;
     fb->module = mod;
     fb->fn = fn;
-    fb->ret_type = map_type_to_cc(fn && fn->ret_type ? fn->ret_type : NULL);
+        fb->ret_type = map_type_to_cc(fn && fn->ret_type ? fn->ret_type : NULL);
     string_list_init(&fb->body);
     fb->locals = NULL;
     fb->locals_count = 0;
@@ -408,6 +409,8 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
         if (mutable_target)                                                                      \
             mutable_target->inline_needs_body = 1;                                               \
         compiler_verbose_logf("inline", "skip inline of '%s': %s", fn_name, MSG);              \
+        if (compiler_verbose_deep_enabled())                                                     \
+            compiler_verbose_treef("inline", "|_", "reason: %s", MSG);                        \
         return INLINE_SKIP;                                                                      \
     } while (0)
 
@@ -417,6 +420,10 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
         INLINE_SKIP_WITH_REASON("call is indirect");
     if (target_fn->is_varargs || call_expr->call_is_varargs)
         INLINE_SKIP_WITH_REASON("varargs not supported");
+    if (compiler_verbose_deep_enabled())
+    {
+        compiler_verbose_treef("inline", "|-", "arg count %d vs %d", call_expr->arg_count, target_fn->param_count);
+    }
     if (call_expr->arg_count != target_fn->param_count)
         INLINE_SKIP_WITH_REASON("argument count mismatch");
 
@@ -505,6 +512,8 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
     if (ccb_emit_expr_basic(fb, target_fn->inline_expr))
     {
         compiler_verbose_logf("inline", "abort inline of '%s': failed to emit inline expression", fn_name);
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("inline", "|_", "failed emitting inline body");
         goto cleanup;
     }
 
@@ -515,6 +524,8 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
         if (ccb_emit_convert_between(fb, produced_ty, expected_ty, call_expr))
         {
             compiler_verbose_logf("inline", "abort inline of '%s': result conversion failed", fn_name);
+            if (compiler_verbose_deep_enabled())
+                compiler_verbose_treef("inline", "|_", "conversion %d -> %d failed", produced_ty, expected_ty);
             goto cleanup;
         }
     }
@@ -525,7 +536,11 @@ cleanup:
     ccb_scope_leave(fb);
 #undef INLINE_SKIP_WITH_REASON
     if (status == INLINE_OK)
+    {
         compiler_verbose_logf("inline", "inlined call to '%s'", fn_name);
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("inline", "`-", "successfully spliced body");
+    }
     if (status != INLINE_OK && mutable_target)
         mutable_target->inline_needs_body = 1;
     return status;
@@ -717,6 +732,33 @@ static bool ccb_parse_binop_info(const char *line, char *op_buf, size_t op_sz,
     return true;
 }
 
+static const char *ccb_binop_symbol(const char *op)
+{
+    if (!op)
+        return "?";
+    if (strcmp(op, "add") == 0)
+        return "+";
+    if (strcmp(op, "sub") == 0)
+        return "-";
+    if (strcmp(op, "mul") == 0)
+        return "*";
+    if (strcmp(op, "div") == 0)
+        return "/";
+    if (strcmp(op, "mod") == 0)
+        return "%";
+    if (strcmp(op, "and") == 0)
+        return "&";
+    if (strcmp(op, "or") == 0)
+        return "|";
+    if (strcmp(op, "xor") == 0)
+        return "^";
+    if (strcmp(op, "shl") == 0)
+        return "<<";
+    if (strcmp(op, "shr") == 0)
+        return ">>";
+    return op;
+}
+
 static void ccb_opt_fold_const_binops(CcbFunctionBuilder *fb)
 {
     if (!fb)
@@ -868,6 +910,27 @@ static void ccb_opt_fold_const_binops(CcbFunctionBuilder *fb)
         else
             snprintf(new_line, sizeof(new_line), "  const %s %llu", lhs.type, result_u);
 
+        if (compiler_verbose_deep_enabled())
+        {
+            char lhs_repr[64];
+            char rhs_repr[64];
+            char res_repr[64];
+            if (lhs.is_signed)
+                snprintf(lhs_repr, sizeof(lhs_repr), "(%s)%lld", lhs.type, (long long)lhs_s);
+            else
+                snprintf(lhs_repr, sizeof(lhs_repr), "(%s)%llu", lhs.type, (unsigned long long)lhs_u);
+            if (rhs.is_signed)
+                snprintf(rhs_repr, sizeof(rhs_repr), "(%s)%lld", rhs.type, (long long)rhs_s);
+            else
+                snprintf(rhs_repr, sizeof(rhs_repr), "(%s)%llu", rhs.type, (unsigned long long)rhs_u);
+            if (lhs.is_signed)
+                snprintf(res_repr, sizeof(res_repr), "(%s)%lld", lhs.type, (long long)result_s);
+            else
+                snprintf(res_repr, sizeof(res_repr), "(%s)%llu", lhs.type, (unsigned long long)result_u);
+            const char *symbol = ccb_binop_symbol(op);
+            compiler_verbose_treef("optimizer", "|-", "fold %s %s %s => %s", lhs_repr, symbol, rhs_repr, res_repr);
+        }
+
         size_t new_len = strlen(new_line);
         char *replacement = (char *)malloc(new_len + 1);
         if (!replacement)
@@ -915,6 +978,22 @@ static void ccb_opt_prune_dropped_values(CcbFunctionBuilder *fb)
         if (removed_any)
         {
             size_t remove_count = i - remove_start + 1;
+            if (compiler_verbose_deep_enabled())
+            {
+                const char *preview = body->items[i];
+                if (preview)
+                {
+                    while (*preview == ' ' || *preview == '\t')
+                        ++preview;
+                }
+                char preview_buf[64];
+                if (preview && *preview)
+                    snprintf(preview_buf, sizeof(preview_buf), "%.48s", preview);
+                else
+                    snprintf(preview_buf, sizeof(preview_buf), "drop");
+                compiler_verbose_treef("optimizer", "|-", "prune %zu instruction%s near '%s'",
+                                        remove_count, remove_count == 1 ? "" : "s", preview_buf);
+            }
             string_list_remove_range(body, remove_start, remove_count);
             if (remove_start == 0)
                 i = 0;
@@ -933,10 +1012,26 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
     if (!fb || !opts || opts->opt_level <= 0)
         return;
 
+    const char *fn_name = (fb->fn && fb->fn->name) ? fb->fn->name : "<anon>";
+    if (compiler_verbose_enabled())
+        compiler_verbose_logf("optimizer", "optimizing '%s' (O%d)", fn_name, opts->opt_level);
+    if (compiler_verbose_deep_enabled())
+        compiler_verbose_treef("optimizer", "+-", "pass prune dropped values");
+    if (compiler_verbose_enabled())
+        compiler_verbose_logf("optimizer", "pass prune dropped values");
     ccb_opt_prune_dropped_values(fb);
 
     if (opts->opt_level >= 2)
+    {
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass fold constant binops");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass fold constant binops");
         ccb_opt_fold_const_binops(fb);
+    }
+
+    if (compiler_verbose_enabled())
+        compiler_verbose_logf("optimizer", "completed '%s'", fn_name);
 }
 
 static void ccb_function_builder_register_params(CcbFunctionBuilder *fb)

@@ -139,8 +139,8 @@ static void verbose_print_config(
     int emit_library, int freestanding, AsmSyntax asm_syntax,
     int include_dir_count, int ce_count, int ccb_count, int cclib_count,
     int obj_count, const char *chancecodec_cmd, int chancecodec_has_override,
-    int needs_chancecodec, const char *chancecode_backend,
-    int chancecodec_uses_fallback)
+  int needs_chancecodec, const char *chancecode_backend,
+  int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
 {
   if (!compiler_verbose_enabled())
     return;
@@ -158,6 +158,8 @@ static void verbose_print_config(
   verbose_table_row("Emit library", bool_str(emit_library));
   verbose_table_row("Freestanding", bool_str(freestanding));
   verbose_table_row("Asm syntax", asm_syntax_to_option(asm_syntax));
+  verbose_table_row("Verbose mode", bool_str(verbose_active));
+  verbose_table_row("Verbose deep", bool_str(verbose_deep));
   char count_buf[32];
   snprintf(count_buf, sizeof(count_buf), "%d", include_dir_count);
   verbose_table_row("Include dirs", count_buf);
@@ -234,6 +236,8 @@ static void usage(const char *prog) {
   fprintf(stderr, "  -Nno-formatting  Disable formatting guidance notes\n");
   fprintf(stderr,
     "  -v, --verbose    Enable verbose diagnostics and progress\n");
+  fprintf(stderr,
+    "  -vd             Verbose + optimizer deep-dive visuals\n");
   fprintf(stderr,
     "  --no-ansi        Disable colored diagnostics (verbose too)\n");
   fprintf(stderr, "  --library         Emit a .cclib library instead of "
@@ -2705,6 +2709,11 @@ int main(int argc, char **argv) {
       parser_set_disable_formatting_notes(1);
       continue;
     }
+    if (strcmp(argv[i], "-vd") == 0 || strcmp(argv[i], "--verbose-deep") == 0) {
+      compiler_verbose_set_mode(1);
+      compiler_verbose_set_deep(1);
+      continue;
+    }
     if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
       compiler_verbose_set_mode(1);
       continue;
@@ -2712,6 +2721,7 @@ int main(int argc, char **argv) {
     if (strcmp(argv[i], "--no-ansi") == 0) {
       diag_set_use_ansi(0);
       verbose_use_ansi = 0;
+      compiler_verbose_set_use_ansi(0);
       continue;
     }
     if (argv[i][0] == '-') {
@@ -2873,12 +2883,14 @@ int main(int argc, char **argv) {
   }
 
   if (compiler_verbose_enabled()) {
-  verbose_print_config(out, opt_level, target_arch, target_os, stop_after_ccb,
-             stop_after_asm, no_link, emit_library, freestanding,
-             asm_syntax, include_dir_count, ce_count, ccb_count,
-             cclib_count, obj_count, chancecodec_cmd_to_use,
-             chancecodec_has_override, needs_chancecodec,
-             chancecode_backend, chancecodec_uses_fallback);
+    verbose_print_config(out, opt_level, target_arch, target_os, stop_after_ccb,
+                         stop_after_asm, no_link, emit_library, freestanding,
+                         asm_syntax, include_dir_count, ce_count, ccb_count,
+                         cclib_count, obj_count, chancecodec_cmd_to_use,
+                         chancecodec_has_override, needs_chancecodec,
+                         chancecode_backend, chancecodec_uses_fallback,
+                         compiler_verbose_enabled(),
+                         compiler_verbose_deep_enabled());
     if (include_dir_count > 0) {
       verbose_section("Include Directories");
       for (int idx = 0; idx < include_dir_count; ++idx) {

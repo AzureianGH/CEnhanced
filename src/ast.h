@@ -439,8 +439,12 @@ void diag_set_use_ansi(int enable);
 
 // Compiler-wide verbose diagnostics
 void compiler_verbose_set_mode(int enable);
+void compiler_verbose_set_deep(int enable);
+void compiler_verbose_set_use_ansi(int enable);
 int compiler_verbose_enabled(void);
+int compiler_verbose_deep_enabled(void);
 void compiler_verbose_logf(const char *phase, const char *fmt, ...);
+void compiler_verbose_treef(const char *phase, const char *branch, const char *fmt, ...);
 
 // Semantic analysis (type checking) and symbols
 typedef enum

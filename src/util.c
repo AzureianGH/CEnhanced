@@ -9,6 +9,9 @@
 #define ANSI_BOLD_YELLOW "\x1b[1;33m"
 #define ANSI_BOLD_CYAN "\x1b[1;36m"
 #define ANSI_BOLD_WHITE "\x1b[1;37m"
+#define ANSI_BOLD_GREEN "\x1b[1;32m"
+#define ANSI_BOLD_BLUE "\x1b[1;34m"
+#define ANSI_BOLD_MAGENTA "\x1b[1;35m"
 
 static int diag_use_ansi = 1;
 
@@ -17,11 +20,73 @@ void diag_set_use_ansi(int enable)
     diag_use_ansi = enable ? 1 : 0;
 }
 
+typedef struct
+{
+    const char *phase;
+    const char *symbol;
+    const char *nickname;
+    const char *color;
+} VerbosePhaseInfo;
+
 static int compiler_verbose_mode = 0;
+static int compiler_verbose_deep = 0;
+static int compiler_verbose_use_ansi = 1;
+
+static const VerbosePhaseInfo kVerbosePhaseTable[] = {
+    {"codegen", "@", "Spratcher", ANSI_BOLD_MAGENTA},
+    {"sema", "#", "Enforcer", ANSI_BOLD_BLUE},
+    {"inline", "*", "TreePack", ANSI_BOLD_GREEN},
+    {"optimizer", "*", "TreePack", ANSI_BOLD_GREEN},
+    {NULL, ">", "Compiler", ANSI_BOLD_WHITE},
+};
+
+static const VerbosePhaseInfo *compiler_verbose_lookup(const char *phase)
+{
+    if (phase)
+    {
+        for (size_t i = 0; i < sizeof(kVerbosePhaseTable) / sizeof(kVerbosePhaseTable[0]) - 1; ++i)
+        {
+            if (kVerbosePhaseTable[i].phase && strcmp(kVerbosePhaseTable[i].phase, phase) == 0)
+                return &kVerbosePhaseTable[i];
+        }
+    }
+    return &kVerbosePhaseTable[sizeof(kVerbosePhaseTable) / sizeof(kVerbosePhaseTable[0]) - 1];
+}
+
+static void compiler_verbose_vprint(const VerbosePhaseInfo *info, const char *suffix, const char *fmt, va_list ap)
+{
+    if (!fmt)
+        return;
+    if (!info)
+        info = compiler_verbose_lookup(NULL);
+    const char *color = (compiler_verbose_use_ansi && info->color) ? info->color : "";
+    const char *reset = (compiler_verbose_use_ansi && info->color && *info->color) ? ANSI_RESET : "";
+    const char *symbol = info->symbol ? info->symbol : ">";
+    const char *nick = info->nickname ? info->nickname : (info->phase ? info->phase : "Compiler");
+    const char *suffix_part = suffix ? suffix : " ";
+
+    fprintf(stderr, "%s%s %s%s%s", color, symbol, nick, reset, suffix_part);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+}
 
 void compiler_verbose_set_mode(int enable)
 {
     compiler_verbose_mode = enable ? 1 : 0;
+    if (!compiler_verbose_mode)
+        compiler_verbose_deep = 0;
+}
+
+void compiler_verbose_set_deep(int enable)
+{
+    compiler_verbose_deep = enable ? 1 : 0;
+    if (compiler_verbose_deep)
+        compiler_verbose_mode = 1;
+}
+
+void compiler_verbose_set_use_ansi(int enable)
+{
+    compiler_verbose_use_ansi = enable ? 1 : 0;
 }
 
 int compiler_verbose_enabled(void)
@@ -29,16 +94,34 @@ int compiler_verbose_enabled(void)
     return compiler_verbose_mode;
 }
 
+int compiler_verbose_deep_enabled(void)
+{
+    return compiler_verbose_mode && compiler_verbose_deep;
+}
+
 void compiler_verbose_logf(const char *phase, const char *fmt, ...)
 {
     if (!compiler_verbose_mode || !fmt)
         return;
-    fprintf(stderr, "[%s] ", phase && *phase ? phase : "verbose");
+    const VerbosePhaseInfo *info = compiler_verbose_lookup(phase);
     va_list ap;
     va_start(ap, fmt);
-    vfprintf(stderr, fmt, ap);
+    compiler_verbose_vprint(info, " ", fmt, ap);
     va_end(ap);
-    fputc('\n', stderr);
+}
+
+void compiler_verbose_treef(const char *phase, const char *branch, const char *fmt, ...)
+{
+    if (!compiler_verbose_deep_enabled() || !fmt)
+        return;
+    char suffix[64];
+    const char *node = (branch && *branch) ? branch : "|-";
+    snprintf(suffix, sizeof(suffix), " %s ", node);
+    const VerbosePhaseInfo *info = compiler_verbose_lookup(phase);
+    va_list ap;
+    va_start(ap, fmt);
+    compiler_verbose_vprint(info, suffix, fmt, ap);
+    va_end(ap);
 }
 
 static const char *diag_color_for(const char *sev)
