@@ -2697,7 +2697,7 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = e->lhs->type;
         return;
     }
-    if (e->kind == ND_MUL || e->kind == ND_DIV)
+    if (e->kind == ND_MUL || e->kind == ND_DIV || e->kind == ND_MOD)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
@@ -2707,7 +2707,7 @@ static void check_expr(SemaContext *sc, Node *e)
         e->rhs->type = rhs_type;
         if (!type_equal(lhs_type, rhs_type))
         {
-            const char *op = (e->kind == ND_MUL) ? "*" : "/";
+            const char *op = (e->kind == ND_MUL) ? "*" : (e->kind == ND_DIV ? "/" : "%");
             if (type_is_int(rhs_type) && coerce_int_literal_to_type(e->lhs, rhs_type, op))
                 lhs_type = canonicalize_type_deep(e->lhs->type);
             if (!type_equal(lhs_type, rhs_type) && type_is_int(lhs_type) && coerce_int_literal_to_type(e->rhs, lhs_type, op))
@@ -2721,11 +2721,21 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         int lhs_is_int = type_is_int(e->lhs->type);
         int lhs_is_float = type_is_float(e->lhs->type);
-        if (!(lhs_is_int || lhs_is_float))
+        if (e->kind == ND_MOD)
         {
+            if (!lhs_is_int)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "integer type required for '%%'");
+                exit(1);
+            }
+        }
+        else if (!(lhs_is_int || lhs_is_float))
+        {
+            const char *op = e->kind == ND_MUL ? "*" : "/";
             diag_error_at(e->src, e->line, e->col,
                           "numeric type required for '%s'",
-                          e->kind == ND_MUL ? "*" : "/");
+                          op);
             exit(1);
         }
         e->type = e->lhs->type;
@@ -4016,6 +4026,7 @@ static int inline_eval_const_expr(const Node *expr,
     case ND_SUB:
     case ND_MUL:
     case ND_DIV:
+    case ND_MOD:
     case ND_SHL:
     case ND_SHR:
     case ND_BITAND:
@@ -4044,6 +4055,11 @@ static int inline_eval_const_expr(const Node *expr,
             if (rhs == 0)
                 return 0;
             result = lhs / rhs;
+            break;
+        case ND_MOD:
+            if (rhs == 0)
+                return 0;
+            result = lhs % rhs;
             break;
         case ND_SHL:
             result = lhs << (int)(rhs & 63);

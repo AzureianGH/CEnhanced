@@ -2332,6 +2332,19 @@ static Node *parse_mul(Parser *ps)
             lhs = div;
             continue;
         }
+        if (p.kind == TK_PERCENT)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_unary(ps);
+            Node *mod = new_node(ND_MOD);
+            mod->lhs = lhs;
+            mod->rhs = rhs;
+            mod->line = op.line;
+            mod->col = op.col;
+            mod->src = lexer_source(ps->lx);
+            lhs = mod;
+            continue;
+        }
         break;
     }
     return lhs;

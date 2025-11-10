@@ -202,6 +202,9 @@ expose fun main() -> i32
     i32 div = 20 / -4;
     assert(div == -5, "20 / -4 == -5");
 
+    i32 mod = 20 % 6;
+    assert(mod == 2, "20 % 6 == 2");
+
     assert((0xFF as i32) == 255, "0xFF == 255");
 
     printf("Calling test_chance(): %d\n", TC.test_chance());

@@ -2884,6 +2884,32 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         }
         return 0;
     }
+    case ND_MOD:
+    {
+        if (ccb_emit_expr_basic(fb, expr->lhs))
+            return 1;
+        if (ccb_emit_expr_basic(fb, expr->rhs))
+            return 1;
+        CCValueType ty = map_type_to_cc(expr->type ? expr->type : (expr->lhs ? expr->lhs->type : NULL));
+        if (!ccb_value_type_is_integer(ty))
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "unsupported operand type for '%%'");
+            return 1;
+        }
+        bool is_unsigned = !ccb_value_type_is_signed(ty);
+        if (is_unsigned)
+        {
+            if (!string_list_appendf(&fb->body, "  binop mod %s unsigned", cc_type_name(ty)))
+                return 1;
+        }
+        else
+        {
+            if (!string_list_appendf(&fb->body, "  binop mod %s", cc_type_name(ty)))
+                return 1;
+        }
+        return 0;
+    }
     case ND_NEG:
     {
         if (!expr->lhs)

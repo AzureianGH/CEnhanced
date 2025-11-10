@@ -4,15 +4,10 @@ bring Std;
 
 extend from "C" i32 printf(char *, ...);
 extend from "C" i32 read(i32, char*, int);
-extend from "C" void exit(i32);
+noreturn extend from "C" void exit(i32);
 
 hide alias string = char*;
 hide alias u8ptr = u8*;
-
-fun mod(i32 a, i32 b) -> i32
-{
-    ret a - (a / b) * b;
-}
 
 // Map RPS moves
 #define ROCK 0
@@ -57,7 +52,7 @@ hide fun predict_player(f32* percent) -> i32
     // Count moves in memory
     for (i32 i = 0; i < len; i++)
     {
-        i32 idx = mod(history_pos + MEM_SIZE - i - 1, MEM_SIZE);
+        i32 idx = (history_pos + MEM_SIZE - i - 1) % MEM_SIZE;
         counts[player_history[idx]] = counts[player_history[idx]] + 1;
     }
 
@@ -120,7 +115,7 @@ expose fun main() -> i32
         {
             // Store move in circular memory
             player_history[history_pos] = p_move;
-            history_pos = mod(history_pos + 1, MEM_SIZE);
+            history_pos = (history_pos + 1) % MEM_SIZE;
             total_moves = total_moves + 1;
 
             f32 prediction_percent = 0.0f;

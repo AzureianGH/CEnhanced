@@ -689,6 +689,11 @@ Token lexer_next(Lexer *lx)
         getc2(lx);
         return make_tok(lx, TK_SLASH, lx->src.src + lx->idx - 1, 1);
     }
+    if (c == '%')
+    {
+        getc2(lx);
+        return make_tok(lx, TK_PERCENT, lx->src.src + lx->idx - 1, 1);
+    }
     if (c == '-')
     {
         if (lx->idx + 1 < lx->src.length)

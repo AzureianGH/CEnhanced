@@ -282,6 +282,8 @@ const char *node_kind_name(NodeKind kind)
         return "multiplication expression";
     case ND_DIV:
         return "division expression";
+    case ND_MOD:
+        return "modulo expression";
     case ND_RET:
         return "return statement";
     case ND_FUNC:

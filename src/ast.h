@@ -81,6 +81,7 @@ typedef enum
     TK_TILDE,      // ~
     TK_STAR,       // *
     TK_SLASH,      // /
+    TK_PERCENT,    // %
     TK_MINUS,      // -
     TK_MINUSMINUS, // --
     TK_ASSIGN,     // =
@@ -185,6 +186,7 @@ typedef enum
     ND_ADD,
     ND_MUL,
     ND_DIV,
+    ND_MOD,
     ND_RET,
     ND_FUNC,
     ND_STRING,
