@@ -78,17 +78,12 @@ hide fun printwrapper() -> i32
     ret printf("Hello, %s! Number: %d\n", "CHance", 42);
 }
 
-expose enum Element
-{
-    ElementPart, // Auto 0
-    ElementPart2, // Auto 1
-    SetElement = 3 // 3
-};
+
 
 expose struct AnElement
 {
-    Element internalElement;
-    Element* ptrToElement;
+    TC.Element internalElement;
+    TC.Element* ptrToElement;
 };
 
 expose struct OtherElement
@@ -238,7 +233,7 @@ expose fun main() -> i32
     i32* testintptr = test as i32*;
     printf("testVar via intptr: %p\n", testintptr);
 
-    Element elem = Element.SetElement;
+    TC.Element elem = TC.Element.SetElement;
 
     test=>testVar = 45;
 

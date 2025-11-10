@@ -153,6 +153,7 @@ static Type ty_void = {.kind = TY_VOID};
 static Type ty_char = {.kind = TY_CHAR};
 static Type ty_bool = {.kind = TY_BOOL};
 static Type ty_va_list = {.kind = TY_VA_LIST};
+static Type ty_module_placeholder = {.kind = TY_IMPORT};
 
 static Type *metadata_token_to_type(const char *token)
 {
@@ -325,6 +326,35 @@ static int unit_allows_module_call(const Node *unit, const char *qualified_name)
         }
     }
     return 0;
+}
+
+static const ModulePath *unit_find_import_for_ident(const Node *unit, const char *name, int *parts_consumed)
+{
+    if (parts_consumed)
+        *parts_consumed = 0;
+    if (!unit || unit->kind != ND_UNIT || !name)
+        return NULL;
+    if (!unit->imports || unit->import_count <= 0)
+        return NULL;
+    for (int i = 0; i < unit->import_count; ++i)
+    {
+        const ModulePath *imp = &unit->imports[i];
+        if (!imp)
+            continue;
+        if (imp->alias && strcmp(imp->alias, name) == 0)
+        {
+            if (parts_consumed)
+                *parts_consumed = imp->part_count;
+            return imp;
+        }
+        if (!imp->alias && imp->part_count > 0 && imp->parts && imp->parts[0] && strcmp(imp->parts[0], name) == 0)
+        {
+            if (parts_consumed)
+                *parts_consumed = 1;
+            return imp;
+        }
+    }
+    return NULL;
 }
 
 static int type_is_int(Type *t)
@@ -1654,6 +1684,21 @@ static void check_expr(SemaContext *sc, Node *e)
         Type *t = resolve_variable(sc, orig_name, &is_global, &is_const, &is_function);
         if (!t)
         {
+            int import_parts = 0;
+            const ModulePath *imp = unit_find_import_for_ident(sc ? sc->unit : NULL, orig_name, &import_parts);
+            if (imp)
+            {
+                e->module_ref = imp;
+                e->module_ref_parts = import_parts;
+                e->module_type_name = NULL;
+                e->module_type_is_enum = 0;
+                e->type = &ty_module_placeholder;
+                e->var_type = &ty_module_placeholder;
+                e->var_is_const = 1;
+                e->var_is_global = 0;
+                e->var_is_function = 0;
+                return;
+            }
             diag_error_at(e->src, e->line, e->col, "unknown variable '%s'",
                           orig_name ? orig_name : "<null>");
             exit(1);
@@ -1839,6 +1884,162 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, e->lhs);
+        Node *base_node = e->lhs;
+
+        if (base_node && base_node->module_type_is_enum)
+        {
+            const ModulePath *imp = base_node->module_ref;
+            const char *enum_name = base_node->module_type_name;
+            const char *value_name = e->field_name;
+            const char *module_full = imp ? imp->full_name : NULL;
+            if (!module_full && sc && sc->unit && sc->unit->kind == ND_UNIT)
+                module_full = sc->unit->module_path.full_name;
+            if (!module_full || !enum_name || !value_name)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "incomplete enum reference for '%s'",
+                              value_name ? value_name : "<value>");
+                exit(1);
+            }
+            int enum_value = 0;
+            if (!module_registry_lookup_enum_value(module_full, enum_name, value_name, &enum_value))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "unknown enum value '%s' on '%s.%s'",
+                              value_name, module_full, enum_name);
+                exit(1);
+            }
+            Type *enum_ty = canonicalize_type_deep(base_node->type);
+            e->kind = ND_INT;
+            e->lhs = NULL;
+            e->rhs = NULL;
+            e->int_val = enum_value;
+            e->type = enum_ty ? enum_ty : &ty_i32;
+            e->module_ref = NULL;
+            e->module_ref_parts = 0;
+            e->module_type_name = NULL;
+            e->module_type_is_enum = 0;
+            return;
+        }
+
+        if (base_node && base_node->module_ref)
+        {
+            const ModulePath *imp = base_node->module_ref;
+            int consumed = base_node->module_ref_parts;
+            const char *field = e->field_name;
+            if (!imp || !field)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "invalid module-qualified reference");
+                exit(1);
+            }
+
+            if (consumed < imp->part_count)
+            {
+                if (!imp->parts || !imp->parts[consumed] || strcmp(imp->parts[consumed], field) != 0)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "unknown module path segment '%s' in '%s'",
+                                  field, imp->full_name ? imp->full_name : "<module>");
+                    exit(1);
+                }
+                e->module_ref = imp;
+                e->module_ref_parts = consumed + 1;
+                e->module_type_name = NULL;
+                e->module_type_is_enum = 0;
+                e->type = &ty_module_placeholder;
+                return;
+            }
+
+            const char *module_full = imp->full_name;
+            if (!module_full)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "module path missing for qualified reference");
+                exit(1);
+            }
+
+            Type *struct_ty = module_registry_lookup_struct(module_full, field);
+            if (struct_ty)
+            {
+                e->module_ref = imp;
+                e->module_ref_parts = imp->part_count;
+                e->module_type_name = NULL;
+                e->module_type_is_enum = 0;
+                e->type = struct_ty;
+                return;
+            }
+
+            Type *enum_ty = module_registry_lookup_enum(module_full, field);
+            if (enum_ty)
+            {
+                e->module_ref = imp;
+                e->module_ref_parts = imp->part_count;
+                e->module_type_name = field;
+                e->module_type_is_enum = 1;
+                e->type = enum_ty;
+                return;
+            }
+
+            char *qualified = make_qualified_name(imp, field);
+            if (!qualified)
+            {
+                size_t module_len = strlen(module_full);
+                size_t field_len = strlen(field);
+                qualified = (char *)xmalloc(module_len + 1 + field_len + 1);
+                memcpy(qualified, module_full, module_len);
+                qualified[module_len] = '.';
+                memcpy(qualified + module_len + 1, field, field_len + 1);
+            }
+
+            const Symbol *sym = symtab_get(sc->syms, qualified);
+            if (sym)
+            {
+                e->module_ref = NULL;
+                e->module_ref_parts = 0;
+                e->module_type_name = NULL;
+                e->module_type_is_enum = 0;
+                e->field_name = NULL;
+                e->is_pointer_deref = 0;
+                if (sym->kind == SYM_FUNC)
+                {
+                    Type *fn_ty = make_function_type_from_sig(&sym->sig);
+                    e->kind = ND_VAR;
+                    e->lhs = NULL;
+                    e->rhs = NULL;
+                    e->var_ref = sym->backend_name ? sym->backend_name : sym->name;
+                    e->var_is_function = 1;
+                    e->var_is_const = 1;
+                    e->var_is_global = 0;
+                    e->var_type = fn_ty;
+                    e->type = fn_ty;
+                    free(qualified);
+                    return;
+                }
+                if (sym->kind == SYM_GLOBAL)
+                {
+                    Type *var_ty = canonicalize_type_deep(sym->var_type);
+                    e->kind = ND_VAR;
+                    e->lhs = NULL;
+                    e->rhs = NULL;
+                    e->var_ref = sym->backend_name ? sym->backend_name : sym->name;
+                    e->var_is_function = 0;
+                    e->var_is_const = sym->is_const;
+                    e->var_is_global = 1;
+                    e->var_type = var_ty;
+                    e->type = var_ty;
+                    free(qualified);
+                    return;
+                }
+            }
+            free(qualified);
+
+            diag_error_at(e->src, e->line, e->col,
+                          "unknown member '%s' on module '%s'",
+                          field, module_full);
+            exit(1);
+        }
+
         Type *base = canonicalize_type_deep(e->lhs->type);
         if (e->is_pointer_deref)
         {

@@ -299,6 +299,10 @@ typedef struct Node
     int var_is_global; // set on declarations/references that live at global scope
     int var_is_array;  // for ND_VAR references to array-typed variables
     int var_is_function; // for ND_VAR references that name a function symbol
+    const ModulePath *module_ref; // tracks originating module for qualified references
+    int module_ref_parts;         // number of module path segments consumed in expression
+    const char *module_type_name; // resolved type name within module, when applicable
+    int module_type_is_enum;      // 1 when module_type_name refers to an enum for chained lookups
     // For ND_BLOCK
     struct Node **stmts;
     int stmt_count;

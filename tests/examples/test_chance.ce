@@ -17,3 +17,10 @@ expose fun test_chance() -> i32
 {
     ret 67;
 }
+
+expose enum Element
+{
+    ElementPart, // Auto 0
+    ElementPart2, // Auto 1
+    SetElement = 3 // 3
+};
