@@ -437,6 +437,11 @@ int diag_warning_count(void);
 void diag_reset(void);
 void diag_set_use_ansi(int enable);
 
+// Compiler-wide verbose diagnostics
+void compiler_verbose_set_mode(int enable);
+int compiler_verbose_enabled(void);
+void compiler_verbose_logf(const char *phase, const char *fmt, ...);
+
 // Semantic analysis (type checking) and symbols
 typedef enum
 {

@@ -3136,21 +3136,40 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
 
+        const char *call_display_name =
+            resolved_name ? resolved_name : (original_name ? original_name : "<call>");
+
         if (!call_is_indirect && direct_sym && direct_sym->kind == SYM_FUNC)
         {
             e->call_target = direct_sym->ast_node;
-            fprintf(stderr, "call_target set for %s -> %p inline=%d\n",
-                    resolved_name ? resolved_name : "<null>",
-                    (void *)e->call_target,
-                    e->call_target ? e->call_target->inline_candidate : -1);
+            if (compiler_verbose_enabled())
+            {
+                const char *target_name = direct_sym->name ? direct_sym->name : call_display_name;
+                const char *inline_status =
+                    (e->call_target && e->call_target->inline_candidate)
+                        ? "eligible for inlining"
+                        : "requires emitted body";
+                compiler_verbose_logf("sema", "resolved call '%s' to '%s' (%s)",
+                                      call_display_name, target_name, inline_status);
+            }
         }
         else if (!call_is_indirect && target && target->referenced_function)
         {
             e->call_target = target->referenced_function;
+            if (compiler_verbose_enabled())
+            {
+                const char *target_name =
+                    target->referenced_function->name ? target->referenced_function->name : call_display_name;
+                compiler_verbose_logf("sema", "resolved call '%s' via referenced function '%s'",
+                                      call_display_name, target_name);
+            }
         }
         else
         {
             e->call_target = NULL;
+            if (!call_is_indirect && compiler_verbose_enabled())
+                compiler_verbose_logf("sema", "call '%s' has no inline metadata (treating as external)",
+                                      call_display_name);
         }
         if (!func_sig->func.has_signature)
         {
@@ -4347,18 +4366,39 @@ static void analyze_inline_candidates(Node *root)
     for (int i = 0; i < fn_count; ++i)
     {
         Node *fn = functions[i];
+        const char *fn_name = fn->name ? fn->name : "<anon>";
+
         if (!fn->wants_inline)
+        {
+            compiler_verbose_logf("inline", "skip %s: function not marked inline", fn_name);
             continue;
+        }
         if (fn->is_chancecode)
+        {
+            compiler_verbose_logf("inline", "skip %s: ChanceCode shim cannot inline", fn_name);
             continue;
+        }
         if (fn->inline_address_taken)
+        {
+            compiler_verbose_logf("inline", "skip %s: address is taken", fn_name);
             continue;
+        }
         if (fn->inline_recursive)
+        {
+            compiler_verbose_logf("inline", "skip %s: recursion detected", fn_name);
             continue;
+        }
         if (fn->is_varargs)
+        {
+            compiler_verbose_logf("inline", "skip %s: varargs not supported", fn_name);
             continue;
+        }
         if (fn->param_count > INLINE_PARAM_LIMIT)
+        {
+            compiler_verbose_logf("inline", "skip %s: %d parameters exceeds inline limit %d", fn_name,
+                                  fn->param_count, INLINE_PARAM_LIMIT);
             continue;
+        }
         int params_ok = 1;
         for (int p = 0; p < fn->param_count; ++p)
         {
@@ -4366,27 +4406,41 @@ static void analyze_inline_candidates(Node *root)
             if (!inline_type_supported(pty))
             {
                 params_ok = 0;
+                compiler_verbose_logf("inline", "skip %s: parameter %d has unsupported type", fn_name, p);
                 break;
             }
         }
         if (!params_ok)
             continue;
         if (fn->ret_type && fn->ret_type->kind == TY_VOID)
+        {
+            compiler_verbose_logf("inline", "skip %s: returns void", fn_name);
             continue;
+        }
         if (!inline_type_supported(fn->ret_type))
+        {
+            compiler_verbose_logf("inline", "skip %s: return type unsupported for inlining", fn_name);
             continue;
+        }
         const Node *ret_expr = inline_extract_return_expr(fn);
         if (!ret_expr)
+        {
+            compiler_verbose_logf("inline", "skip %s: body is not a single return expression", fn_name);
             continue;
+        }
         int cost = inline_expr_cost(ret_expr);
         if (cost > INLINE_COST_LIMIT)
+        {
+            compiler_verbose_logf("inline", "skip %s: inline cost %d exceeds limit %d", fn_name, cost,
+                                  INLINE_COST_LIMIT);
             continue;
+        }
         fn->inline_candidate = 1;
         fn->inline_cost = cost;
         fn->inline_expr = ret_expr;
         if (!fn->is_exposed && !fn->is_entrypoint)
             fn->inline_needs_body = 0;
-        fprintf(stderr, "inline candidate: %s cost=%d\n", fn->name ? fn->name : "<anon>", cost);
+        compiler_verbose_logf("inline", "select %s as inline candidate (cost=%d)", fn_name, cost);
     }
 
     free(functions);

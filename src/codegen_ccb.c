@@ -397,34 +397,28 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
         return INLINE_SKIP;
 
     Node *mutable_target = (Node *)target_fn;
-    fprintf(stderr, "inline attempt: %s candidate=%d expr=%p\n",
-            target_fn->name ? target_fn->name : "<anon>",
-            target_fn->inline_candidate, (void *)target_fn->inline_expr);
+    const char *fn_name = target_fn->name ? target_fn->name : "<anon>";
+
+    compiler_verbose_logf("inline", "consider inline of '%s' (candidate=%d)", fn_name,
+                          target_fn->inline_candidate);
+
+#define INLINE_SKIP_WITH_REASON(MSG)                                                             \
+    do                                                                                           \
+    {                                                                                            \
+        if (mutable_target)                                                                      \
+            mutable_target->inline_needs_body = 1;                                               \
+        compiler_verbose_logf("inline", "skip inline of '%s': %s", fn_name, MSG);              \
+        return INLINE_SKIP;                                                                      \
+    } while (0)
 
     if (!target_fn->inline_candidate || !target_fn->inline_expr)
-    {
-        if (mutable_target)
-            mutable_target->inline_needs_body = 1;
-        return INLINE_SKIP;
-    }
+        INLINE_SKIP_WITH_REASON("no precomputed inline expression");
     if (call_expr->call_is_indirect)
-    {
-        if (mutable_target)
-            mutable_target->inline_needs_body = 1;
-        return INLINE_SKIP;
-    }
+        INLINE_SKIP_WITH_REASON("call is indirect");
     if (target_fn->is_varargs || call_expr->call_is_varargs)
-    {
-        if (mutable_target)
-            mutable_target->inline_needs_body = 1;
-        return INLINE_SKIP;
-    }
+        INLINE_SKIP_WITH_REASON("varargs not supported");
     if (call_expr->arg_count != target_fn->param_count)
-    {
-        if (mutable_target)
-            mutable_target->inline_needs_body = 1;
-        return INLINE_SKIP;
-    }
+        INLINE_SKIP_WITH_REASON("argument count mismatch");
 
     for (int i = 0; i < target_fn->param_count; ++i)
     {
@@ -433,9 +427,7 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
             param_type = target_fn->param_types[i];
         if (type_is_address_only(param_type))
         {
-            if (mutable_target)
-                mutable_target->inline_needs_body = 1;
-            return INLINE_SKIP;
+            INLINE_SKIP_WITH_REASON("address-only parameter requires byref");
         }
     }
 
@@ -512,8 +504,7 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
 
     if (ccb_emit_expr_basic(fb, target_fn->inline_expr))
     {
-        if (mutable_target)
-            mutable_target->inline_needs_body = 1;
+        compiler_verbose_logf("inline", "abort inline of '%s': failed to emit inline expression", fn_name);
         goto cleanup;
     }
 
@@ -523,8 +514,7 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
     {
         if (ccb_emit_convert_between(fb, produced_ty, expected_ty, call_expr))
         {
-            if (mutable_target)
-                mutable_target->inline_needs_body = 1;
+            compiler_verbose_logf("inline", "abort inline of '%s': result conversion failed", fn_name);
             goto cleanup;
         }
     }
@@ -533,6 +523,9 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
 
 cleanup:
     ccb_scope_leave(fb);
+#undef INLINE_SKIP_WITH_REASON
+    if (status == INLINE_OK)
+        compiler_verbose_logf("inline", "inlined call to '%s'", fn_name);
     if (status != INLINE_OK && mutable_target)
         mutable_target->inline_needs_body = 1;
     return status;
@@ -3713,12 +3706,21 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
     {
         const int is_indirect = expr->call_is_indirect;
 
-        if (!is_indirect && expr->call_target)
+        if (!is_indirect && compiler_verbose_enabled())
         {
-            fprintf(stderr, "codegen call: %s inline_candidate=%d expr=%p\n",
-                    expr->call_target->name ? expr->call_target->name : "<anon>",
-                    expr->call_target->inline_candidate,
-                    (void *)expr->call_target->inline_expr);
+            const char *call_name = expr->call_name && *expr->call_name ? expr->call_name
+                                                                        : (expr->call_target && expr->call_target->name
+                                                                               ? expr->call_target->name
+                                                                               : "<call>");
+            if (expr->call_target)
+            {
+                const char *status = expr->call_target->inline_candidate ? "inline candidate" : "will emit call";
+                compiler_verbose_logf("codegen", "evaluating call '%s' (%s)", call_name, status);
+            }
+            else
+            {
+                compiler_verbose_logf("codegen", "evaluating call '%s' (no direct target metadata)", call_name);
+            }
         }
 
         if (!is_indirect && expr->call_target && expr->call_target->inline_candidate)

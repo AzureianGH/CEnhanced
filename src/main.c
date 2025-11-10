@@ -43,6 +43,147 @@ static const char *default_chancecodec_name =
 #endif
     ;
 
+static int verbose_use_ansi = 1;
+static const char *target_os_to_option(TargetOS os);
+
+static const char *ansi_reset(void)
+{
+  return verbose_use_ansi ? "\x1b[0m" : "";
+}
+
+static const char *ansi_bold(void)
+{
+  return verbose_use_ansi ? "\x1b[1m" : "";
+}
+
+static const char *ansi_cyan(void)
+{
+  return verbose_use_ansi ? "\x1b[36m" : "";
+}
+
+static const char *ansi_green(void)
+{
+  return verbose_use_ansi ? "\x1b[32m" : "";
+}
+
+static const char *ansi_magenta(void)
+{
+  return verbose_use_ansi ? "\x1b[35m" : "";
+}
+
+static const char *bool_str(int value)
+{
+  return value ? "yes" : "no";
+}
+
+static void verbose_section(const char *title)
+{
+  if (!compiler_verbose_enabled() || !title)
+    return;
+  fprintf(stderr, "\n%s%s%s\n", ansi_bold(), title, ansi_reset());
+  size_t len = strlen(title);
+  for (size_t i = 0; i < len; ++i)
+    fputc('-', stderr);
+  fputc('\n', stderr);
+}
+
+static void verbose_table_row(const char *label, const char *value)
+{
+  if (!compiler_verbose_enabled() || !label)
+    return;
+  fprintf(stderr, "  %s%-18s%s | %s\n", ansi_cyan(), label, ansi_reset(),
+          value ? value : "-");
+}
+
+static void verbose_progress(const char *tag, int current, int total)
+{
+  if (!compiler_verbose_enabled() || !tag || total <= 0)
+    return;
+  if (current < 0)
+    current = 0;
+  if (current > total)
+    current = total;
+  const int bar_width = 28;
+  int filled = (int)((long long)current * bar_width / (total ? total : 1));
+  if (filled < 0)
+    filled = 0;
+  if (filled > bar_width)
+    filled = bar_width;
+  char bar[bar_width + 1];
+  for (int i = 0; i < bar_width; ++i)
+    bar[i] = (i < filled) ? '=' : ' ';
+  bar[bar_width] = '\0';
+  int pct = total ? (int)((long long)current * 100 / total) : 100;
+  fprintf(stderr, "%s%-12s%s [%s%s%s] %3d%% (%d/%d)\n", ansi_magenta(), tag,
+          ansi_reset(), ansi_green(), bar, ansi_reset(), pct, current, total);
+  fflush(stderr);
+}
+
+static const char *asm_syntax_to_option(AsmSyntax syntax)
+{
+  switch (syntax) {
+  case ASM_INTEL:
+    return "intel";
+  case ASM_ATT:
+    return "att";
+  case ASM_NASM:
+    return "nasm";
+  default:
+    return "unknown";
+  }
+}
+
+static void verbose_print_config(
+    const char *output_path, int opt_level, TargetArch target_arch,
+    TargetOS target_os, int stop_after_ccb, int stop_after_asm, int no_link,
+    int emit_library, int freestanding, AsmSyntax asm_syntax,
+    int include_dir_count, int ce_count, int ccb_count, int cclib_count,
+    int obj_count, const char *chancecodec_cmd, int chancecodec_has_override,
+    int needs_chancecodec, const char *chancecode_backend,
+    int chancecodec_uses_fallback)
+{
+  if (!compiler_verbose_enabled())
+    return;
+  verbose_section("Configuration");
+  verbose_table_row("Output", output_path ? output_path : "(default)");
+  char opt_buf[16];
+  snprintf(opt_buf, sizeof(opt_buf), "-O%d", opt_level);
+  verbose_table_row("Optimization", opt_buf);
+  const char *arch = target_arch == ARCH_X86 ? "x86-64" : "none";
+  verbose_table_row("Backend", arch);
+  verbose_table_row("Target OS", target_os_to_option(target_os));
+  verbose_table_row("Stop after .ccb", bool_str(stop_after_ccb));
+  verbose_table_row("Stop after asm", bool_str(stop_after_asm));
+  verbose_table_row("No link", bool_str(no_link));
+  verbose_table_row("Emit library", bool_str(emit_library));
+  verbose_table_row("Freestanding", bool_str(freestanding));
+  verbose_table_row("Asm syntax", asm_syntax_to_option(asm_syntax));
+  char count_buf[32];
+  snprintf(count_buf, sizeof(count_buf), "%d", include_dir_count);
+  verbose_table_row("Include dirs", count_buf);
+  snprintf(count_buf, sizeof(count_buf), "%d", ce_count);
+  verbose_table_row("CE inputs", count_buf);
+  snprintf(count_buf, sizeof(count_buf), "%d", ccb_count);
+  verbose_table_row("CCB inputs", count_buf);
+  snprintf(count_buf, sizeof(count_buf), "%d", cclib_count);
+  verbose_table_row("CCLib inputs", count_buf);
+  snprintf(count_buf, sizeof(count_buf), "%d", obj_count);
+  verbose_table_row("OBJ inputs", count_buf);
+  verbose_table_row("ChanceCode backend",
+                    chancecode_backend ? chancecode_backend : "(auto)");
+  if (needs_chancecodec) {
+    verbose_table_row("Chancecodec cmd",
+                      chancecodec_cmd && *chancecodec_cmd ? chancecodec_cmd
+                                                           : "(unresolved)");
+    verbose_table_row("Chancecodec override",
+                      bool_str(chancecodec_has_override));
+    verbose_table_row("Chancecodec fallback",
+                      bool_str(chancecodec_uses_fallback));
+  } else {
+    verbose_table_row("Chancecodec cmd", "(not required)");
+  }
+}
+
 typedef struct {
   char *input_path;
   char *src;
@@ -91,9 +232,12 @@ static void usage(const char *prog) {
   fprintf(stderr,
           "  -I <dir>          Add include search directory for #include <>\n");
   fprintf(stderr, "  -Nno-formatting  Disable formatting guidance notes\n");
-  fprintf(stderr, "  --no-ansi        Disable colored diagnostics\n");
+  fprintf(stderr,
+    "  -v, --verbose    Enable verbose diagnostics and progress\n");
+  fprintf(stderr,
+    "  --no-ansi        Disable colored diagnostics (verbose too)\n");
   fprintf(stderr, "  --library         Emit a .cclib library instead of "
-                  "compiling/linking\n");
+      "compiling/linking\n");
 }
 
 static char *read_all(const char *path, int *out_len) {
@@ -2561,8 +2705,13 @@ int main(int argc, char **argv) {
       parser_set_disable_formatting_notes(1);
       continue;
     }
+    if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+      compiler_verbose_set_mode(1);
+      continue;
+    }
     if (strcmp(argv[i], "--no-ansi") == 0) {
       diag_set_use_ansi(0);
+      verbose_use_ansi = 0;
       continue;
     }
     if (argv[i][0] == '-') {
@@ -2722,6 +2871,58 @@ int main(int argc, char **argv) {
       chancecodec_uses_fallback = 1;
     }
   }
+
+  if (compiler_verbose_enabled()) {
+  verbose_print_config(out, opt_level, target_arch, target_os, stop_after_ccb,
+             stop_after_asm, no_link, emit_library, freestanding,
+             asm_syntax, include_dir_count, ce_count, ccb_count,
+             cclib_count, obj_count, chancecodec_cmd_to_use,
+             chancecodec_has_override, needs_chancecodec,
+             chancecode_backend, chancecodec_uses_fallback);
+    if (include_dir_count > 0) {
+      verbose_section("Include Directories");
+      for (int idx = 0; idx < include_dir_count; ++idx) {
+        char label[32];
+        snprintf(label, sizeof(label), "dir[%d]", idx);
+        verbose_table_row(label,
+                          (include_dirs && include_dirs[idx])
+                              ? include_dirs[idx]
+                              : "(null)");
+      }
+    }
+    if (ce_count > 0 && ce_inputs) {
+      verbose_section("CE Inputs");
+      for (int idx = 0; idx < ce_count; ++idx) {
+        char label[32];
+        snprintf(label, sizeof(label), "ce[%d]", idx);
+        verbose_table_row(label, ce_inputs[idx]);
+      }
+    }
+    if (ccb_count > 0 && ccb_inputs) {
+      verbose_section("CCB Inputs");
+      for (int idx = 0; idx < ccb_count; ++idx) {
+        char label[32];
+        snprintf(label, sizeof(label), "ccb[%d]", idx);
+        verbose_table_row(label, ccb_inputs[idx]);
+      }
+    }
+    if (cclib_count > 0 && cclib_inputs) {
+      verbose_section("CCLib Inputs");
+      for (int idx = 0; idx < cclib_count; ++idx) {
+        char label[32];
+        snprintf(label, sizeof(label), "cclib[%d]", idx);
+        verbose_table_row(label, cclib_inputs[idx]);
+      }
+    }
+    if (obj_count > 0 && obj_inputs) {
+      verbose_section("Object Inputs");
+      for (int idx = 0; idx < obj_count; ++idx) {
+        char label[32];
+        snprintf(label, sizeof(label), "obj[%d]", idx);
+        verbose_table_row(label, obj_inputs[idx]);
+      }
+    }
+  }
   // Allow multiple inputs: if linking to an executable (no -c) with multiple
   // .ce and/or .o, we will compile .ce to temporary objects and link them
   // together with any provided .o files.
@@ -2803,8 +3004,12 @@ int main(int argc, char **argv) {
   int have_single_obj = 0;
   int single_obj_is_temp = 0;
 
+  if (compiler_verbose_enabled() && ce_count > 0)
+    verbose_section("Loading CE units");
   for (int fi = 0; fi < ce_count; ++fi) {
     const char *input = ce_inputs[fi];
+    if (compiler_verbose_enabled())
+      verbose_progress("ce-load", fi + 1, ce_count);
     int len = 0;
     char *src = read_all(input, &len);
     if (!src) {
@@ -2834,7 +3039,11 @@ int main(int argc, char **argv) {
   if (rc)
     goto cleanup;
 
+  if (compiler_verbose_enabled() && ce_count > 0)
+    verbose_section("Registering CE externs");
   for (int target = 0; target < ce_count; ++target) {
+    if (compiler_verbose_enabled())
+      verbose_progress("ce-extern", target + 1, ce_count);
     for (int source = 0; source < ce_count; ++source) {
       if (target == source)
         continue;
@@ -2843,11 +3052,16 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (compiler_verbose_enabled() && ce_count > 0)
+    verbose_section("Codegen CE units");
   for (int fi = 0; fi < ce_count && rc == 0; ++fi) {
     UnitCompile *uc = &units[fi];
     Node *unit = uc->unit;
     SemaContext *sc = uc->sc;
     Parser *ps = uc->parser;
+
+    if (compiler_verbose_enabled())
+      verbose_progress("ce-codegen", fi + 1, ce_count);
 
     int serr = sema_check_unit(sc, unit);
     if (!serr) {
@@ -3149,8 +3363,12 @@ int main(int argc, char **argv) {
       break;
   }
   if (!emit_library) {
+    if (compiler_verbose_enabled() && ccb_count > 0)
+      verbose_section("Processing CCB inputs");
     for (int ci = 0; !rc && ci < ccb_count; ++ci) {
       const char *ccb_input = ccb_inputs[ci];
+      if (compiler_verbose_enabled())
+        verbose_progress("ccb-proc", ci + 1, ccb_count);
       char dir[512], base[512];
       split_path(ccb_input, dir, sizeof(dir), base, sizeof(base));
 
@@ -3326,12 +3544,19 @@ int main(int argc, char **argv) {
     }
   }
   if (!rc && !emit_library && target_arch == ARCH_X86 && !stop_after_ccb) {
+    if (compiler_verbose_enabled() && library_codegen_units > 0)
+      verbose_section("Processing library modules");
+    int verbose_lib_progress = 0;
     for (int li = 0; li < loaded_library_count && !rc; ++li) {
       LoadedLibrary *lib = &loaded_libraries[li];
       for (uint32_t mi = 0; mi < lib->file.module_count && !rc; ++mi) {
         const CclibModule *mod = &lib->file.modules[mi];
         if (!mod->ccbin_data || mod->ccbin_size == 0)
           continue;
+
+        if (compiler_verbose_enabled())
+          verbose_progress("lib-module", ++verbose_lib_progress,
+                           library_codegen_units);
 
         char lib_dir[512], lib_base[512];
         split_path(lib->path, lib_dir, sizeof(lib_dir), lib_base,
@@ -3531,6 +3756,13 @@ int main(int argc, char **argv) {
       fprintf(stderr, "error: --library did not collect any modules\n");
       rc = 1;
     } else {
+      if (compiler_verbose_enabled()) {
+        verbose_section("Writing library");
+        verbose_table_row("Output", out);
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%d", library_module_count);
+        verbose_table_row("Modules", buf);
+      }
       int werr = write_library_file(out, library_modules, library_module_count);
       if (werr != 0) {
         fprintf(stderr, "error: failed to write library '%s' (%s)\n", out,
@@ -3568,6 +3800,10 @@ int main(int argc, char **argv) {
       strcat(cmd, obj_inputs[i]);
       strcat(cmd, "\"");
     }
+    if (compiler_verbose_enabled()) {
+      verbose_section("Linking executable");
+      verbose_table_row("Command", cmd);
+    }
     int lrc = system(cmd);
     if (lrc != 0) {
       fprintf(stderr, "link failed (rc=%d): %s\n", lrc, cmd);
@@ -3588,6 +3824,10 @@ int main(int argc, char **argv) {
     char link_cmd[4096];
     snprintf(link_cmd, sizeof(link_cmd), "cc -o \"%s\" \"%s\"", out,
              single_obj_path);
+    if (compiler_verbose_enabled()) {
+      verbose_section("Linking single object");
+      verbose_table_row("Command", link_cmd);
+    }
     int lrc = system(link_cmd);
     if (lrc != 0) {
       fprintf(stderr, "link failed (rc=%d): %s\n", lrc, link_cmd);
@@ -3624,6 +3864,10 @@ int main(int argc, char **argv) {
       strcat(cmd, "\"");
       strcat(cmd, obj_inputs[i]);
       strcat(cmd, "\"");
+    }
+    if (compiler_verbose_enabled()) {
+      verbose_section("Merging objects");
+      verbose_table_row("Command", cmd);
     }
     int lrc = system(cmd);
     if (lrc != 0) {

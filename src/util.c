@@ -17,6 +17,30 @@ void diag_set_use_ansi(int enable)
     diag_use_ansi = enable ? 1 : 0;
 }
 
+static int compiler_verbose_mode = 0;
+
+void compiler_verbose_set_mode(int enable)
+{
+    compiler_verbose_mode = enable ? 1 : 0;
+}
+
+int compiler_verbose_enabled(void)
+{
+    return compiler_verbose_mode;
+}
+
+void compiler_verbose_logf(const char *phase, const char *fmt, ...)
+{
+    if (!compiler_verbose_mode || !fmt)
+        return;
+    fprintf(stderr, "[%s] ", phase && *phase ? phase : "verbose");
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+
 static const char *diag_color_for(const char *sev)
 {
     if (!diag_use_ansi || !sev)
