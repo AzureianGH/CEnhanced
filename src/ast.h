@@ -50,6 +50,8 @@ typedef enum
     TK_KW_IF,
     TK_KW_ELSE,
     TK_KW_WHILE,
+    TK_KW_BREAK,
+    TK_KW_CONTINUE,
     TK_KW_ENUM,
     TK_KW_ALIAS,
     TK_KW_AS,
@@ -209,6 +211,8 @@ typedef enum
     ND_SUB,
     ND_NEG,
     ND_WHILE,
+    ND_BREAK,
+    ND_CONTINUE,
     ND_EXPR_STMT,
     ND_VAR,
     ND_UNIT,
@@ -492,6 +496,7 @@ typedef struct
     struct ImportedFunctionSet *imported_funcs;
     int imported_func_count;
     int imported_func_cap;
+    int loop_depth;
 } SemaContext;
 
 SemaContext *sema_create(void);

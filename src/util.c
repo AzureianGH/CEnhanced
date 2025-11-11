@@ -328,6 +328,10 @@ const char *node_kind_name(NodeKind kind)
         return "negation expression";
     case ND_WHILE:
         return "while statement";
+    case ND_BREAK:
+        return "break statement";
+    case ND_CONTINUE:
+        return "continue statement";
     case ND_EXPR_STMT:
         return "expression statement";
     case ND_VAR:

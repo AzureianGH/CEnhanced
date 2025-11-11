@@ -49,6 +49,7 @@ typedef struct
 	int counter;
 	int pointer_width;
 	char **interned_strings;
+	size_t *interned_string_lengths;
 	int interned_string_count;
 	int interned_string_cap;
 } PreprocState;
@@ -171,10 +172,7 @@ static void macro_stack_pop(MacroStack *stack, const Macro *mac)
 {
 	if (!stack || stack->count <= 0)
 		return;
-	if (stack->items[stack->count - 1] == mac)
-		stack->count--;
-	else
-		stack->count--;
+	stack->count--;
 }
 
 static int macro_stack_contains(const MacroStack *stack, const Macro *mac)
@@ -256,25 +254,40 @@ static char *make_string_literal(const char *s)
 	return sb_build(&sb);
 }
 
-static long preproc_intern_string_value(PreprocState *st, const char *value)
+static long preproc_intern_string_value(PreprocState *st, const char *value, size_t len)
 {
 	if (!st || !value)
 		return 0;
 	for (int i = 0; i < st->interned_string_count; ++i)
 	{
-		if (strcmp(st->interned_strings[i], value) == 0)
+		if (st->interned_string_lengths[i] == len &&
+		    (len == 0 || memcmp(st->interned_strings[i], value, len) == 0))
 			return (long)(i + 1);
 	}
 	if (st->interned_string_count == st->interned_string_cap)
 	{
 		int ncap = st->interned_string_cap ? st->interned_string_cap * 2 : 8;
-		char **tmp = (char **)realloc(st->interned_strings, (size_t)ncap * sizeof(char *));
-		if (!tmp)
+		char **tmp_str = (char **)realloc(st->interned_strings, (size_t)ncap * sizeof(char *));
+		if (!tmp_str)
+		{
 			diag_error("preprocessor: out of memory interning string");
-		st->interned_strings = tmp;
+			return 0;
+		}
+		size_t *tmp_len = (size_t *)realloc(st->interned_string_lengths, (size_t)ncap * sizeof(size_t));
+		if (!tmp_len)
+		{
+			diag_error("preprocessor: out of memory interning string");
+			return 0;
+		}
+		st->interned_strings = tmp_str;
+		st->interned_string_lengths = tmp_len;
 		st->interned_string_cap = ncap;
 	}
-	st->interned_strings[st->interned_string_count] = xstrdup(value);
+	char *copy = (char *)xmalloc(len + 1);
+	memcpy(copy, value, len);
+	copy[len] = '\0';
+	st->interned_strings[st->interned_string_count] = copy;
+	st->interned_string_lengths[st->interned_string_count] = len;
 	st->interned_string_count++;
 	return (long)st->interned_string_count;
 }
@@ -690,63 +703,81 @@ static long parse_primary(ExprParser *p)
 	}
 	if (c == '"')
 	{
-		p->pos++;
 		StrBuilder sb;
 		sb_init(&sb);
-		int escape = 0;
-		int terminated = 0;
-		while (p->pos < p->len)
+		int had_segment = 0;
+		while (p->pos < p->len && p->expr[p->pos] == '"')
 		{
-			char ch = p->expr[p->pos++];
-			if (escape)
+			p->pos++;
+			int escape = 0;
+			int terminated = 0;
+			while (p->pos < p->len)
 			{
-				switch (ch)
+				char ch = p->expr[p->pos++];
+				if (escape)
 				{
-				case '\\':
-				case '"':
-				case '\'':
-					sb_append_char(&sb, ch);
-					break;
-				case 'n':
-					sb_append_char(&sb, '\n');
-					break;
-				case 'r':
-					sb_append_char(&sb, '\r');
-					break;
-				case 't':
-					sb_append_char(&sb, '\t');
-					break;
-				case '0':
-					sb_append_char(&sb, '\0');
-					break;
-				default:
-					sb_append_char(&sb, ch);
+					switch (ch)
+					{
+					case '\\':
+					case '"':
+					case '\'':
+						sb_append_char(&sb, ch);
+						break;
+					case 'n':
+						sb_append_char(&sb, '\n');
+						break;
+					case 'r':
+						sb_append_char(&sb, '\r');
+						break;
+					case 't':
+						sb_append_char(&sb, '\t');
+						break;
+					case '0':
+						sb_append_char(&sb, '\0');
+						break;
+					default:
+						sb_append_char(&sb, ch);
+						break;
+					}
+					escape = 0;
+					continue;
+				}
+				if (ch == '\\')
+				{
+					escape = 1;
+					continue;
+				}
+				if (ch == '"')
+				{
+					terminated = 1;
 					break;
 				}
-				escape = 0;
-				continue;
+				if (ch == '\n' || ch == '\r')
+				{
+					if (sb.data)
+						free(sb.data);
+					return 0;
+				}
+				sb_append_char(&sb, ch);
 			}
-			if (ch == '\\')
+			if (!terminated)
 			{
-				escape = 1;
-				continue;
+				if (sb.data)
+					free(sb.data);
+				return 0;
 			}
-			if (ch == '"')
-			{
-				terminated = 1;
-				break;
-			}
-			if (ch == '\n' || ch == '\r')
-				break;
-			sb_append_char(&sb, ch);
+			had_segment = 1;
+			expr_skip_ws(p);
 		}
-		if (!terminated)
+		if (!had_segment)
 		{
-			free(sb.data);
+			if (sb.data)
+				free(sb.data);
 			return 0;
 		}
+		size_t str_len = sb.len;
 		char *value = sb_build(&sb);
-		long id = preproc_intern_string_value(p->state, value);
+		long id = preproc_intern_string_value(p->state, value, str_len);
 		free(value);
 		return id;
 	}
@@ -1719,6 +1750,7 @@ char *chance_preprocess_source(const char *path, const char *src, int len,
 	                                            : detect_host_architecture();
 	char *arch_literal = make_string_literal(arch_name);
 	define_builtin_macro(&st, "__TARGET_ARCH__", arch_literal);
+	define_builtin_macro(&st, "__ARCH__", arch_literal);
 	free(arch_literal);
 	define_builtin_macro(&st, "__LINE__", "0");
 	define_builtin_macro(&st, "__COUNTER__", "0");
@@ -1785,6 +1817,7 @@ char *chance_preprocess_source(const char *path, const char *src, int len,
 	for (int i = 0; i < st.interned_string_count; ++i)
 		free(st.interned_strings[i]);
 	free(st.interned_strings);
+	free(st.interned_string_lengths);
 	if (st.module_name)
 		free(st.module_name);
 	return result;

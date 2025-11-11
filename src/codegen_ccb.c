@@ -153,6 +153,12 @@ typedef struct
 
 typedef struct
 {
+    char break_label[32];
+    char continue_label[32];
+} LoopContext;
+
+typedef struct
+{
     CcbModule *module;
     const Node *fn;
     StringList body;
@@ -164,6 +170,9 @@ typedef struct
     size_t local_count;
     int next_label_id;
     int scope_depth;
+    LoopContext *loop_stack;
+    size_t loop_depth;
+    size_t loop_capacity;
 } CcbFunctionBuilder;
 
 static CCValueType map_type_to_cc(const Type *ty);
@@ -367,6 +376,9 @@ static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, co
     fb->local_count = 0;
     fb->next_label_id = 0;
     fb->scope_depth = 0;
+    fb->loop_stack = NULL;
+    fb->loop_depth = 0;
+    fb->loop_capacity = 0;
 }
 
 static void ccb_function_builder_free(CcbFunctionBuilder *fb)
@@ -383,6 +395,45 @@ static void ccb_function_builder_free(CcbFunctionBuilder *fb)
     fb->module = NULL;
     fb->fn = NULL;
     fb->next_label_id = 0;
+    free(fb->loop_stack);
+    fb->loop_stack = NULL;
+    fb->loop_depth = 0;
+    fb->loop_capacity = 0;
+}
+
+static int ccb_loop_push(CcbFunctionBuilder *fb, const char *break_label, const char *continue_label)
+{
+    if (!fb || !break_label || !continue_label)
+        return 0;
+    if (fb->loop_depth == fb->loop_capacity)
+    {
+        size_t new_cap = fb->loop_capacity ? fb->loop_capacity * 2 : 4;
+        LoopContext *grown = (LoopContext *)realloc(fb->loop_stack, new_cap * sizeof(LoopContext));
+        if (!grown)
+            return 0;
+        fb->loop_stack = grown;
+        fb->loop_capacity = new_cap;
+    }
+    LoopContext *ctx = &fb->loop_stack[fb->loop_depth++];
+    strncpy(ctx->break_label, break_label, sizeof(ctx->break_label) - 1);
+    ctx->break_label[sizeof(ctx->break_label) - 1] = '\0';
+    strncpy(ctx->continue_label, continue_label, sizeof(ctx->continue_label) - 1);
+    ctx->continue_label[sizeof(ctx->continue_label) - 1] = '\0';
+    return 1;
+}
+
+static void ccb_loop_pop(CcbFunctionBuilder *fb)
+{
+    if (!fb || fb->loop_depth == 0)
+        return;
+    fb->loop_depth--;
+}
+
+static LoopContext *ccb_loop_top(CcbFunctionBuilder *fb)
+{
+    if (!fb || fb->loop_depth == 0)
+        return NULL;
+    return &fb->loop_stack[fb->loop_depth - 1];
 }
 
 static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, const Node *target_fn)
@@ -4485,29 +4536,105 @@ static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
         char cond_label[32];
         char body_label[32];
         char end_label[32];
+        char post_label[32];
+        bool has_post = stmt->body != NULL;
 
         ccb_make_label(fb, cond_label, sizeof(cond_label), "while_cond");
         ccb_make_label(fb, body_label, sizeof(body_label), "while_body");
         ccb_make_label(fb, end_label, sizeof(end_label), "while_end");
+        if (has_post)
+            ccb_make_label(fb, post_label, sizeof(post_label), "while_post");
 
+        const char *continue_target = has_post ? post_label : cond_label;
+        if (!ccb_loop_push(fb, end_label, continue_target))
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "failed to allocate loop context");
+            return 1;
+        }
+
+        int rc = 0;
         if (!string_list_appendf(&fb->body, "label %s", cond_label))
-            return 1;
+        {
+            rc = 1;
+            goto while_cleanup;
+        }
         if (ccb_emit_condition(fb, stmt->lhs))
-            return 1;
+        {
+            rc = 1;
+            goto while_cleanup;
+        }
         if (!string_list_appendf(&fb->body, "  branch %s %s", body_label, end_label))
-            return 1;
+        {
+            rc = 1;
+            goto while_cleanup;
+        }
 
         if (!string_list_appendf(&fb->body, "label %s", body_label))
-            return 1;
+        {
+            rc = 1;
+            goto while_cleanup;
+        }
         if (stmt->rhs)
         {
             if (ccb_emit_stmt_basic(fb, stmt->rhs))
-                return 1;
+            {
+                rc = 1;
+                goto while_cleanup;
+            }
+        }
+        if (has_post)
+        {
+            if (!string_list_appendf(&fb->body, "label %s", post_label))
+            {
+                rc = 1;
+                goto while_cleanup;
+            }
+            if (ccb_emit_stmt_basic(fb, stmt->body))
+            {
+                rc = 1;
+                goto while_cleanup;
+            }
         }
         if (!string_list_appendf(&fb->body, "  jump %s", cond_label))
-            return 1;
+        {
+            rc = 1;
+            goto while_cleanup;
+        }
 
         if (!string_list_appendf(&fb->body, "label %s", end_label))
+        {
+            rc = 1;
+            goto while_cleanup;
+        }
+
+    while_cleanup:
+        ccb_loop_pop(fb);
+        return rc;
+    }
+    case ND_BREAK:
+    {
+        LoopContext *ctx = ccb_loop_top(fb);
+        if (!ctx)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "'break' not within a loop");
+            return 1;
+        }
+        if (!string_list_appendf(&fb->body, "  jump %s", ctx->break_label))
+            return 1;
+        return 0;
+    }
+    case ND_CONTINUE:
+    {
+        LoopContext *ctx = ccb_loop_top(fb);
+        if (!ctx)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "'continue' not within a loop");
+            return 1;
+        }
+        if (!string_list_appendf(&fb->body, "  jump %s", ctx->continue_label))
             return 1;
         return 0;
     }

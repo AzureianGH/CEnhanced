@@ -520,6 +520,10 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_ELSE;
     else if (len == 5 && strncmp(p, "while", 5) == 0)
         k = TK_KW_WHILE;
+    else if (len == 5 && strncmp(p, "break", 5) == 0)
+        k = TK_KW_BREAK;
+    else if (len == 8 && strncmp(p, "continue", 8) == 0)
+        k = TK_KW_CONTINUE;
     else if (len == 4 && strncmp(p, "enum", 4) == 0)
         k = TK_KW_ENUM;
     else if (len == 3 && strncmp(p, "for", 3) == 0)

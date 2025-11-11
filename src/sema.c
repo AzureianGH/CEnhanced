@@ -276,6 +276,7 @@ struct SemaContext
     ImportedFunctionSet *imported_funcs;
     int imported_func_count;
     int imported_func_cap;
+    int loop_depth;
 };
 SemaContext *sema_create(void)
 {
@@ -285,6 +286,7 @@ SemaContext *sema_create(void)
     sc->imported_funcs = NULL;
     sc->imported_func_count = 0;
     sc->imported_func_cap = 0;
+    sc->loop_depth = 0;
     return sc;
 }
 void sema_destroy(SemaContext *sc)
@@ -3458,8 +3460,34 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
                 return 1;
             }
         }
+        sc->loop_depth++;
         if (stmt->rhs && sema_check_statement(sc, stmt->rhs, fn, found_ret))
+        {
+            sc->loop_depth--;
             return 1;
+        }
+        if (stmt->body && sema_check_statement(sc, stmt->body, fn, found_ret))
+        {
+            sc->loop_depth--;
+            return 1;
+        }
+        sc->loop_depth--;
+        return 0;
+    case ND_BREAK:
+        if (sc->loop_depth <= 0)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "'break' may only appear inside a loop");
+            return 1;
+        }
+        return 0;
+    case ND_CONTINUE:
+        if (sc->loop_depth <= 0)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "'continue' may only appear inside a loop");
+            return 1;
+        }
         return 0;
     case ND_RET:
         if (fn->ret_type && fn->ret_type->kind == TY_VOID)

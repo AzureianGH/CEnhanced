@@ -738,6 +738,25 @@ static Node *new_node(NodeKind k)
     return n;
 }
 
+static Node *make_string_node_from_token(Parser *ps, Token t)
+{
+    Node *n = new_node(ND_STRING);
+    if (t.length >= 2)
+    {
+        n->str_data = t.lexeme + 1;
+        n->str_len = t.length - 2;
+    }
+    else
+    {
+        n->str_data = "";
+        n->str_len = 0;
+    }
+    n->line = t.line;
+    n->col = t.col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
 static char *dup_token_text(Token t)
 {
     char *nm = (char *)xmalloc((size_t)t.length + 1);
@@ -1862,14 +1881,23 @@ static Node *parse_primary(Parser *ps)
     }
     if (t.kind == TK_STRING)
     {
-        Node *n = new_node(ND_STRING);
-        // strip quotes; t.lexeme points at starting quote
-        n->str_data = t.lexeme + 1;
-        n->str_len = t.length - 2; // naive; ignores escapes
-        n->line = t.line;
-        n->col = t.col;
-        n->src = lexer_source(ps->lx);
-        return n;
+        Node *result = make_string_node_from_token(ps, t);
+        for (;;)
+        {
+            Token look = lexer_peek(ps->lx);
+            if (look.kind != TK_STRING)
+                break;
+            Token next_tok = lexer_next(ps->lx);
+            Node *rhs = make_string_node_from_token(ps, next_tok);
+            Node *concat = new_node(ND_ADD);
+            concat->lhs = result;
+            concat->rhs = rhs;
+            concat->line = result->line;
+            concat->col = result->col;
+            concat->src = result->src;
+            result = concat;
+        }
+        return result;
     }
     if (t.kind == TK_CHAR_LIT)
     {
@@ -2757,6 +2785,26 @@ static Node *parse_stmt(Parser *ps)
     {
         return parse_for(ps);
     }
+    if (t.kind == TK_KW_BREAK)
+    {
+        lexer_next(ps->lx);
+        expect(ps, TK_SEMI, ";");
+        Node *br = new_node(ND_BREAK);
+        br->line = t.line;
+        br->col = t.col;
+        br->src = lexer_source(ps->lx);
+        return br;
+    }
+    if (t.kind == TK_KW_CONTINUE)
+    {
+        lexer_next(ps->lx);
+        expect(ps, TK_SEMI, ";");
+        Node *ct = new_node(ND_CONTINUE);
+        ct->line = t.line;
+        ct->col = t.col;
+        ct->src = lexer_source(ps->lx);
+        return ct;
+    }
     if (t.kind == TK_KW_RET)
     {
         lexer_next(ps->lx);
@@ -2957,23 +3005,6 @@ static Node *parse_for(Parser *ps)
     }
     expect(ps, TK_RPAREN, ")");
     Node *body = parse_stmt(ps);
-    // Build while loop: while (cond_or_true) { body; post; }
-    Node *while_body = NULL;
-    if (post)
-    {
-        Node **stmts = (Node **)xcalloc(2, sizeof(Node *));
-        stmts[0] = body;
-        stmts[1] = post;
-        Node *blk = new_node(ND_BLOCK);
-        blk->stmts = stmts;
-        blk->stmt_count = 2;
-        blk->src = lexer_source(ps->lx);
-        while_body = blk;
-    }
-    else
-    {
-        while_body = body;
-    }
     // if no condition, use integer literal 1
     if (!cond)
     {
@@ -2984,7 +3015,8 @@ static Node *parse_for(Parser *ps)
     }
     Node *wh = new_node(ND_WHILE);
     wh->lhs = cond;
-    wh->rhs = while_body;
+    wh->rhs = body;
+    wh->body = post;
     wh->src = lexer_source(ps->lx);
     // If there was an init, create an outer block { init; while(...) }
     if (init)
