@@ -48,6 +48,9 @@ typedef struct
 	char *module_name;
 	int counter;
 	int pointer_width;
+	char **interned_strings;
+	int interned_string_count;
+	int interned_string_cap;
 } PreprocState;
 
 typedef struct
@@ -62,6 +65,29 @@ typedef struct
 	const char *name;
 	const char *value;
 } MacroParam;
+
+static const char *detect_host_architecture(void)
+{
+#if defined(_M_X64) || defined(__x86_64__) || defined(__amd64__)
+	return "x86-64";
+#elif defined(_M_IX86) || defined(__i386__) || defined(__i386)
+	return "x86-32";
+#elif defined(_M_I86) || defined(__i86__)
+	return "x86-16";
+#elif defined(_M_ARM64) || defined(__aarch64__)
+	return "ARM64";
+#elif defined(_M_ARM) || defined(__arm__)
+	return "ARM32";
+#elif defined(__ppc64__) || defined(__powerpc64__)
+	return "PPC64";
+#elif defined(__ppc__) || defined(__powerpc__)
+	return "PPC";
+#elif defined(__riscv) || defined(__riscv__)
+	return "RISC-V";
+#else
+	return "unknown";
+#endif
+}
 
 static void sb_init(StrBuilder *sb)
 {
@@ -228,6 +254,29 @@ static char *make_string_literal(const char *s)
 	}
 	sb_append_char(&sb, '"');
 	return sb_build(&sb);
+}
+
+static long preproc_intern_string_value(PreprocState *st, const char *value)
+{
+	if (!st || !value)
+		return 0;
+	for (int i = 0; i < st->interned_string_count; ++i)
+	{
+		if (strcmp(st->interned_strings[i], value) == 0)
+			return (long)(i + 1);
+	}
+	if (st->interned_string_count == st->interned_string_cap)
+	{
+		int ncap = st->interned_string_cap ? st->interned_string_cap * 2 : 8;
+		char **tmp = (char **)realloc(st->interned_strings, (size_t)ncap * sizeof(char *));
+		if (!tmp)
+			diag_error("preprocessor: out of memory interning string");
+		st->interned_strings = tmp;
+		st->interned_string_cap = ncap;
+	}
+	st->interned_strings[st->interned_string_count] = xstrdup(value);
+	st->interned_string_count++;
+	return (long)st->interned_string_count;
 }
 
 static void preproc_error(const PreprocState *st, int line, const char *fmt, ...)
@@ -638,6 +687,123 @@ static long parse_primary(ExprParser *p)
 				p->pos++;
 		}
 		return res;
+	}
+	if (c == '"')
+	{
+		p->pos++;
+		StrBuilder sb;
+		sb_init(&sb);
+		int escape = 0;
+		int terminated = 0;
+		while (p->pos < p->len)
+		{
+			char ch = p->expr[p->pos++];
+			if (escape)
+			{
+				switch (ch)
+				{
+				case '\\':
+				case '"':
+				case '\'':
+					sb_append_char(&sb, ch);
+					break;
+				case 'n':
+					sb_append_char(&sb, '\n');
+					break;
+				case 'r':
+					sb_append_char(&sb, '\r');
+					break;
+				case 't':
+					sb_append_char(&sb, '\t');
+					break;
+				case '0':
+					sb_append_char(&sb, '\0');
+					break;
+				default:
+					sb_append_char(&sb, ch);
+					break;
+				}
+				escape = 0;
+				continue;
+			}
+			if (ch == '\\')
+			{
+				escape = 1;
+				continue;
+			}
+			if (ch == '"')
+			{
+				terminated = 1;
+				break;
+			}
+			if (ch == '\n' || ch == '\r')
+				break;
+			sb_append_char(&sb, ch);
+		}
+		if (!terminated)
+		{
+			free(sb.data);
+			return 0;
+		}
+		char *value = sb_build(&sb);
+		long id = preproc_intern_string_value(p->state, value);
+		free(value);
+		return id;
+	}
+	if (c == '\'')
+	{
+		p->pos++;
+		int escape = 0;
+		int terminated = 0;
+		long result = 0;
+		int have_value = 0;
+		while (p->pos < p->len)
+		{
+			char ch = p->expr[p->pos++];
+			if (escape)
+			{
+				switch (ch)
+				{
+				case '\\':
+				case '\'':
+					result = (unsigned char)ch;
+					break;
+				case 'n':
+					result = '\n';
+					break;
+				case 'r':
+					result = '\r';
+					break;
+				case 't':
+					result = '\t';
+					break;
+				case '0':
+					result = '\0';
+					break;
+				default:
+					result = (unsigned char)ch;
+					break;
+				}
+				escape = 0;
+				have_value = 1;
+				continue;
+			}
+			if (ch == '\\')
+			{
+				escape = 1;
+				continue;
+			}
+			if (ch == '\'')
+			{
+				terminated = 1;
+				break;
+			}
+			result = (unsigned char)ch;
+			have_value = 1;
+		}
+		if (!terminated || !have_value)
+			return 0;
+		return result;
 	}
 	if ((c >= '0' && c <= '9') || c == '.')
 	{
@@ -1486,7 +1652,8 @@ static void process_inactive_line(const char *src, int len, int *index, StrBuild
 	*index = pos;
 }
 
-char *chance_preprocess_source(const char *path, const char *src, int len, int *out_len)
+char *chance_preprocess_source(const char *path, const char *src, int len,
+							   int *out_len, const char *target_arch_name)
 {
 	if (!src || len <= 0)
 	{
@@ -1547,6 +1714,12 @@ char *chance_preprocess_source(const char *path, const char *src, int len, int *
 	snprintf(pointer_buf, sizeof(pointer_buf), "%d", st.pointer_width);
 	define_builtin_macro(&st, "__POINTER_WIDTH__", pointer_buf);
 	define_builtin_macro(&st, "__IS64BIT__", st.pointer_width >= 64 ? "1" : "0");
+	const char *arch_name =
+	    (target_arch_name && *target_arch_name) ? target_arch_name
+	                                            : detect_host_architecture();
+	char *arch_literal = make_string_literal(arch_name);
+	define_builtin_macro(&st, "__TARGET_ARCH__", arch_literal);
+	free(arch_literal);
 	define_builtin_macro(&st, "__LINE__", "0");
 	define_builtin_macro(&st, "__COUNTER__", "0");
 #if defined(_WIN32)
@@ -1609,6 +1782,9 @@ char *chance_preprocess_source(const char *path, const char *src, int len, int *
 		free_macro(&st.macros[i]);
 	free(st.macros);
 	free(st.conds);
+	for (int i = 0; i < st.interned_string_count; ++i)
+		free(st.interned_strings[i]);
+	free(st.interned_strings);
 	if (st.module_name)
 		free(st.module_name);
 	return result;

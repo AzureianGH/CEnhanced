@@ -133,6 +133,17 @@ static const char *asm_syntax_to_option(AsmSyntax syntax)
   }
 }
 
+static const char *target_arch_to_macro(TargetArch arch)
+{
+  switch (arch) {
+  case ARCH_X86:
+    return "x86";
+  case ARCH_NONE:
+  default:
+    return NULL;
+  }
+}
+
 static void verbose_print_config(
     const char *output_path, int opt_level, TargetArch target_arch,
     TargetOS target_os, int stop_after_ccb, int stop_after_asm, int no_link,
@@ -3029,7 +3040,8 @@ int main(int argc, char **argv) {
       break;
     }
     int pre_len = 0;
-    char *preprocessed = chance_preprocess_source(input, src, len, &pre_len);
+  char *preprocessed = chance_preprocess_source(
+    input, src, len, &pre_len, target_arch_to_macro(target_arch));
     SourceBuffer sb = {preprocessed ? preprocessed : src,
                        preprocessed ? pre_len : len, input};
     Parser *ps = parser_create(sb);

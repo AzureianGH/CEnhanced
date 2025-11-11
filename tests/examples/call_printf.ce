@@ -424,6 +424,25 @@ expose fun main() -> i32
 
     assert(inlinable_function(0) == 0, "inlinable_function(0) == 0");
 
+    fun* (i32, -> i32) inlinedptr = &inlined_function;
+
+    void* inlinedvoidp = inlinedptr as void*;
+
+    fun* (i32, -> i32) retinlinedptr = inlinedvoidp as fun* (i32, -> i32);
+    printf("Value is %d!\n", retinlinedptr(5));
+
+    #if __TARGET_ARCH__ == "xa86"
+    #error "__TARGET_ARCH__ unexpectedly matched xa86"
+    #endif
+
+    #if __TARGET_ARCH__ == "x86"
+        printf("Arch is %s.\n", __TARGET_ARCH__);
+    #else
+        printf("Arch (non-x86) is %s.\n", __TARGET_ARCH__);
+    #endif
+
+    
+
     ret final_sum; // expect 168
 }
 
