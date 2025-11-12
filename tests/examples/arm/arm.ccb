@@ -1,0 +1,55 @@
+ccbytecode 2
+
+.extern printf params=(ptr) returns=i32 varargs
+
+.func ArmTest_testfun ret=i32 params=2 locals=0
+.params i16 i16
+  load_param 0
+  load_param 1
+  binop add i16
+  convert sext i16 i32
+  ret
+.endfunc
+.func ArmTest_overflowi8 ret=i8 params=0 locals=3
+.locals i8 i8 i8
+  const i8 120
+  store_local 0
+  const i8 10
+  store_local 1
+  load_local 0
+  load_local 1
+  binop add i8
+  store_local 2
+  load_local 2
+  ret
+.endfunc
+.func main ret=i32 params=0 locals=3
+.locals i32 i32 ptr
+  const i16 5
+  const i16 5
+  call ArmTest_testfun i32 (i16,i16)
+  store_local 0
+  const_str "Hello, ARM World! Num %d, %s, %d, %d\x0A"
+  const i32 42
+  const_str "Other String"
+  load_local 0
+  const i16 10
+  const i16 20
+  call ArmTest_testfun i32 (i16,i16)
+  binop add i32
+  call ArmTest_overflowi8 i8 ()
+  convert sext i8 i32
+  call printf i32 (ptr,i32,ptr,i32,i32)
+  drop i32
+  const i32 100
+  store_local 1
+  addr_local 1
+  store_local 2
+  const_str "Pointer value: %d\x0A"
+  load_local 2
+  load_indirect i32
+  call printf i32 (ptr,i32)
+  drop i32
+  const i32 123
+  ret
+.endfunc

@@ -28,7 +28,7 @@ The codebase is intentionally compact so new language features can be added by t
 		assembly / object / executable / ccbin
 ```
 
-`chancec` only links when a backend is selected (currently `-x86`). Without a backend it stops after writing `.ccb`, which is useful for testing or feeding third-party tools.
+`chancec` only links when a backend is selected (currently `-x86` or `-arm64`). Without a backend it stops after writing `.ccb`, which is useful for testing or feeding third-party tools.
 
 ## Prerequisites
 - CMake 3.23+
@@ -68,6 +68,9 @@ Basic examples:
 # Compile and link with the x86-64 backend
 chancec -x86 samples/hello.ce -o hello.exe
 
+# Compile for macOS arm64
+chancec -arm64 samples/hello.ce -o hello
+
 # Keep the Chance bytecode and stop before backend translation
 chancec -Sccb samples/hello.ce -o out/hello.ccb
 
@@ -80,11 +83,12 @@ chancec --library stdlib/stdlib.ceproj -o dist/stdlib.cclib
 
 Notable switches:
 - `-x86` — select the built-in x86-64 backend (required for assembly/object/exe output).
+- `-arm64` — select the built-in macOS ARM64 backend (requires `--target-os macos`).
 - `-S` — produce assembly via ChanceCode alongside the normal output.
 - `-Sccb` — exit after writing `.ccb` (skips backend invocation entirely).
 - `-c [path]` or `--no-link [path]` — compile only; optionally choose the object path.
 - `--freestanding` — disable CRT assumptions for bare-metal or kernel targets.
-- `--target-os windows|linux` — influence backend metadata (PE vs ELF conventions).
+- `--target-os windows|linux|macos` — influence backend metadata (PE vs ELF conventions).
 - `--asm-syntax intel|att|nasm` — pick the assembler dialect ChanceCode should emit.
 - `--chancecodec <path>` — override the auto-detected `chancecodec` executable.
 - `--library` — package modules, exported symbols, and embedded `.ccbin` blobs into a `.cclib` archive.

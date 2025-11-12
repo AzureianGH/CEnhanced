@@ -1,0 +1,32 @@
+module ArmTest;
+
+extend from "C" i32 printf(char *, ...);
+
+fun testfun(i16 a, i16 b) -> i32
+{
+    ret (a + b) as i32;
+}
+
+fun overflowi8() -> i8
+{
+    i8 a = 120;
+    i8 b = 10;
+    i8 c = a + b;
+    ret c;
+}
+
+[EntryPoint]
+fun main() -> i32
+{
+    i32 a = testfun(5, 5);
+    printf("Hello, ARM World! Num %d, %s, %d, %d\n", 
+        42,
+        "Other String", 
+        a + testfun(10, 20), 
+        overflowi8() as i32
+    );
+    i32 example = 100;
+    i32* p = &example;
+    printf("Pointer value: %d\n", *p);
+    ret 123;
+}

@@ -33,7 +33,7 @@ extern char **environ;
 #define CHANCECODEC_EXT ""
 #endif
 
-typedef enum { ARCH_NONE = 0, ARCH_X86 } TargetArch;
+typedef enum { ARCH_NONE = 0, ARCH_X86, ARCH_ARM64 } TargetArch;
 
 static const char *default_chancecodec_name =
 #ifdef _WIN32
@@ -138,6 +138,8 @@ static const char *target_arch_to_macro(TargetArch arch)
   switch (arch) {
   case ARCH_X86:
     return "x86";
+  case ARCH_ARM64:
+    return "arm64";
   case ARCH_NONE:
   default:
     return NULL;
@@ -160,7 +162,11 @@ static void verbose_print_config(
   char opt_buf[16];
   snprintf(opt_buf, sizeof(opt_buf), "-O%d", opt_level);
   verbose_table_row("Optimization", opt_buf);
-  const char *arch = target_arch == ARCH_X86 ? "x86-64" : "none";
+  const char *arch = "none";
+  if (target_arch == ARCH_X86)
+    arch = "x86-64";
+  else if (target_arch == ARCH_ARM64)
+    arch = "arm64";
   verbose_table_row("Backend", arch);
   verbose_table_row("Target OS", target_os_to_option(target_os));
   verbose_table_row("Stop after .ccb", bool_str(stop_after_ccb));
@@ -235,7 +241,9 @@ static void usage(const char *prog) {
   fprintf(stderr, "  -m32|-m64         Target bitness (currently -m64 only)\n");
   fprintf(stderr, "  -x86              Select x86-64 backend for "
                   "assembly/object/executable output\n");
-  fprintf(stderr, "  --target-os <os>  Backend target OS: windows|linux\n");
+  fprintf(stderr, "  -arm64            Select ARM64 macOS backend for "
+                  "assembly/object/executable output\n");
+  fprintf(stderr, "  --target-os <os>  Backend target OS: windows|linux|macos\n");
   fprintf(
       stderr,
       "  --asm-syntax <s>  Assembly syntax: intel|att|nasm (default intel)\n");
@@ -529,6 +537,8 @@ static const char *target_os_to_option(TargetOS os) {
     return "windows";
   case OS_LINUX:
     return "linux";
+  case OS_MACOS:
+    return "macos";
   default:
     return NULL;
   }
@@ -855,6 +865,14 @@ static int parse_ceproj_file(
           *target_arch = ARCH_X86;
         if (chancecode_backend)
           *chancecode_backend = "x86-gas";
+      } else if (equals_icase(value_buf, "arm64") ||
+                 equals_icase(value_buf, "arm64-macos")) {
+        if (target_arch)
+          *target_arch = ARCH_ARM64;
+        if (chancecode_backend)
+          *chancecode_backend = "arm64-macos";
+        if (target_os)
+          *target_os = OS_MACOS;
       } else if (equals_icase(value_buf, "none")) {
         if (target_arch)
           *target_arch = ARCH_NONE;
@@ -912,6 +930,9 @@ static int parse_ceproj_file(
       } else if (equals_icase(value_buf, "linux")) {
         if (target_os)
           *target_os = OS_LINUX;
+      } else if (equals_icase(value_buf, "macos")) {
+        if (target_os)
+          *target_os = OS_MACOS;
       } else {
         fprintf(stderr, "error: unknown target_os '%s' in '%s' (line %d)\n",
                 value_buf, proj_path, lineno);
@@ -2563,6 +2584,8 @@ int main(int argc, char **argv) {
   const char *chancecodec_cmd_override = NULL;
 #ifdef _WIN32
   TargetOS target_os = OS_WINDOWS;
+#elif defined(__APPLE__)
+  TargetOS target_os = OS_MACOS;
 #else
   TargetOS target_os = OS_LINUX;
 #endif
@@ -2692,6 +2715,12 @@ int main(int argc, char **argv) {
       chancecode_backend = "x86-gas";
       continue;
     }
+    if (strcmp(argv[i], "-arm64") == 0) {
+      target_arch = ARCH_ARM64;
+      chancecode_backend = "arm64-macos";
+      target_os = OS_MACOS;
+      continue;
+    }
     if (strcmp(argv[i], "-m32") == 0) {
       m32 = 1;
       continue;
@@ -2706,8 +2735,11 @@ int main(int argc, char **argv) {
         target_os = OS_WINDOWS;
       else if (strcmp(os, "linux") == 0)
         target_os = OS_LINUX;
+      else if (strcmp(os, "macos") == 0)
+        target_os = OS_MACOS;
       else {
-        fprintf(stderr, "Unknown --target-os '%s' (use windows|linux)\n", os);
+        fprintf(stderr,
+                "Unknown --target-os '%s' (use windows|linux|macos)\n", os);
         return 2;
       }
       continue;
@@ -2803,12 +2835,12 @@ int main(int argc, char **argv) {
     return 2;
   }
   if (stop_after_asm && target_arch == ARCH_NONE) {
-    fprintf(stderr, "error: -S requires a backend selection (e.g., -x86)\n");
+  fprintf(stderr, "error: -S requires a backend selection (e.g., -x86 or -arm64)\n");
     return 2;
   }
   if (!emit_library && target_arch == ARCH_NONE) {
     if (!stop_after_ccb) {
-      fprintf(stderr, "error: selecting a backend (e.g., -x86) is required "
+  fprintf(stderr, "error: selecting a backend (e.g., -x86 or -arm64) is required "
                       "unless stopping at bytecode with -Sccb\n");
       return 2;
     }
@@ -2819,7 +2851,7 @@ int main(int argc, char **argv) {
     }
     if (obj_count > 0 || ccb_count > 0) {
       fprintf(stderr, "error: providing .ccb/.o/.obj inputs requires selecting "
-                      "a backend (e.g., -x86)\n");
+                      "a backend (e.g., -x86 or -arm64)\n");
       return 2;
     }
   }
@@ -2842,7 +2874,7 @@ int main(int argc, char **argv) {
     }
     if (target_arch != ARCH_NONE) {
       fprintf(stderr, "error: --library cannot be combined with backend "
-                      "selection (e.g., -x86)\n");
+                      "selection (e.g., -x86 or -arm64)\n");
       return 2;
     }
     if (ccb_count > 0 || obj_count > 0 || cclib_count > 0) {
@@ -2871,7 +2903,7 @@ int main(int argc, char **argv) {
   const char *chancecodec_cmd_to_use = NULL;
   int chancecodec_uses_fallback = 0;
   int chancecodec_has_override = 0;
-  int needs_chancecodec = (target_arch == ARCH_X86) || emit_library;
+  int needs_chancecodec = (target_arch != ARCH_NONE) || emit_library;
   if (needs_chancecodec) {
     if (chancecodec_cmd_override && *chancecodec_cmd_override) {
       strip_wrapping_quotes(chancecodec_cmd_override, chancecodec_override_buf,
@@ -3242,10 +3274,22 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (!rc && target_arch == ARCH_X86 && !stop_after_ccb) {
-        const char *backend =
-            chancecode_backend ? chancecode_backend : "x86-gas";
+      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb) {
+        const char *backend = chancecode_backend;
+        if (!backend) {
+          backend = (target_arch == ARCH_X86) ? "x86-gas" : "arm64-macos";
+        }
         const char *target_os_option = target_os_to_option(target_os);
+        if (target_arch == ARCH_ARM64 && (!target_os_option ||
+                                          strcmp(target_os_option, "macos") != 0)) {
+          fprintf(stderr,
+                  "arm64 backend requires --target-os macos (current target-os is '%s')\n",
+                  target_os_option ? target_os_option : "<unset>");
+          rc = 1;
+        }
+        if (rc)
+          break;
         if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use) {
           fprintf(stderr,
                   "internal error: ChanceCode CLI command unresolved\n");
@@ -3299,7 +3343,8 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (!rc && target_arch == ARCH_X86 && !stop_after_ccb &&
+      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb &&
           !stop_after_asm) {
         if (!need_obj) {
           fprintf(stderr,
@@ -3321,6 +3366,9 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
             strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
+            if (target_arch == ARCH_ARM64)
+              strncat(cc_cmd, " -arch arm64",
+                      sizeof(cc_cmd) - strlen(cc_cmd) - 1);
             if (opt_level > 0) {
               char optbuf[8];
               snprintf(optbuf, sizeof(optbuf), " -O%d", opt_level);
@@ -3336,14 +3384,15 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (!rc && target_arch == ARCH_X86) {
+      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)) {
         if (!stop_after_ccb && ccb_is_temp)
           remove(ccb_path);
         if (!stop_after_asm)
           remove(asm_path);
       }
 
-      if (!rc && target_arch == ARCH_X86 && !stop_after_ccb &&
+      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb &&
           !stop_after_asm && !no_link && !multi_link) {
         snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
         have_single_obj = 1;
@@ -3451,10 +3500,20 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (target_arch == ARCH_X86 && !stop_after_ccb) {
-        const char *backend =
-            chancecode_backend ? chancecode_backend : "x86-gas";
+      if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb) {
+        const char *backend = chancecode_backend;
+        if (!backend)
+          backend = (target_arch == ARCH_X86) ? "x86-gas" : "arm64-macos";
         const char *target_os_option = target_os_to_option(target_os);
+        if (target_arch == ARCH_ARM64 &&
+            (!target_os_option || strcmp(target_os_option, "macos") != 0)) {
+          fprintf(stderr,
+                  "arm64 backend requires --target-os macos (current target-os is '%s')\n",
+                  target_os_option ? target_os_option : "<unset>");
+          rc = 1;
+          break;
+        }
         if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use) {
           fprintf(stderr,
                   "internal error: ChanceCode CLI command unresolved\n");
@@ -3487,10 +3546,10 @@ int main(int argc, char **argv) {
                      chancecodec_cmd_to_use, backend, asm_path, ccb_path);
         }
 
-        int spawn_errno = 0;
-        int chance_rc = run_chancecodec_process(chancecodec_cmd_to_use, backend,
-                                                opt_level, asm_path, ccb_path,
-                                                target_os_option, &spawn_errno);
+    int spawn_errno = 0;
+    int chance_rc = run_chancecodec_process(
+      chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path,
+      target_os_option, &spawn_errno);
         if (chance_rc != 0) {
           if (chance_rc < 0) {
             fprintf(stderr, "failed to launch chancecodec '%s': %s\n",
@@ -3509,7 +3568,8 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (target_arch == ARCH_X86 && !stop_after_ccb && !stop_after_asm) {
+      if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb && !stop_after_asm) {
         if (!need_obj) {
           fprintf(stderr,
                   "internal error: object output expected but path missing\n");
@@ -3532,6 +3592,9 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
         strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
+        if (target_arch == ARCH_ARM64)
+          strncat(cc_cmd, " -arch arm64",
+                  sizeof(cc_cmd) - strlen(cc_cmd) - 1);
         if (opt_level > 0) {
           char optbuf[8];
           snprintf(optbuf, sizeof(optbuf), " -O%d", opt_level);
@@ -3546,12 +3609,13 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (target_arch == ARCH_X86) {
+      if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64) {
         if (!stop_after_asm)
           remove(asm_path);
       }
 
-      if (target_arch == ARCH_X86 && !stop_after_ccb && !stop_after_asm &&
+      if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb && !stop_after_asm &&
           !no_link && !multi_link) {
         snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
         have_single_obj = 1;
@@ -3567,7 +3631,9 @@ int main(int argc, char **argv) {
       }
     }
   }
-  if (!rc && !emit_library && target_arch == ARCH_X86 && !stop_after_ccb) {
+  if (!rc && !emit_library &&
+      (target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+      !stop_after_ccb) {
     if (compiler_verbose_enabled() && library_codegen_units > 0)
       verbose_section("Processing library modules");
     int verbose_lib_progress = 0;
@@ -3802,6 +3868,10 @@ int main(int argc, char **argv) {
     size_t cmdsz = 4096;
     char *cmd = (char *)xmalloc(cmdsz);
     snprintf(cmd, cmdsz, "cc -o \"%s\"", out);
+    if (target_arch == ARCH_ARM64)
+      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
+    if (target_arch == ARCH_ARM64)
+      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
     for (int i = 0; i < to_cnt; ++i) {
       size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
       if (need > cmdsz) {
@@ -3848,6 +3918,9 @@ int main(int argc, char **argv) {
     char link_cmd[4096];
     snprintf(link_cmd, sizeof(link_cmd), "cc -o \"%s\" \"%s\"", out,
              single_obj_path);
+    if (target_arch == ARCH_ARM64)
+      strncat(link_cmd, " -arch arm64",
+              sizeof(link_cmd) - strlen(link_cmd) - 1);
     if (compiler_verbose_enabled()) {
       verbose_section("Linking single object");
       verbose_table_row("Command", link_cmd);
@@ -3867,6 +3940,10 @@ int main(int argc, char **argv) {
     size_t cmdsz = 4096;
     char *cmd = (char *)xmalloc(cmdsz);
     snprintf(cmd, cmdsz, "cc -r -o \"%s\"", obj_override);
+    if (target_arch == ARCH_ARM64)
+      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
+    if (target_arch == ARCH_ARM64)
+      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
     for (int i = 0; i < to_cnt; ++i) {
       size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
       if (need > cmdsz) {

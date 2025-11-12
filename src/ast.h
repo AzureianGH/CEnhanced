@@ -398,7 +398,8 @@ typedef enum
 typedef enum
 {
     OS_WINDOWS = 0,
-    OS_LINUX = 1
+    OS_LINUX = 1,
+    OS_MACOS = 2
 } TargetOS;
 
 struct Symbol;
