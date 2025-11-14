@@ -28,5 +28,8 @@ fun main() -> i32
     i32 example = 100;
     i32* p = &example;
     printf("Pointer value: %d\n", *p);
+    i16 example64 = 0b0000001100000001; // 769, but split into two bytes: 0x01 and 0x03
+    i8* bytePtr = (&example64) as i8*;
+    printf("First byte: %d, Second byte: %d\n", bytePtr[0], bytePtr[1]); // Should print 1 and 3
     ret 123;
 }
