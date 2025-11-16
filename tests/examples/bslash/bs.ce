@@ -1,0 +1,34 @@
+module BSlashTest;
+
+extend from "C" void printchar(char);
+
+[EntryPoint]
+fun __thunk_entry__() -> void
+{
+    main();
+}
+
+fun main() -> i32
+{
+    printchar('H');
+    printchar('e');
+    printchar('l');
+    printchar('l');
+    printchar('o');
+    printchar(',');
+    printchar(' ');
+    printchar('f');
+    printchar('r');
+    printchar('o');
+    printchar('m');
+    printchar(' ');
+    printchar('C');
+    printchar('H');
+    printchar('a');
+    printchar('n');
+    printchar('c');
+    printchar('e');
+    printchar('!');
+    printchar('\n');
+    ret 0;
+}

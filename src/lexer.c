@@ -806,6 +806,42 @@ Token lexer_peek(Lexer *lx)
     return lx->lookahead;
 }
 
+int lexer_collect_literal_block(Lexer *lx, char **out_text)
+{
+    if (!lx || !out_text)
+        return 0;
+    int start_idx = lx->idx;
+    int start_line = lx->line;
+    int start_col = lx->col;
+    int depth = 1;
+    while (!at_end(lx))
+    {
+        char c = getc2(lx);
+        if (c == '{')
+        {
+            depth++;
+            continue;
+        }
+        if (c == '}')
+        {
+            depth--;
+            if (depth == 0)
+            {
+                int end_idx = lx->idx - 1;
+                size_t len = (size_t)(end_idx - start_idx);
+                char *buffer = (char *)xmalloc(len + 1);
+                if (len > 0)
+                    memcpy(buffer, lx->src.src + start_idx, len);
+                buffer[len] = '\0';
+                *out_text = buffer;
+                return 1;
+            }
+        }
+    }
+    diag_error_at(&lx->src, start_line, start_col, "unterminated literal block");
+    return 0;
+}
+
 Token lexer_peek_n(Lexer *lx, int n)
 {
     if (!lx)

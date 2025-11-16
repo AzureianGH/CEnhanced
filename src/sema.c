@@ -3641,7 +3641,7 @@ static int sema_check_function(SemaContext *sc, Node *fn)
 {
     if (!fn->ret_type)
         fn->ret_type = &ty_i32;
-    if (fn->is_chancecode)
+    if (fn->is_chancecode || fn->is_literal)
         return 0;
     Node *body = fn->body;
     if (!body)
@@ -4417,9 +4417,9 @@ static void analyze_inline_candidates(Node *root)
             compiler_verbose_logf("inline", "skip %s: function not marked inline", fn_name);
             continue;
         }
-        if (fn->is_chancecode)
+        if (fn->is_chancecode || fn->is_literal)
         {
-            compiler_verbose_logf("inline", "skip %s: ChanceCode shim cannot inline", fn_name);
+            compiler_verbose_logf("inline", "skip %s: ChanceCode/Literal shim cannot inline", fn_name);
             continue;
         }
         if (fn->inline_address_taken)

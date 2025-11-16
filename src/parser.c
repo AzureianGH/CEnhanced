@@ -155,6 +155,13 @@ struct PendingAttr
     int col;
 };
 
+typedef enum
+{
+    FN_BODY_NORMAL = 0,
+    FN_BODY_CHANCECODE,
+    FN_BODY_LITERAL,
+} FunctionBodyKind;
+
 static Token expect(Parser *ps, TokenKind k, const char *what);
 static Node *new_node(NodeKind k);
 static Node *parse_expr(Parser *ps);
@@ -174,6 +181,8 @@ static int attrs_contains(const struct PendingAttr *attrs, int count, const char
 static void chancecode_buffer_append(char **buffer, size_t *capacity, size_t *length, const char *text, size_t text_len);
 static void append_string(char ***arr, int *count, int *cap, char *value);
 static void parse_chancecode_body(Parser *ps, Node *fn);
+static void parse_literal_body(Parser *ps, Node *fn);
+static int line_is_blank(const char *text);
 
 static int token_is_varargs(Token tok)
 {
@@ -382,6 +391,86 @@ static void parse_chancecode_body(Parser *ps, Node *fn)
     fn->chancecode.lines = lines;
     fn->chancecode.count = count;
     fn->is_chancecode = 1;
+    fn->body = NULL;
+}
+
+static int line_is_blank(const char *text)
+{
+    if (!text)
+        return 1;
+    while (*text)
+    {
+        if (!isspace((unsigned char)*text))
+            return 0;
+        ++text;
+    }
+    return 1;
+}
+
+static void parse_literal_body(Parser *ps, Node *fn)
+{
+    if (!ps || !fn)
+        return;
+
+    Token open = expect(ps, TK_LBRACE, "{");
+    char *raw = NULL;
+    if (!lexer_collect_literal_block(ps->lx, &raw))
+    {
+        diag_error_at(lexer_source(ps->lx), open.line, open.col,
+                      "failed to parse literal body");
+        exit(1);
+    }
+
+    char **lines = NULL;
+    int count = 0;
+    int cap = 0;
+    char *cursor = raw;
+    while (cursor && *cursor)
+    {
+        char *line_start = cursor;
+        while (*cursor && *cursor != '\n')
+            ++cursor;
+        size_t len = (size_t)(cursor - line_start);
+        while (len > 0 && line_start[len - 1] == '\r')
+            --len;
+        char *line = (char *)xmalloc(len + 1);
+        if (len > 0)
+            memcpy(line, line_start, len);
+        line[len] = '\0';
+        append_string(&lines, &count, &cap, line);
+        if (*cursor == '\n')
+            ++cursor;
+    }
+    free(raw);
+
+    int start = 0;
+    while (start < count && line_is_blank(lines[start]))
+    {
+        free(lines[start]);
+        ++start;
+    }
+    int end = count;
+    while (end > start && line_is_blank(lines[end - 1]))
+    {
+        free(lines[end - 1]);
+        --end;
+    }
+    int new_count = end - start;
+    if (new_count <= 0)
+    {
+        free(lines);
+        diag_error_at(lexer_source(ps->lx), open.line, open.col,
+                      "Literal body must contain at least one line of code");
+        exit(1);
+    }
+    if (start > 0)
+    {
+        for (int i = start; i < end; ++i)
+            lines[i - start] = lines[i];
+    }
+    fn->literal.lines = lines;
+    fn->literal.count = new_count;
+    fn->is_literal = 1;
     fn->body = NULL;
 }
 
@@ -638,6 +727,22 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
         else if (strcmp(attr->name, "ChanceCode") == 0)
         {
             fn->is_chancecode = 1;
+        }
+        else if (strcmp(attr->name, "Literal") == 0)
+        {
+            if (attr->value && *attr->value)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'Literal' attribute does not take arguments");
+                exit(1);
+            }
+            if (!fn->is_literal)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'Literal' attribute requires a literal function body");
+                exit(1);
+            }
+            fn->is_literal = 1;
         }
         else if (strcmp(attr->name, "EntryPoint") == 0)
         {
@@ -3033,7 +3138,7 @@ static Node *parse_for(Parser *ps)
     return wh;
 }
 
-static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_chancecode)
+static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, FunctionBodyKind body_kind)
 {
     expect(ps, TK_KW_FUN, "fun");
     Token name = expect(ps, TK_IDENT, "identifier");
@@ -3125,10 +3230,15 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     fn->metadata.declared_param_count = -1;
     fn->metadata.declared_local_count = -1;
     fn->metadata.ret_token = NULL;
-    fn->is_chancecode = is_chancecode ? 1 : 0;
-    if (is_chancecode)
+    fn->is_chancecode = (body_kind == FN_BODY_CHANCECODE) ? 1 : 0;
+    fn->is_literal = (body_kind == FN_BODY_LITERAL) ? 1 : 0;
+    if (body_kind == FN_BODY_CHANCECODE)
     {
         parse_chancecode_body(ps, fn);
+    }
+    else if (body_kind == FN_BODY_LITERAL)
+    {
+        parse_literal_body(ps, fn);
     }
     else
     {
@@ -3626,7 +3736,29 @@ Node *parse_unit(Parser *ps)
             if (global_seen)
                 global_block_done = 1;
             int has_chancecode = attrs_contains(attrs, attr_count, "ChanceCode");
-            Node *fn = parse_function(ps, leading_noreturn, visibility, has_chancecode);
+            int has_literal = attrs_contains(attrs, attr_count, "Literal");
+            if (has_chancecode && has_literal)
+            {
+                const struct PendingAttr *lit_attr = NULL;
+                for (int i = 0; i < attr_count; ++i)
+                {
+                    if (attrs[i].name && strcmp(attrs[i].name, "Literal") == 0)
+                    {
+                        lit_attr = &attrs[i];
+                        break;
+                    }
+                }
+                const struct PendingAttr *err_attr = lit_attr ? lit_attr : &attrs[0];
+                diag_error_at(lexer_source(ps->lx), err_attr->line, err_attr->col,
+                              "attributes 'ChanceCode' and 'Literal' cannot be combined on the same function");
+                exit(1);
+            }
+            FunctionBodyKind body_kind = FN_BODY_NORMAL;
+            if (has_chancecode)
+                body_kind = FN_BODY_CHANCECODE;
+            else if (has_literal)
+                body_kind = FN_BODY_LITERAL;
+            Node *fn = parse_function(ps, leading_noreturn, visibility, body_kind);
             apply_function_attributes(ps, fn, attrs, attr_count);
             clear_pending_attrs(attrs, attr_count);
             attr_count = 0;

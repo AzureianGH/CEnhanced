@@ -30,6 +30,16 @@ fun main() -> i32
     printf("Pointer value: %d\n", *p);
     i16 example64 = 0b0000001100000001; // 769, but split into two bytes: 0x01 and 0x03
     i8* bytePtr = (&example64) as i8*;
-    printf("First byte: %d, Second byte: %d\n", bytePtr[0], bytePtr[1]); // Should print 1 and 3
-    ret 123;
+    printf("First byte: %d, Second byte: %d\n", bytePtr[0], bytePtr[1]); // Should print: First byte: 1, Second byte: 3
+    
+    ret testLiteral() / 7;
+}
+
+[Literal]
+fun testLiteral() -> i32
+{
+    mov w9, #5                  // load 5 into w9
+    add w9, w9, #2              // add 2, result = 7
+    mov w0, w9                  // move result into return register
+    ret
 }

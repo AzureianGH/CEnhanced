@@ -270,11 +270,17 @@ typedef struct Node
     int param_count;
     int is_varargs;
     int is_chancecode;
+    int is_literal;
     struct
     {
         char **lines;
         int count;
     } chancecode;
+    struct
+    {
+        char **lines;
+        int count;
+    } literal;
     // Metadata overrides for backend emission
     struct
     {
@@ -354,6 +360,7 @@ void lexer_destroy(Lexer *lx);
 Token lexer_next(Lexer *lx);
 Token lexer_peek(Lexer *lx);
 Token lexer_peek_n(Lexer *lx, int n);
+int lexer_collect_literal_block(Lexer *lx, char **out_text);
 // Accessor for diagnostics: returns the source buffer associated with this
 // lexer
 const SourceBuffer *lexer_source(Lexer *lx);
