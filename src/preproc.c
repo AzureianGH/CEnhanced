@@ -261,7 +261,7 @@ static long preproc_intern_string_value(PreprocState *st, const char *value, siz
 	for (int i = 0; i < st->interned_string_count; ++i)
 	{
 		if (st->interned_string_lengths[i] == len &&
-		    (len == 0 || memcmp(st->interned_strings[i], value, len) == 0))
+			(len == 0 || memcmp(st->interned_strings[i], value, len) == 0))
 			return (long)(i + 1);
 	}
 	if (st->interned_string_count == st->interned_string_cap)
@@ -1746,8 +1746,8 @@ char *chance_preprocess_source(const char *path, const char *src, int len,
 	define_builtin_macro(&st, "__POINTER_WIDTH__", pointer_buf);
 	define_builtin_macro(&st, "__IS64BIT__", st.pointer_width >= 64 ? "1" : "0");
 	const char *arch_name =
-	    (target_arch_name && *target_arch_name) ? target_arch_name
-	                                            : detect_host_architecture();
+		(target_arch_name && *target_arch_name) ? target_arch_name
+												: detect_host_architecture();
 	char *arch_literal = make_string_literal(arch_name);
 	define_builtin_macro(&st, "__TARGET_ARCH__", arch_literal);
 	define_builtin_macro(&st, "__ARCH__", arch_literal);

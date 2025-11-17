@@ -747,6 +747,21 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
         else if (strcmp(attr->name, "EntryPoint") == 0)
         {
             fn->is_entrypoint = 1;
+            fn->is_preserve = 1;
+        }
+        else if (strcmp(attr->name, "Preserve") == 0)
+        {
+            fn->is_preserve = 1;
+        }
+        else if (strcmp(attr->name, "ForceInline") == 0)
+        {
+            if (!fn->is_literal)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'ForceInline' attribute requires a literal function body");
+                exit(1);
+            }
+            fn->force_inline_literal = 1;
         }
         else if (strcmp(attr->name, "Inline") == 0)
         {
@@ -1052,16 +1067,16 @@ static int parse_bring_decl(Parser *ps)
     }
     expect(ps, TK_SEMI, ";");
 
-        if (ps->import_count >= ps->import_cap)
+    if (ps->import_count >= ps->import_cap)
+    {
+        ps->import_cap = ps->import_cap ? ps->import_cap * 2 : 4;
+        ps->imports = (struct ModuleImport *)realloc(ps->imports, (size_t)ps->import_cap * sizeof(struct ModuleImport));
+        if (!ps->imports)
         {
-            ps->import_cap = ps->import_cap ? ps->import_cap * 2 : 4;
-            ps->imports = (struct ModuleImport *)realloc(ps->imports, (size_t)ps->import_cap * sizeof(struct ModuleImport));
-            if (!ps->imports)
-            {
-                diag_error("out of memory while recording module import");
-                exit(1);
-            }
+            diag_error("out of memory while recording module import");
+            exit(1);
         }
+    }
     ps->imports[ps->import_count].parts = parts;
     ps->imports[ps->import_count].part_count = count;
     ps->imports[ps->import_count].full_name = full;
@@ -1277,14 +1292,14 @@ static int type_sizeof_simple(Type *ty)
         return 0;
     case TY_STRUCT:
         return ty->strct.size_bytes;
-        case TY_ARRAY:
-            if (!ty->array.elem)
-                return 8;
-            if (ty->array.is_unsized)
-                return 8;
-            if (ty->array.length <= 0)
-                return 0;
-            return ty->array.length * type_sizeof_simple(ty->array.elem);
+    case TY_ARRAY:
+        if (!ty->array.elem)
+            return 8;
+        if (ty->array.is_unsized)
+            return 8;
+        if (ty->array.length <= 0)
+            return 0;
+        return ty->array.length * type_sizeof_simple(ty->array.elem);
     default:
         return 8;
     }
@@ -2953,7 +2968,7 @@ static Node *parse_stmt(Parser *ps)
         decl->var_name = nm;
         decl->var_type = ty;
         decl->var_is_array = (ty && ty->kind == TY_ARRAY);
-    decl->var_is_function = (ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_FUNC);
+        decl->var_is_function = (ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_FUNC);
         decl->var_is_const = is_const;
         decl->line = name.line;
         decl->col = name.col;
@@ -3356,8 +3371,8 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
             ps->ext_cap = ps->ext_cap ? ps->ext_cap * 2 : 8;
             ps->externs = (Symbol *)realloc(ps->externs, ps->ext_cap * sizeof(Symbol));
         }
-    ps->externs[ps->ext_count++] = s;
-    return extend_tok.line;
+        ps->externs[ps->ext_count++] = s;
+        return extend_tok.line;
     }
     expect(ps, TK_KW_FROM, "from");
     Token abi = lexer_next(ps->lx);

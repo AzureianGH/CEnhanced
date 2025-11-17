@@ -1,34 +1,49 @@
 module BSlashTest;
 
-extend from "C" void printchar(char);
-
 [EntryPoint]
+[Literal]
 fun __thunk_entry__() -> void
 {
-    main();
+CALL BSlashTest_main
+RET
 }
 
+[Inline]
+fun add(i32 a, i32 b) -> i32
+{
+    ret a + b;
+}
+
+[Literal]
+[ForceInline]
+fun print_char(char chr) -> void
+{
+OUTPRT.S #1, #0x00001234, B0
+}
+
+[Inline]
+fun print_string(char* str) -> void
+{
+    char* refstr = str;
+    while (*refstr != '\0')
+    {
+        print_char((*refstr) as char);
+        refstr++;
+    }
+}
+
+[Preserve]
 fun main() -> i32
 {
-    printchar('H');
-    printchar('e');
-    printchar('l');
-    printchar('l');
-    printchar('o');
-    printchar(',');
-    printchar(' ');
-    printchar('f');
-    printchar('r');
-    printchar('o');
-    printchar('m');
-    printchar(' ');
-    printchar('C');
-    printchar('H');
-    printchar('a');
-    printchar('n');
-    printchar('c');
-    printchar('e');
-    printchar('!');
-    printchar('\n');
-    ret 0;
+    i32 sum = 0;
+    print_string("Hello, world!\n");
+    print_string("UwU Mreeaow :3\n");
+    i32 thing = 5;
+    i32 other = 3;
+    sum = thing;
+    i32* testderefs = &thing;
+    *testderefs = 5;
+    sum = sum + *testderefs + other;
+
+    ret add(sum, 3); // Register B0 should contain 0x00000010 (16)
 }

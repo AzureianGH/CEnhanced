@@ -1,0 +1,16 @@
+ccbytecode 2
+
+.func ArmTest_testfun ret=i32 params=2 locals=0
+.params i16 i16
+  load_param 0
+  load_param 1
+  binop add i16
+  convert sext i16 i32
+  ret
+.endfunc
+.func main ret=i32 params=0 locals=0
+  const i16 5
+  const i16 5
+  call ArmTest_testfun i32 (i16,i16)
+  ret
+.endfunc

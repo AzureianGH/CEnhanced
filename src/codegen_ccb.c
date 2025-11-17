@@ -367,7 +367,7 @@ static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, co
         return;
     fb->module = mod;
     fb->fn = fn;
-        fb->ret_type = map_type_to_cc(fn && fn->ret_type ? fn->ret_type : NULL);
+    fb->ret_type = map_type_to_cc(fn && fn->ret_type ? fn->ret_type : NULL);
     string_list_init(&fb->body);
     fb->locals = NULL;
     fb->locals_count = 0;
@@ -454,15 +454,15 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
     compiler_verbose_logf("inline", "consider inline of '%s' (candidate=%d)", fn_name,
                           target_fn->inline_candidate);
 
-#define INLINE_SKIP_WITH_REASON(MSG)                                                             \
-    do                                                                                           \
-    {                                                                                            \
-        if (mutable_target)                                                                      \
-            mutable_target->inline_needs_body = 1;                                               \
-        compiler_verbose_logf("inline", "skip inline of '%s': %s", fn_name, MSG);              \
-        if (compiler_verbose_deep_enabled())                                                     \
-            compiler_verbose_treef("inline", "|_", "reason: %s", MSG);                        \
-        return INLINE_SKIP;                                                                      \
+#define INLINE_SKIP_WITH_REASON(MSG)                                              \
+    do                                                                            \
+    {                                                                             \
+        if (mutable_target)                                                       \
+            mutable_target->inline_needs_body = 1;                                \
+        compiler_verbose_logf("inline", "skip inline of '%s': %s", fn_name, MSG); \
+        if (compiler_verbose_deep_enabled())                                      \
+            compiler_verbose_treef("inline", "|_", "reason: %s", MSG);            \
+        return INLINE_SKIP;                                                       \
     } while (0)
 
     if (!target_fn->inline_candidate || !target_fn->inline_expr)
@@ -1043,7 +1043,7 @@ static void ccb_opt_prune_dropped_values(CcbFunctionBuilder *fb)
                 else
                     snprintf(preview_buf, sizeof(preview_buf), "drop");
                 compiler_verbose_treef("optimizer", "|-", "prune %zu instruction%s near '%s'",
-                                        remove_count, remove_count == 1 ? "" : "s", preview_buf);
+                                       remove_count, remove_count == 1 ? "" : "s", preview_buf);
             }
             string_list_remove_range(body, remove_start, remove_count);
             if (remove_start == 0)
@@ -4969,8 +4969,9 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
     else
     {
         const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
-        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s",
-                                backend_name, ret_name, param_count, local_count, varargs_suffix))
+        const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
+        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s",
+                                backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix))
             return 1;
     }
 
@@ -5003,6 +5004,18 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
 
     if (!ccb_module_append_line(mod, ".endfunc"))
         return 1;
+
+    if (fn->force_inline_literal)
+    {
+        if (!ccb_module_appendf(mod, ".force-inline-literal %s", backend_name))
+            return 1;
+    }
+
+    if (fn->is_preserve)
+    {
+        if (!ccb_module_appendf(mod, ".preserve %s", backend_name))
+            return 1;
+    }
 
     if (fn->is_noreturn)
     {
@@ -5046,8 +5059,9 @@ static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const Codeg
     else
     {
         const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
-        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s",
-                                backend_name, ret_name, param_count, local_count, varargs_suffix))
+        const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
+        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s",
+                                backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix))
             return 1;
     }
 
@@ -5083,6 +5097,18 @@ static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const Codeg
 
     if (!ccb_module_append_line(mod, ".endfunc"))
         return 1;
+
+    if (fn->force_inline_literal)
+    {
+        if (!ccb_module_appendf(mod, ".force-inline-literal %s", backend_name))
+            return 1;
+    }
+
+    if (fn->is_preserve)
+    {
+        if (!ccb_module_appendf(mod, ".preserve %s", backend_name))
+            return 1;
+    }
 
     if (fn->is_noreturn)
     {
@@ -5175,6 +5201,11 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         {
             if (!ccb_module_append_line(mod, ".endfunc"))
                 rc = 1;
+            else if (fn->is_preserve)
+            {
+                if (!ccb_module_appendf(mod, ".preserve %s", backend_name))
+                    rc = 1;
+            }
         }
 
         if (!rc && fn->is_noreturn)
