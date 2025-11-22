@@ -1581,6 +1581,7 @@ static char *ccb_escape_string_literal(const char *data, int len)
             break;
         case '"':
             esc = "\\\"";
+            break;
         case '\0':
             esc = "\\0";
             break;

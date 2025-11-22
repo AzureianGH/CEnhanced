@@ -232,8 +232,11 @@ expose fun main() -> i32
     assert(testintpp[0][0] == 123, "double pointer deref == 123");
 
     TC.SmallTest* addptr = Std.Memory.alloc(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
+    
     addptr[0] = construct_thing();
     addptr[1] = another;
+
+    
 
     assert(addptr[0].smallValue == 5, "addptr[0].smallValue == 5");
     assert(addptr[1].smallValue == 123, "addptr[1].smallValue == 123");
