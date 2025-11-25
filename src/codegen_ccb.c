@@ -1232,8 +1232,6 @@ static CCValueType ccb_type_for_expr(const Node *expr)
     case ND_VAR:
         if (expr->var_type && expr->var_type->kind == TY_ARRAY)
         {
-            if (expr->var_type->array.is_unsized)
-                return CC_TYPE_PTR;
             return CC_TYPE_PTR;
         }
         return CC_TYPE_I32;
@@ -1483,7 +1481,7 @@ static unsigned char *ccb_decode_c_escapes(const char *s, int len, int *out_len)
                 uint32_t v = (ccb_hex_value((unsigned char)s[i]) << 12) |
                              (ccb_hex_value((unsigned char)s[i + 1]) << 8) |
                              (ccb_hex_value((unsigned char)s[i + 2]) << 4) |
-                             ccb_hex_value((unsigned char)s[i + 3]);
+                              ccb_hex_value((unsigned char)s[i + 3]);
                 i += 4;
                 unsigned char tmp[4];
                 int n = ccb_utf8_encode(v, tmp);

@@ -231,6 +231,75 @@ void sema_track_imported_function(SemaContext *sc, const char *name, const char 
     sema_imported_function_insert(sc, name, module_full, symbol);
 }
 
+Symbol *sema_copy_imported_function_symbols(const SemaContext *sc, int *out_count)
+{
+    if (out_count)
+        *out_count = 0;
+    if (!sc || sc->imported_func_count == 0)
+        return NULL;
+
+    int total = 0;
+    for (int i = 0; i < sc->imported_func_count; ++i)
+    {
+        ImportedFunctionSet *set = &sc->imported_funcs[i];
+        if (!set)
+            continue;
+        total += set->count;
+    }
+
+    if (total <= 0)
+        return NULL;
+
+    Symbol *list = (Symbol *)xcalloc((size_t)total, sizeof(Symbol));
+    int written = 0;
+    for (int i = 0; i < sc->imported_func_count; ++i)
+    {
+        ImportedFunctionSet *set = &sc->imported_funcs[i];
+        if (!set)
+            continue;
+        for (int c = 0; c < set->count; ++c)
+        {
+            const Symbol *sym = &set->candidates[c].symbol;
+            if (!sym)
+                continue;
+            const char *name = sym->name;
+            int duplicate = 0;
+            if (name)
+            {
+                for (int j = 0; j < written; ++j)
+                {
+                    if (list[j].name && strcmp(list[j].name, name) == 0)
+                    {
+                        duplicate = 1;
+                        break;
+                    }
+                }
+            }
+            if (duplicate)
+                continue;
+            list[written++] = *sym;
+        }
+    }
+
+    if (written == 0)
+    {
+        free(list);
+        return NULL;
+    }
+
+    if (out_count)
+        *out_count = written;
+
+    if (written < total)
+    {
+        Symbol *shrunk = (Symbol *)realloc(list, (size_t)written * sizeof(Symbol));
+        if (shrunk)
+            list = shrunk;
+    }
+
+    return list;
+}
+
 static const ImportedFunctionCandidate *sema_get_unique_imported_candidate(SemaContext *sc, const char *name, int emit_error)
 {
     ImportedFunctionSet *set = sema_find_imported_function_set(sc, name);

@@ -166,7 +166,7 @@ static void verbose_print_config(
     int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
 {
   if (!compiler_verbose_enabled())
-    return;
+      return;
   verbose_section("Configuration");
   verbose_table_row("Output", output_path ? output_path : "(default)");
   char opt_buf[16];
@@ -3637,6 +3637,9 @@ int main(int argc, char **argv)
         }
       }
 
+      int imported_count = 0;
+      Symbol *imported_syms = sema_copy_imported_function_symbols(sc, &imported_count);
+
       CodegenOptions co = {.freestanding = freestanding != 0,
                            .m32 = m32 != 0,
                            .emit_asm = stop_after_asm != 0,
@@ -3649,12 +3652,15 @@ int main(int argc, char **argv)
                            .os = target_os,
                            .externs = NULL,
                            .extern_count = 0,
+               .imported_externs = imported_syms,
+               .imported_extern_count = imported_count,
                            .opt_level = opt_level};
       int extern_count = 0;
       const Symbol *extern_syms = parser_get_externs(ps, &extern_count);
       co.externs = extern_syms;
       co.extern_count = extern_count;
       rc = codegen_ccb_write_module(unit, &co);
+      free(imported_syms);
 
       if (!rc)
       {

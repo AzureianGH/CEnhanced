@@ -426,6 +426,8 @@ typedef struct
     TargetOS os;
     const struct Symbol *externs;
     int extern_count;
+    const struct Symbol *imported_externs;
+    int imported_extern_count;
     int opt_level;
 } CodegenOptions;
 
@@ -515,5 +517,6 @@ void sema_destroy(SemaContext *sc);
 int sema_check_unit(SemaContext *sc, Node *unit);
 void sema_register_foreign_unit_symbols(SemaContext *sc, Node *target_unit, Node *foreign_unit);
 void sema_track_imported_function(SemaContext *sc, const char *name, const char *module_full, const Symbol *symbol);
+Symbol *sema_copy_imported_function_symbols(const SemaContext *sc, int *out_count);
 
 #endif // CHANCE_AST_H
