@@ -1,5 +1,7 @@
 module LibTest.Another;
 
+bring Test.Chance as TC;
+
 extend from "C" i32 printf(char *, ...);
 
 hide alias string = char*;
@@ -41,4 +43,9 @@ expose fun test_diffvarargs(i32 empty, ...) -> void
     }
     va_end(list);
     ret;
+}
+
+expose fun multistructargs(TC.SmallTest a, TC.SmallTest b, TC.SmallTest c) -> i32
+{
+    ret (a.testVar as i32) + (b.testVar as i32) + (c.testVar as i32);
 }

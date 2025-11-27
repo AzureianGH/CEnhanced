@@ -476,6 +476,24 @@ expose fun main() -> i32
     printf("Arch (non-x86) is %s.\n", __TARGET_ARCH__);
     #endif
 
+    i32 structvarargs_sum = multistructargs(
+        TC.SmallTest{ .smallValue = 1, .testVar = 10 },
+        TC.SmallTest{ .smallValue = 2, .testVar = 20 },
+        TC.SmallTest{ .smallValue = 3, .testVar = 30 }
+    );
+
+    assert(structvarargs_sum == 60, "multi struct args sum is 60");
+
+    i32 structvarargs_result = structvarargs(3,
+        TC.SmallTest{ .smallValue = 0, .testVar = 11 },
+        TC.SmallTest{ .smallValue = 0, .testVar = 22 },
+        TC.SmallTest{ .smallValue = 0, .testVar = 33 }
+    );
+
+    printf("structvarargs_result = %d\n", structvarargs_result);
+
+    assert(structvarargs_result == 66, "structvarargs sum is 66");
+
     printf("All tests completed successfully!\n");
 
     ret final_sum; // expect 168
@@ -490,6 +508,21 @@ expose fun internal_diffvarargs(i32 empty, ...) -> void
     va_end(list);
     ret;
 }
+
+expose fun structvarargs(i32 count, ...) -> i32
+{
+    va_list list = va_start();
+    i32 total = 0;
+    for (i32 i = 0; i < count; i = i + 1)
+    {
+        TC.SmallTest st = va_arg(list, TC.SmallTest);
+        total = total + (st.testVar as i32);
+    }
+    va_end(list);
+    ret total;
+}
+
+
 
 hide fun funptr_test(i32 a, i32 b) -> i32
 {

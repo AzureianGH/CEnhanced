@@ -160,10 +160,11 @@ static void verbose_print_config(
     const char *output_path, int opt_level, TargetArch target_arch,
     TargetOS target_os, int stop_after_ccb, int stop_after_asm, int no_link,
     int emit_library, int freestanding, AsmSyntax asm_syntax,
-    int include_dir_count, int ce_count, int ccb_count, int cclib_count,
-    int obj_count, const char *chancecodec_cmd, int chancecodec_has_override,
-    int needs_chancecodec, const char *chancecode_backend,
-    int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
+  int include_dir_count, int ce_count, int ccb_count, int cclib_count,
+  int obj_count, int symbol_ref_ce_count, int symbol_ref_cclib_count,
+  const char *chancecodec_cmd, int chancecodec_has_override,
+  int needs_chancecodec, const char *chancecode_backend,
+  int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
 {
   if (!compiler_verbose_enabled())
       return;
@@ -200,6 +201,10 @@ static void verbose_print_config(
   verbose_table_row("CCLib inputs", count_buf);
   snprintf(count_buf, sizeof(count_buf), "%d", obj_count);
   verbose_table_row("OBJ inputs", count_buf);
+  snprintf(count_buf, sizeof(count_buf), "%d", symbol_ref_ce_count);
+  verbose_table_row("Symbol-ref CE inputs", count_buf);
+  snprintf(count_buf, sizeof(count_buf), "%d", symbol_ref_cclib_count);
+  verbose_table_row("Symbol-ref CCLib inputs", count_buf);
   verbose_table_row("ChanceCode backend",
                     chancecode_backend ? chancecode_backend : "(auto)");
   if (needs_chancecodec)
@@ -227,6 +232,14 @@ typedef struct
   SemaContext *sc;
   Parser *parser;
 } UnitCompile;
+
+typedef struct
+{
+  char *input_path;
+  char *src;
+  char *stripped;
+  Node *unit;
+} SymbolRefUnit;
 
 // sema
 int sema_eval_const_i32(Node *expr);
@@ -268,6 +281,8 @@ static void usage(const char *prog)
   fprintf(stderr, "  --chancecodec <path>\n");
   fprintf(stderr, "                    Override ChanceCode CLI executable path "
                   "(default: auto-detect or PATH)\n");
+    fprintf(stderr,
+      "  -sr:<path>       Load .ce/.cclib for symbols only (no codegen)\n");
   fprintf(stderr,
           "  -I <dir>          Add include search directory for #include <>\n");
   fprintf(stderr, "  -Nno-formatting  Disable formatting guidance notes\n");
@@ -2689,6 +2704,26 @@ static int load_cclib_library(const char *path, LoadedLibrary **libs,
   return err;
 }
 
+static int load_cclib_library_symbols_only(const char *path,
+                                           LoadedLibraryFunction **funcs,
+                                           int *func_count, int *func_cap)
+{
+  if (!path || !funcs || !func_count || !func_cap)
+    return EINVAL;
+  LoadedLibrary *tmp_libs = NULL;
+  int tmp_count = 0;
+  int tmp_cap = 0;
+  int err = load_cclib_library(path, &tmp_libs, &tmp_count, &tmp_cap, funcs,
+                               func_count, func_cap);
+  if (tmp_libs)
+  {
+    for (int i = 0; i < tmp_count; ++i)
+      free_loaded_library(&tmp_libs[i]);
+    free(tmp_libs);
+  }
+  return err;
+}
+
 static int run_chancecodec_process(const char *cmd, const char *backend,
                                    int opt_level, const char *asm_path,
                                    const char *ccb_path,
@@ -2932,6 +2967,10 @@ int main(int argc, char **argv)
   int cclib_count = 0, cclib_cap = 0;
   const char **obj_inputs = NULL;
   int obj_count = 0, obj_cap = 0;
+  const char **symbol_ref_ce_inputs = NULL;
+  int symbol_ref_ce_count = 0, symbol_ref_ce_cap = 0;
+  const char **symbol_ref_cclib_inputs = NULL;
+  int symbol_ref_cclib_count = 0, symbol_ref_cclib_cap = 0;
   char **owned_ce_inputs = NULL;
   int owned_ce_count = 0, owned_ce_cap = 0;
   char **owned_ccb_inputs = NULL;
@@ -3137,6 +3176,46 @@ int main(int argc, char **argv)
       compiler_verbose_set_use_ansi(0);
       continue;
     }
+    if (strncmp(argv[i], "-sr:", 4) == 0)
+    {
+      const char *sr_path = argv[i] + 4;
+      if (!sr_path || !*sr_path)
+      {
+        fprintf(stderr,
+                "error: -sr: requires a .ce or .cclib path immediately following\n");
+        return 2;
+      }
+      if (ends_with_icase(sr_path, ".ce"))
+      {
+        if (symbol_ref_ce_count == symbol_ref_ce_cap)
+        {
+          symbol_ref_ce_cap = symbol_ref_ce_cap ? symbol_ref_ce_cap * 2 : 4;
+          symbol_ref_ce_inputs = (const char **)realloc(
+              (void *)symbol_ref_ce_inputs,
+              sizeof(char *) * (size_t)symbol_ref_ce_cap);
+        }
+        symbol_ref_ce_inputs[symbol_ref_ce_count++] = sr_path;
+      }
+      else if (ends_with_icase(sr_path, ".cclib"))
+      {
+        if (symbol_ref_cclib_count == symbol_ref_cclib_cap)
+        {
+          symbol_ref_cclib_cap = symbol_ref_cclib_cap ? symbol_ref_cclib_cap * 2 : 4;
+          symbol_ref_cclib_inputs = (const char **)realloc(
+              (void *)symbol_ref_cclib_inputs,
+              sizeof(char *) * (size_t)symbol_ref_cclib_cap);
+        }
+        symbol_ref_cclib_inputs[symbol_ref_cclib_count++] = sr_path;
+      }
+      else
+      {
+        fprintf(stderr,
+                "error: -sr: path '%s' must be a .ce or .cclib file\n",
+                sr_path);
+        return 2;
+      }
+      continue;
+    }
     if (argv[i][0] == '-')
     {
       usage(argv[0]);
@@ -3339,7 +3418,8 @@ int main(int argc, char **argv)
     verbose_print_config(out, opt_level, target_arch, target_os, stop_after_ccb,
                          stop_after_asm, no_link, emit_library, freestanding,
                          asm_syntax, include_dir_count, ce_count, ccb_count,
-                         cclib_count, obj_count, chancecodec_cmd_to_use,
+                         cclib_count, obj_count, symbol_ref_ce_count,
+                         symbol_ref_cclib_count, chancecodec_cmd_to_use,
                          chancecodec_has_override, needs_chancecodec,
                          chancecode_backend, chancecodec_uses_fallback,
                          compiler_verbose_enabled(),
@@ -3367,6 +3447,16 @@ int main(int argc, char **argv)
         verbose_table_row(label, ce_inputs[idx]);
       }
     }
+    if (symbol_ref_ce_count > 0 && symbol_ref_ce_inputs)
+    {
+      verbose_section("Symbol-ref CE Inputs");
+      for (int idx = 0; idx < symbol_ref_ce_count; ++idx)
+      {
+        char label[32];
+        snprintf(label, sizeof(label), "sr-ce[%d]", idx);
+        verbose_table_row(label, symbol_ref_ce_inputs[idx]);
+      }
+    }
     if (ccb_count > 0 && ccb_inputs)
     {
       verbose_section("CCB Inputs");
@@ -3385,6 +3475,16 @@ int main(int argc, char **argv)
         char label[32];
         snprintf(label, sizeof(label), "cclib[%d]", idx);
         verbose_table_row(label, cclib_inputs[idx]);
+      }
+    }
+    if (symbol_ref_cclib_count > 0 && symbol_ref_cclib_inputs)
+    {
+      verbose_section("Symbol-ref CCLib Inputs");
+      for (int idx = 0; idx < symbol_ref_cclib_count; ++idx)
+      {
+        char label[32];
+        snprintf(label, sizeof(label), "sr-cclib[%d]", idx);
+        verbose_table_row(label, symbol_ref_cclib_inputs[idx]);
       }
     }
     if (obj_count > 0 && obj_inputs)
@@ -3446,6 +3546,20 @@ int main(int argc, char **argv)
 
   module_registry_reset();
   int rc = 0;
+  if (symbol_ref_cclib_count > 0)
+  {
+    for (int i = 0; i < symbol_ref_cclib_count; ++i)
+    {
+      if (load_cclib_library_symbols_only(
+              symbol_ref_cclib_inputs[i], &loaded_library_functions,
+              &loaded_library_function_count,
+              &loaded_library_function_cap))
+      {
+        rc = 1;
+        goto cleanup;
+      }
+    }
+  }
   if (!emit_library && cclib_count > 0)
   {
     for (int i = 0; i < cclib_count; ++i)
@@ -3481,6 +3595,11 @@ int main(int argc, char **argv)
   UnitCompile *units = NULL;
   if (ce_count > 0)
     units = (UnitCompile *)xcalloc((size_t)ce_count, sizeof(UnitCompile));
+  SymbolRefUnit *symbol_ref_units = NULL;
+  if (symbol_ref_ce_count > 0)
+    symbol_ref_units =
+        (SymbolRefUnit *)xcalloc((size_t)symbol_ref_ce_count,
+                                 sizeof(SymbolRefUnit));
   int skip_backend_outputs = stop_after_ccb || stop_after_asm || emit_library;
   int total_codegen_units = ce_count + ccb_count + library_codegen_units;
   // Determine if we need a final link step combining multiple inputs
@@ -3493,6 +3612,48 @@ int main(int argc, char **argv)
   char single_obj_path[1024] = {0};
   int have_single_obj = 0;
   int single_obj_is_temp = 0;
+
+  if (symbol_ref_ce_count > 0 && symbol_ref_units)
+  {
+    if (compiler_verbose_enabled())
+      verbose_section("Loading symbol reference CE units");
+    for (int si = 0; si < symbol_ref_ce_count; ++si)
+    {
+      const char *input = symbol_ref_ce_inputs[si];
+      if (compiler_verbose_enabled())
+        verbose_progress("sr-ce-load", si + 1, symbol_ref_ce_count);
+      int len = 0;
+      char *src = read_all(input, &len);
+      if (!src)
+      {
+        rc = 1;
+        break;
+      }
+      int pre_len = 0;
+      char *preprocessed = chance_preprocess_source(
+          input, src, len, &pre_len, target_arch_to_macro(target_arch));
+      SourceBuffer sb = {preprocessed ? preprocessed : src,
+                         preprocessed ? pre_len : len, input};
+      Parser *ps = parser_create(sb);
+      SemaContext *sc = sema_create();
+      chance_process_includes_and_scan(input, src, len, include_dirs,
+                                       include_dir_count, sc->syms);
+      Node *unit = parse_unit(ps);
+      parser_export_externs(ps, sc->syms);
+      symtab_add_library_functions(sc, unit, loaded_library_functions,
+                                   loaded_library_function_count);
+
+      symbol_ref_units[si].input_path = input ? xstrdup(input) : NULL;
+      symbol_ref_units[si].src = src;
+      symbol_ref_units[si].stripped = preprocessed;
+      symbol_ref_units[si].unit = unit;
+
+      sema_destroy(sc);
+      parser_destroy(ps);
+    }
+    if (rc)
+      goto cleanup;
+  }
 
   if (compiler_verbose_enabled() && ce_count > 0)
     verbose_section("Loading CE units");
@@ -3544,6 +3705,25 @@ int main(int argc, char **argv)
         continue;
       sema_register_foreign_unit_symbols(units[target].sc, units[target].unit,
                                          units[source].unit);
+    }
+  }
+
+  if (ce_count > 0 && symbol_ref_ce_count > 0 && symbol_ref_units)
+  {
+    if (compiler_verbose_enabled())
+      verbose_section("Registering symbol reference CE externs");
+    for (int target = 0; target < ce_count; ++target)
+    {
+      if (compiler_verbose_enabled())
+        verbose_progress("sr-ce-extern", target + 1, ce_count);
+      for (int sr = 0; sr < symbol_ref_ce_count; ++sr)
+      {
+        if (!symbol_ref_units[sr].unit)
+          continue;
+        sema_register_foreign_unit_symbols(units[target].sc,
+                                           units[target].unit,
+                                           symbol_ref_units[sr].unit);
+      }
     }
   }
 
@@ -4655,6 +4835,22 @@ cleanup:
     }
     free(units);
   }
+  if (symbol_ref_units)
+  {
+    for (int i = 0; i < symbol_ref_ce_count; ++i)
+    {
+      SymbolRefUnit *sr = &symbol_ref_units[i];
+      if (sr->unit)
+        ast_free(sr->unit);
+      if (sr->stripped)
+        free(sr->stripped);
+      if (sr->src)
+        free(sr->src);
+      if (sr->input_path)
+        free(sr->input_path);
+    }
+    free(symbol_ref_units);
+  }
   for (int i = 0; i < include_dir_count; i++)
     free(include_dirs[i]);
   free(include_dirs);
@@ -4701,6 +4897,8 @@ cleanup:
   free((void *)ccb_inputs);
   free((void *)cclib_inputs);
   free((void *)obj_inputs);
+  free((void *)symbol_ref_ce_inputs);
+  free((void *)symbol_ref_cclib_inputs);
   return rc;
 fail:
   rc = 2;

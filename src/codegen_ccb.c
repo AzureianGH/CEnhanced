@@ -1205,6 +1205,37 @@ static CcbLocal *ccb_local_add(CcbFunctionBuilder *fb, const char *name, Type *t
     return slot;
 }
 
+static CcbLocal *ccb_local_from_slot(CcbFunctionBuilder *fb, ptrdiff_t slot)
+{
+    if (!fb || !fb->locals || slot < 0)
+        return NULL;
+    size_t idx = (size_t)slot;
+    if (idx >= fb->locals_count)
+        return NULL;
+    return &fb->locals[idx];
+}
+
+static bool ccb_struct_copy_refresh(CcbFunctionBuilder *fb, ptrdiff_t dst_slot, ptrdiff_t src_slot, CcbLocal **dst_ptr, CcbLocal **src_ptr)
+{
+    if (!fb)
+        return false;
+    if (dst_ptr && dst_slot >= 0)
+    {
+        CcbLocal *updated = ccb_local_from_slot(fb, dst_slot);
+        if (!updated)
+            return false;
+        *dst_ptr = updated;
+    }
+    if (src_ptr && src_slot >= 0)
+    {
+        CcbLocal *updated = ccb_local_from_slot(fb, src_slot);
+        if (!updated)
+            return false;
+        *src_ptr = updated;
+    }
+    return true;
+}
+
 static bool ccb_local_in_current_scope(CcbFunctionBuilder *fb, const char *name)
 {
     if (!fb || !name)
@@ -2380,9 +2411,17 @@ static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type,
     if (!fb || !struct_type || struct_type->kind != TY_STRUCT || !dst_ptr || !src_ptr)
         return 0;
 
+    ptrdiff_t dst_slot = dst_ptr ? (ptrdiff_t)(dst_ptr - fb->locals) : -1;
+    ptrdiff_t src_slot = src_ptr ? (ptrdiff_t)(src_ptr - fb->locals) : -1;
+
+    if (!ccb_struct_copy_refresh(fb, dst_slot, src_slot, &dst_ptr, &src_ptr))
+        return 1;
+
     int field_count = struct_type->strct.field_count;
     for (int i = 0; i < field_count; ++i)
     {
+        if (!ccb_struct_copy_refresh(fb, dst_slot, src_slot, &dst_ptr, &src_ptr))
+            return 1;
         const Type *field_type = struct_type->strct.field_types ? struct_type->strct.field_types[i] : NULL;
         if (!field_type)
             continue;
@@ -2396,6 +2435,9 @@ static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type,
             CcbLocal *dst_field = ccb_local_add(fb, NULL, field_ptr_ty, false, false);
             if (!dst_field)
                 return 1;
+            ptrdiff_t dst_field_slot = dst_field - fb->locals;
+            if (!ccb_struct_copy_refresh(fb, dst_slot, src_slot, &dst_ptr, &src_ptr))
+                return 1;
             if (!ccb_emit_load_local(fb, dst_ptr))
                 return 1;
             if (ccb_emit_pointer_offset(fb, field_offset, NULL))
@@ -2406,6 +2448,9 @@ static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type,
             CcbLocal *src_field = ccb_local_add(fb, NULL, field_ptr_ty, false, false);
             if (!src_field)
                 return 1;
+            ptrdiff_t src_field_slot = src_field - fb->locals;
+            if (!ccb_struct_copy_refresh(fb, dst_slot, src_slot, &dst_ptr, &src_ptr))
+                return 1;
             if (!ccb_emit_load_local(fb, src_ptr))
                 return 1;
             if (ccb_emit_pointer_offset(fb, field_offset, NULL))
@@ -2413,7 +2458,14 @@ static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type,
             if (!ccb_emit_store_local(fb, src_field))
                 return 1;
 
+            dst_field = ccb_local_from_slot(fb, dst_field_slot);
+            src_field = ccb_local_from_slot(fb, src_field_slot);
+            if (!dst_field || !src_field)
+                return 1;
+
             if (ccb_emit_struct_copy(fb, field_type, dst_field, src_field))
+                return 1;
+            if (!ccb_struct_copy_refresh(fb, dst_slot, src_slot, &dst_ptr, &src_ptr))
                 return 1;
             continue;
         }
@@ -2430,6 +2482,9 @@ static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type,
         if (!value_tmp)
             return 1;
         if (!ccb_emit_store_local(fb, value_tmp))
+            return 1;
+
+        if (!ccb_struct_copy_refresh(fb, dst_slot, src_slot, &dst_ptr, &src_ptr))
             return 1;
 
         if (!ccb_emit_load_local(fb, dst_ptr))
@@ -2505,56 +2560,32 @@ static int ccb_emit_struct_initializer(CcbFunctionBuilder *fb, const Node *var_d
             return 1;
         }
 
-        int field_count = struct_type->strct.field_count;
-        for (int i = 0; i < field_count; ++i)
+        Type *ptr_ty = type_ptr((Type *)struct_type);
+
+        CcbLocal *src_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+        CcbLocal *dst_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
+        if (!src_ptr || !dst_ptr)
+            return 1;
+
+        if (ccb_emit_expr_basic(fb, init))
+            return 1;
+
+        CCValueType init_ty = ccb_type_for_expr(init);
+        if (init_ty != CC_TYPE_PTR)
         {
-            Node member = {0};
-            member.kind = ND_MEMBER;
-            member.lhs = &var_ref;
-            member.field_index = i;
-            member.field_offset = struct_type->strct.field_offsets ? struct_type->strct.field_offsets[i] : 0;
-            member.type = struct_type->strct.field_types ? struct_type->strct.field_types[i] : NULL;
-            member.is_pointer_deref = 0;
-            member.src = var_decl ? var_decl->src : NULL;
-            member.line = var_decl ? var_decl->line : 0;
-            member.col = var_decl ? var_decl->col : 0;
-
-            CCValueType field_ty = CC_TYPE_I32;
-            const Type *field_type = NULL;
-            if (ccb_emit_member_address(fb, &member, &field_ty, &field_type))
-                return 1;
-
-            if (!field_type)
-            {
-                diag_error_at(init->src, init->line, init->col,
-                              "unknown field type for struct copy");
-                return 1;
-            }
-
-            Node src_member = {0};
-            src_member.kind = ND_MEMBER;
-            src_member.lhs = (Node *)init;
-            src_member.field_index = i;
-            src_member.field_offset = struct_type->strct.field_offsets ? struct_type->strct.field_offsets[i] : 0;
-            src_member.type = (Type *)field_type;
-            src_member.is_pointer_deref = 0;
-            src_member.src = init->src;
-            src_member.line = init->line;
-            src_member.col = init->col;
-
-            if (ccb_emit_expr_basic(fb, &src_member))
-                return 1;
-
-            CCValueType value_ty = ccb_type_for_expr(&src_member);
-            if (value_ty == CC_TYPE_INVALID)
-                value_ty = map_type_to_cc(field_type);
-
-            if (ccb_emit_convert_between(fb, value_ty, field_ty, &src_member))
-                return 1;
-
-            if (!ccb_emit_store_indirect(&fb->body, field_ty))
+            if (ccb_emit_convert_between(fb, init_ty, CC_TYPE_PTR, init))
                 return 1;
         }
+        if (!ccb_emit_store_local(fb, src_ptr))
+            return 1;
+
+        if (ccb_emit_expr_basic(fb, &var_ref))
+            return 1;
+        if (!ccb_emit_store_local(fb, dst_ptr))
+            return 1;
+
+        if (ccb_emit_struct_copy(fb, struct_type, dst_ptr, src_ptr))
+            return 1;
         return 0;
     }
 
@@ -2606,6 +2637,47 @@ static int ccb_emit_struct_initializer(CcbFunctionBuilder *fb, const Node *var_d
             return 1;
     }
 
+    return 0;
+}
+
+static int ccb_emit_struct_literal_expr(CcbFunctionBuilder *fb, const Node *literal)
+{
+    if (!fb || !literal)
+        return 1;
+    if (!literal->type || literal->type->kind != TY_STRUCT)
+    {
+        diag_error_at(literal->src, literal->line, literal->col,
+                      "initializer list literal requires struct type");
+        return 1;
+    }
+
+    char temp_name_buf[32];
+    ccb_make_label(fb, temp_name_buf, sizeof(temp_name_buf), "lit");
+    char *temp_name = (char *)xmalloc(strlen(temp_name_buf) + 1);
+    strcpy(temp_name, temp_name_buf);
+
+    CcbLocal *temp_local = ccb_local_add(fb, temp_name, literal->type, true, false);
+    if (!temp_local)
+    {
+        diag_error_at(literal->src, literal->line, literal->col,
+                      "failed to allocate storage for struct literal");
+        return 1;
+    }
+
+    size_t size_bytes = ccb_type_size_bytes(literal->type);
+    if (size_bytes == 0)
+        size_bytes = 1;
+    size_t alignment = 8;
+    if (!string_list_appendf(&fb->body, "  stack_alloc %zu %zu", size_bytes, alignment))
+        return 1;
+    if (!ccb_emit_store_local(fb, temp_local))
+        return 1;
+
+    if (ccb_emit_struct_initializer(fb, literal, temp_name, literal->type, literal))
+        return 1;
+
+    if (!ccb_emit_load_local(fb, temp_local))
+        return 1;
     return 0;
 }
 
@@ -2902,6 +2974,16 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         return 0;
     }
+    case ND_INIT_LIST:
+    {
+        if (!expr->type || expr->type->kind != TY_STRUCT)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "initializer expressions are only supported for struct literals");
+            return 1;
+        }
+        return ccb_emit_struct_literal_expr(fb, expr);
+    }
     case ND_INT:
     {
         CCValueType ty = map_type_to_cc(expr->type);
@@ -3150,10 +3232,13 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         }
 
-        // load the pointer stored in the va_list variable and deref to get value
+        // Determine the requested result type from semantic analysis (falls back to parser hint)
+        const Type *target_type = expr->type ? expr->type : expr->var_type;
+        CCValueType val_ty = map_type_to_cc(target_type);
+        if (val_ty == CC_TYPE_INVALID && type_is_address_only(target_type))
+            val_ty = CC_TYPE_PTR;
         if (!ccb_emit_load_local(fb, list_local))
             return 1;
-        CCValueType val_ty = map_type_to_cc(expr->var_type ? expr->var_type : NULL);
         if (!ccb_emit_load_indirect(&fb->body, val_ty))
             return 1;
 
@@ -3169,15 +3254,7 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         size_t slot_size = ccb_value_type_size(CC_TYPE_PTR);
         if (slot_size == 0)
             slot_size = sizeof(void *);
-        size_t size_bytes = 0;
-        if (expr->var_type && expr->var_type->kind == TY_STRUCT)
-        {
-            size_bytes = ccb_type_size_bytes(expr->var_type);
-        }
-        else
-        {
-            size_bytes = ccb_value_type_size(val_ty);
-        }
+        size_t size_bytes = ccb_value_type_size(val_ty);
         if (size_bytes == 0)
             size_bytes = slot_size;
         if (size_bytes < slot_size)

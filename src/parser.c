@@ -1116,6 +1116,8 @@ static Node *parse_and(Parser *ps);
 static Node *parse_eq(Parser *ps);
 static Node *parse_or(Parser *ps);
 static Node *parse_shift(Parser *ps);
+static Node *parse_brace_initializer(Parser *ps);
+static int parser_peek_struct_literal(Parser *ps, Token look);
 
 static Node *parse_initializer(Parser *ps);
 static void parse_struct_decl(Parser *ps, int is_exposed);
@@ -1896,8 +1898,133 @@ static Type *parse_type_spec(Parser *ps)
     return make_ptr_chain_dyn(base, depth);
 }
 
+static int parser_peek_struct_literal(Parser *ps, Token look)
+{
+    if (!ps)
+        return 0;
+    if (look.kind != TK_IDENT)
+        return 0;
+    if (!is_type_start(ps, look))
+        return 0;
+
+    int offset = 1;
+    for (;;)
+    {
+        Token tok = lexer_peek_n(ps->lx, offset);
+        if (tok.kind == TK_LBRACE)
+            return 1;
+        if (tok.kind == TK_DOT)
+        {
+            Token ident = lexer_peek_n(ps->lx, offset + 1);
+            if (ident.kind != TK_IDENT)
+                return 0;
+            offset += 2;
+            continue;
+        }
+        return 0;
+    }
+}
+
+static Node *parse_brace_initializer(Parser *ps)
+{
+    if (!ps)
+        return NULL;
+
+    Node *list = new_node(ND_INIT_LIST);
+    Token open = expect(ps, TK_LBRACE, "{");
+    list->line = open.line;
+    list->col = open.col;
+    list->src = lexer_source(ps->lx);
+
+    Node **elems = NULL;
+    const char **designators = NULL;
+    int count = 0;
+    int cap = 0;
+
+    Token peek = lexer_peek(ps->lx);
+    if (peek.kind == TK_RBRACE)
+    {
+        lexer_next(ps->lx);
+        list->init.is_zero = 1;
+        list->init.count = 0;
+        list->init.elems = NULL;
+        list->init.designators = NULL;
+        return list;
+    }
+
+    while (1)
+    {
+        char *designator = NULL;
+        Token maybe_dot = lexer_peek(ps->lx);
+        if (maybe_dot.kind == TK_DOT)
+        {
+            lexer_next(ps->lx);
+            Token field = expect(ps, TK_IDENT, "field name");
+            designator = dup_token_text(field);
+            expect(ps, TK_ASSIGN, "=");
+        }
+
+        Node *value = parse_expr(ps);
+
+        if (count == cap)
+        {
+            int new_cap = cap ? cap * 2 : 4;
+            Node **elem_grown = (Node **)realloc(elems, (size_t)new_cap * sizeof(Node *));
+            const char **desig_grown = (const char **)realloc(designators, (size_t)new_cap * sizeof(const char *));
+            if (!elem_grown || !desig_grown)
+            {
+                diag_error("out of memory while parsing initializer list");
+                exit(1);
+            }
+            elems = elem_grown;
+            designators = desig_grown;
+            cap = new_cap;
+        }
+        elems[count] = value;
+        designators[count] = designator;
+        count++;
+
+        Token next = lexer_peek(ps->lx);
+        if (next.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            Token after_comma = lexer_peek(ps->lx);
+            if (after_comma.kind == TK_RBRACE)
+            {
+                lexer_next(ps->lx);
+                break;
+            }
+            continue;
+        }
+        if (next.kind == TK_RBRACE)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
+        diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                      "expected ',' or '}' in initializer list");
+        exit(1);
+    }
+
+    list->init.count = count;
+    list->init.elems = elems;
+    list->init.designators = designators;
+    list->init.is_zero = (count == 0);
+    return list;
+}
+
 static Node *parse_primary(Parser *ps)
 {
+    Token pre = lexer_peek(ps->lx);
+    if (parser_peek_struct_literal(ps, pre))
+    {
+        Type *struct_ty = parse_type_spec(ps);
+        Node *literal = parse_brace_initializer(ps);
+        literal->type = struct_ty;
+        literal->var_type = struct_ty;
+        return literal;
+    }
+
     Token t = lexer_next(ps->lx);
     if (t.kind == TK_KW_IF)
     {

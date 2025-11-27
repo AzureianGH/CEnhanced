@@ -2112,6 +2112,20 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = &null_ptr;
         return;
     }
+    if (e->kind == ND_INIT_LIST)
+    {
+        Type *target = e->type ? e->type : e->var_type;
+        if (!target)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "initializer list requires a target type");
+            exit(1);
+        }
+        target = canonicalize_type_deep(target);
+        check_initializer_for_type(sc, e, target);
+        e->type = target;
+        return;
+    }
     if (e->kind == ND_VAR)
     {
         const char *orig_name = e->var_ref;
