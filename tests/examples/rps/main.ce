@@ -5,6 +5,7 @@ bring Std;
 extend from "C" i32 printf(char *, ...);
 extend from "C" i32 read(i32, char*, int);
 noreturn extend from "C" void exit(i32);
+extend from "C" i32 fflush(void*);
 
 hide alias string = char*;
 hide alias u8ptr = u8*;
@@ -22,6 +23,13 @@ hide i32[MEM_SIZE] player_history = {0};
 hide i32 history_pos = 0;
 hide i32 total_moves = 0;
 
+hide fun to_lower(char c) -> char
+{
+    if (c >= 'A' && c <= 'Z')
+        ret (c - 'A') + 'a';
+    ret c;
+}
+
 // Read single character input from stdin
 hide fun read_char() -> char
 {
@@ -37,9 +45,10 @@ hide fun read_char() -> char
 hide fun parse_move(char c) -> i32
 {
     if (c == '\0') ret -1; // end of input
-    if (c == 'r' || c == 'R') ret ROCK;
-    if (c == 'p' || c == 'P') ret PAPER;
-    if (c == 's' || c == 'S') ret SCISSORS;
+    char lower = to_lower(c);
+    if (lower == 'r') ret ROCK;
+    if (lower == 'p') ret PAPER;
+    if (lower == 's') ret SCISSORS;
     ret -1; // invalid
 }
 
@@ -102,9 +111,11 @@ expose fun main() -> i32
     for (;;)
     {
         printf("\nChoose [R]ock, [P]aper, [S]cissors, [Q]uit: ");
+        fflush(null);
 
         char c = read_char();
-        if (c == 'q' || c == 'Q') exit(0);
+        char choice = to_lower(c);
+        if (choice == 'q') exit(0);
 
         i32 p_move = parse_move(c);
         if (p_move == -1)
@@ -113,11 +124,6 @@ expose fun main() -> i32
         }
         else
         {
-            // Store move in circular memory
-            player_history[history_pos] = p_move;
-            history_pos = (history_pos + 1) % MEM_SIZE;
-            total_moves = total_moves + 1;
-
             f32 prediction_percent = 0.0f;
             i32 m_move = machine_choice(&prediction_percent);
 
@@ -126,6 +132,11 @@ expose fun main() -> i32
             printf("Player chose %s, Machine chose %s\n", moves[p_move], moves[m_move]);
             printf("%s\n", winner(p_move, m_move));
             printf("AI predicted your next move with %.1f%% confidence.\n", prediction_percent);
+
+            // Store move in circular memory after computing AI response so the AI only learns from past moves
+            player_history[history_pos] = p_move;
+            history_pos = (history_pos + 1) % MEM_SIZE;
+            total_moves = total_moves + 1;
         }
     }
 

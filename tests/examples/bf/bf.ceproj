@@ -1,6 +1,6 @@
 # Chance sample project
 type=Console
-backend=x86
+backend=arm64
 output=build/bf
 ce=main.ce
 cclib=stdlib.cclib
