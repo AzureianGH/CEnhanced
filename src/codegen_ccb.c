@@ -83,6 +83,19 @@ static bool string_list_append(StringList *list, const char *str)
     return string_list_append_copy(list, str, strlen(str));
 }
 
+static int string_list_contains(const StringList *list, const char *value)
+{
+    if (!list || !value)
+        return 0;
+    for (size_t i = 0; i < list->count; ++i)
+    {
+        const char *entry = list->items[i];
+        if (entry && strcmp(entry, value) == 0)
+            return 1;
+    }
+    return 0;
+}
+
 static bool string_list_appendf(StringList *list, const char *fmt, ...)
 {
     if (!list || !fmt)
@@ -268,7 +281,11 @@ static bool ccb_module_appendf(CcbModule *mod, const char *fmt, ...)
 
 static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym)
 {
-    if (!mod || !sym || !sym->name || !*sym->name)
+    if (!mod || !sym)
+        return true;
+
+    const char *symbol_name = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
+    if (!symbol_name || !*symbol_name)
         return true;
 
     size_t params_len = 2; // opening and closing paren
@@ -319,38 +336,73 @@ static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym)
     if (include_abi)
     {
         ok = ccb_module_appendf(mod, ".extern %s abi=%s params=%s returns=%s%s",
-                                sym->name, abi, params, ret_name, varargs_suffix);
+                                symbol_name, abi, params, ret_name, varargs_suffix);
     }
     else
     {
         ok = ccb_module_appendf(mod, ".extern %s params=%s returns=%s%s",
-                                sym->name, params, ret_name, varargs_suffix);
+                                symbol_name, params, ret_name, varargs_suffix);
     }
 
     free(params);
     return ok;
 }
 
-static int ccb_module_emit_externs(CcbModule *mod, const CodegenOptions *opts)
+static int ccb_emit_symbol_list(CcbModule *mod, const Symbol *syms, int count, StringList *emitted, int *any)
 {
-    if (!mod || !opts || !opts->externs || opts->extern_count <= 0)
+    if (!mod || !syms || count <= 0)
         return 0;
 
-    bool any = false;
-    for (int i = 0; i < opts->extern_count; ++i)
+    for (int i = 0; i < count; ++i)
     {
-        const Symbol *sym = &opts->externs[i];
+        const Symbol *sym = &syms[i];
         if (!sym || !sym->is_extern)
+            continue;
+        const char *symbol_name = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
+        if (!symbol_name || !*symbol_name)
+            continue;
+        if (string_list_contains(emitted, symbol_name))
             continue;
         if (!ccb_module_append_extern(mod, sym))
             return 1;
         if (sym->is_noreturn)
         {
-            if (!ccb_module_appendf(mod, ".no-return %s", sym->name))
+            if (!ccb_module_appendf(mod, ".no-return %s", symbol_name))
                 return 1;
         }
-        any = true;
+        if (!string_list_append(emitted, symbol_name))
+            return 1;
+        if (any)
+            *any = 1;
     }
+
+    return 0;
+}
+
+static int ccb_module_emit_externs(CcbModule *mod, const CodegenOptions *opts)
+{
+    if (!mod || !opts)
+        return 0;
+
+    int total = 0;
+    if (opts->externs && opts->extern_count > 0)
+        total += opts->extern_count;
+    if (opts->imported_externs && opts->imported_extern_count > 0)
+        total += opts->imported_extern_count;
+    if (total <= 0)
+        return 0;
+
+    StringList emitted;
+    string_list_init(&emitted);
+
+    int any = 0;
+    int rc = ccb_emit_symbol_list(mod, opts->externs, opts->extern_count, &emitted, &any);
+    if (!rc)
+        rc = ccb_emit_symbol_list(mod, opts->imported_externs, opts->imported_extern_count, &emitted, &any);
+
+    string_list_free(&emitted);
+    if (rc)
+        return rc;
 
     if (any)
     {
