@@ -231,6 +231,75 @@ void sema_track_imported_function(SemaContext *sc, const char *name, const char 
     sema_imported_function_insert(sc, name, module_full, symbol);
 }
 
+Symbol *sema_copy_imported_function_symbols(const SemaContext *sc, int *out_count)
+{
+    if (out_count)
+        *out_count = 0;
+    if (!sc || sc->imported_func_count == 0)
+        return NULL;
+
+    int total = 0;
+    for (int i = 0; i < sc->imported_func_count; ++i)
+    {
+        ImportedFunctionSet *set = &sc->imported_funcs[i];
+        if (!set)
+            continue;
+        total += set->count;
+    }
+
+    if (total <= 0)
+        return NULL;
+
+    Symbol *list = (Symbol *)xcalloc((size_t)total, sizeof(Symbol));
+    int written = 0;
+    for (int i = 0; i < sc->imported_func_count; ++i)
+    {
+        ImportedFunctionSet *set = &sc->imported_funcs[i];
+        if (!set)
+            continue;
+        for (int c = 0; c < set->count; ++c)
+        {
+            const Symbol *sym = &set->candidates[c].symbol;
+            if (!sym)
+                continue;
+            const char *name = sym->name;
+            int duplicate = 0;
+            if (name)
+            {
+                for (int j = 0; j < written; ++j)
+                {
+                    if (list[j].name && strcmp(list[j].name, name) == 0)
+                    {
+                        duplicate = 1;
+                        break;
+                    }
+                }
+            }
+            if (duplicate)
+                continue;
+            list[written++] = *sym;
+        }
+    }
+
+    if (written == 0)
+    {
+        free(list);
+        return NULL;
+    }
+
+    if (out_count)
+        *out_count = written;
+
+    if (written < total)
+    {
+        Symbol *shrunk = (Symbol *)realloc(list, (size_t)written * sizeof(Symbol));
+        if (shrunk)
+            list = shrunk;
+    }
+
+    return list;
+}
+
 static const ImportedFunctionCandidate *sema_get_unique_imported_candidate(SemaContext *sc, const char *name, int emit_error)
 {
     ImportedFunctionSet *set = sema_find_imported_function_set(sc, name);
@@ -2809,6 +2878,24 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = operand_type;
         return;
     }
+    if (e->kind == ND_LNOT)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "logical '!' requires an operand");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        if (!type_is_int(e->lhs->type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "logical '!' requires integer operand");
+            exit(1);
+        }
+        e->type = type_bool();
+        return;
+    }
     if (e->kind == ND_GT_EXPR || e->kind == ND_LT || e->kind == ND_LE || e->kind == ND_GE)
     {
         check_expr(sc, e->lhs);
@@ -3641,7 +3728,7 @@ static int sema_check_function(SemaContext *sc, Node *fn)
 {
     if (!fn->ret_type)
         fn->ret_type = &ty_i32;
-    if (fn->is_chancecode)
+    if (fn->is_chancecode || fn->is_literal)
         return 0;
     Node *body = fn->body;
     if (!body)
@@ -4050,6 +4137,14 @@ static int inline_eval_const_expr(const Node *expr,
         *out_value = inline_normalize_value(~lhs, expr->type);
         return 1;
     }
+    case ND_LNOT:
+    {
+        int64_t lhs = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &lhs))
+            return 0;
+        *out_value = inline_normalize_value(!lhs, expr->type);
+        return 1;
+    }
     case ND_ADD:
     case ND_SUB:
     case ND_MUL:
@@ -4417,9 +4512,9 @@ static void analyze_inline_candidates(Node *root)
             compiler_verbose_logf("inline", "skip %s: function not marked inline", fn_name);
             continue;
         }
-        if (fn->is_chancecode)
+        if (fn->is_chancecode || fn->is_literal)
         {
-            compiler_verbose_logf("inline", "skip %s: ChanceCode shim cannot inline", fn_name);
+            compiler_verbose_logf("inline", "skip %s: ChanceCode/Literal shim cannot inline", fn_name);
             continue;
         }
         if (fn->inline_address_taken)

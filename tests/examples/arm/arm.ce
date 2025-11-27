@@ -1,0 +1,45 @@
+module ArmTest;
+
+extend from "C" i32 printf(char *, ...);
+
+fun testfun(i16 a, i16 b) -> i32
+{
+    ret (a + b) as i32;
+}
+
+fun overflowi8() -> i8
+{
+    i8 a = 120;
+    i8 b = 10;
+    i8 c = a + b;
+    ret c;
+}
+
+[EntryPoint]
+fun main() -> i32
+{
+    i32 a = testfun(5, 5);
+    printf("Hello, ARM World! Num %d, %s, %d, %d\n", 
+        42,
+        "Other String", 
+        a + testfun(10, 20), 
+        overflowi8() as i32
+    );
+    i32 example = 100;
+    i32* p = &example;
+    printf("Pointer value: %d\n", *p);
+    i16 example64 = 0b0000001100000001; // 769, but split into two bytes: 0x01 and 0x03
+    i8* bytePtr = (&example64) as i8*;
+    printf("First byte: %d, Second byte: %d\n", bytePtr[0], bytePtr[1]); // Should print: First byte: 1, Second byte: 3
+    
+    ret testLiteral() / 7;
+}
+
+[Literal]
+fun testLiteral() -> i32
+{
+    mov w9, #5                  // load 5 into w9
+    add w9, w9, #2              // add 2, result = 7
+    mov w0, w9                  // move result into return register
+    ret
+}

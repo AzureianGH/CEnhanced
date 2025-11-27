@@ -367,7 +367,7 @@ static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, co
         return;
     fb->module = mod;
     fb->fn = fn;
-        fb->ret_type = map_type_to_cc(fn && fn->ret_type ? fn->ret_type : NULL);
+    fb->ret_type = map_type_to_cc(fn && fn->ret_type ? fn->ret_type : NULL);
     string_list_init(&fb->body);
     fb->locals = NULL;
     fb->locals_count = 0;
@@ -454,15 +454,15 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
     compiler_verbose_logf("inline", "consider inline of '%s' (candidate=%d)", fn_name,
                           target_fn->inline_candidate);
 
-#define INLINE_SKIP_WITH_REASON(MSG)                                                             \
-    do                                                                                           \
-    {                                                                                            \
-        if (mutable_target)                                                                      \
-            mutable_target->inline_needs_body = 1;                                               \
-        compiler_verbose_logf("inline", "skip inline of '%s': %s", fn_name, MSG);              \
-        if (compiler_verbose_deep_enabled())                                                     \
-            compiler_verbose_treef("inline", "|_", "reason: %s", MSG);                        \
-        return INLINE_SKIP;                                                                      \
+#define INLINE_SKIP_WITH_REASON(MSG)                                              \
+    do                                                                            \
+    {                                                                             \
+        if (mutable_target)                                                       \
+            mutable_target->inline_needs_body = 1;                                \
+        compiler_verbose_logf("inline", "skip inline of '%s': %s", fn_name, MSG); \
+        if (compiler_verbose_deep_enabled())                                      \
+            compiler_verbose_treef("inline", "|_", "reason: %s", MSG);            \
+        return INLINE_SKIP;                                                       \
     } while (0)
 
     if (!target_fn->inline_candidate || !target_fn->inline_expr)
@@ -1043,7 +1043,7 @@ static void ccb_opt_prune_dropped_values(CcbFunctionBuilder *fb)
                 else
                     snprintf(preview_buf, sizeof(preview_buf), "drop");
                 compiler_verbose_treef("optimizer", "|-", "prune %zu instruction%s near '%s'",
-                                        remove_count, remove_count == 1 ? "" : "s", preview_buf);
+                                       remove_count, remove_count == 1 ? "" : "s", preview_buf);
             }
             string_list_remove_range(body, remove_start, remove_count);
             if (remove_start == 0)
@@ -1232,8 +1232,6 @@ static CCValueType ccb_type_for_expr(const Node *expr)
     case ND_VAR:
         if (expr->var_type && expr->var_type->kind == TY_ARRAY)
         {
-            if (expr->var_type->array.is_unsized)
-                return CC_TYPE_PTR;
             return CC_TYPE_PTR;
         }
         return CC_TYPE_I32;
@@ -1483,7 +1481,7 @@ static unsigned char *ccb_decode_c_escapes(const char *s, int len, int *out_len)
                 uint32_t v = (ccb_hex_value((unsigned char)s[i]) << 12) |
                              (ccb_hex_value((unsigned char)s[i + 1]) << 8) |
                              (ccb_hex_value((unsigned char)s[i + 2]) << 4) |
-                             ccb_hex_value((unsigned char)s[i + 3]);
+                              ccb_hex_value((unsigned char)s[i + 3]);
                 i += 4;
                 unsigned char tmp[4];
                 int n = ccb_utf8_encode(v, tmp);
@@ -1581,6 +1579,7 @@ static char *ccb_escape_string_literal(const char *data, int len)
             break;
         case '"':
             esc = "\\\"";
+            break;
         case '\0':
             esc = "\\0";
             break;
@@ -3006,6 +3005,22 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         if (ccb_emit_expr_basic(fb, expr->lhs))
             return 1;
         if (!string_list_appendf(&fb->body, "  unop bitnot %s", cc_type_name(operand_ty)))
+            return 1;
+        return 0;
+    }
+    case ND_LNOT:
+    {
+        if (!expr->lhs)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "logical '!' missing operand");
+            return 1;
+        }
+        if (ccb_emit_condition(fb, expr->lhs))
+            return 1;
+        if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  compare eq %s", cc_type_name(CC_TYPE_I32)))
             return 1;
         return 0;
     }
@@ -4969,8 +4984,9 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
     else
     {
         const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
-        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s",
-                                backend_name, ret_name, param_count, local_count, varargs_suffix))
+        const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
+        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s",
+                                backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix))
             return 1;
     }
 
@@ -5004,6 +5020,111 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
     if (!ccb_module_append_line(mod, ".endfunc"))
         return 1;
 
+    if (fn->force_inline_literal)
+    {
+        if (!ccb_module_appendf(mod, ".force-inline-literal %s", backend_name))
+            return 1;
+    }
+
+    if (fn->is_preserve)
+    {
+        if (!ccb_module_appendf(mod, ".preserve %s", backend_name))
+            return 1;
+    }
+
+    if (fn->is_noreturn)
+    {
+        if (!ccb_module_appendf(mod, ".no-return %s", backend_name))
+            return 1;
+    }
+
+    return 0;
+}
+
+static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const CodegenOptions *opts)
+{
+    (void)opts;
+    if (!mod || !fn || fn->kind != ND_FUNC || !fn->name)
+        return 1;
+
+    if (!fn->literal.lines || fn->literal.count <= 0)
+    {
+        diag_error_at(fn->src, fn->line, fn->col,
+                      "literal function '%s' does not contain any code", fn->name);
+        return 1;
+    }
+
+    const char *backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+    const char *ret_name = cc_type_name(map_type_to_cc(fn->ret_type));
+    int declared_params = (fn->metadata.declared_param_count >= 0)
+                              ? fn->metadata.declared_param_count
+                              : fn->param_count;
+    if (declared_params < 0)
+        declared_params = 0;
+    size_t param_count = (size_t)declared_params;
+    size_t local_count = (fn->metadata.declared_local_count >= 0)
+                             ? (size_t)fn->metadata.declared_local_count
+                             : 0;
+
+    if (fn->metadata.func_line)
+    {
+        if (!ccb_module_append_line(mod, fn->metadata.func_line))
+            return 1;
+    }
+    else
+    {
+        const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
+        const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
+        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s",
+                                backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix))
+            return 1;
+    }
+
+    if (fn->metadata.params_line)
+    {
+        if (!ccb_module_append_line(mod, fn->metadata.params_line))
+            return 1;
+    }
+    else if (fn->param_count > 0 && declared_params == fn->param_count)
+    {
+        if (!ccb_append_params_line(mod, fn))
+            return 1;
+    }
+
+    if (fn->metadata.locals_line)
+    {
+        if (!ccb_module_append_line(mod, fn->metadata.locals_line))
+            return 1;
+    }
+
+    if (!ccb_module_append_line(mod, ".literal"))
+        return 1;
+
+    for (int i = 0; i < fn->literal.count; ++i)
+    {
+        const char *line = fn->literal.lines[i] ? fn->literal.lines[i] : "";
+        if (!ccb_module_append_line(mod, line))
+            return 1;
+    }
+
+    if (!ccb_module_append_line(mod, ".endliteral"))
+        return 1;
+
+    if (!ccb_module_append_line(mod, ".endfunc"))
+        return 1;
+
+    if (fn->force_inline_literal)
+    {
+        if (!ccb_module_appendf(mod, ".force-inline-literal %s", backend_name))
+            return 1;
+    }
+
+    if (fn->is_preserve)
+    {
+        if (!ccb_module_appendf(mod, ".preserve %s", backend_name))
+            return 1;
+    }
+
     if (fn->is_noreturn)
     {
         if (!ccb_module_appendf(mod, ".no-return %s", backend_name))
@@ -5020,6 +5141,8 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
 
     if (fn->is_chancecode)
         return ccb_function_emit_chancecode(mod, fn, opts);
+    if (fn->is_literal)
+        return ccb_function_emit_literal(mod, fn, opts);
 
     CcbFunctionBuilder fb;
     ccb_function_builder_init(&fb, mod, fn);
@@ -5093,6 +5216,11 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         {
             if (!ccb_module_append_line(mod, ".endfunc"))
                 rc = 1;
+            else if (fn->is_preserve)
+            {
+                if (!ccb_module_appendf(mod, ".preserve %s", backend_name))
+                    rc = 1;
+            }
         }
 
         if (!rc && fn->is_noreturn)

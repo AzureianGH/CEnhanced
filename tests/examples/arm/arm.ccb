@@ -1,0 +1,86 @@
+ccbytecode 2
+
+.extern printf params=(ptr) returns=i32 varargs
+
+.func ArmTest_testfun ret=i32 params=2 locals=0
+.params i16 i16
+  load_param 0
+  load_param 1
+  binop add i16
+  convert sext i16 i32
+  ret
+.endfunc
+.func ArmTest_overflowi8 ret=i8 params=0 locals=3
+.locals i8 i8 i8
+  const i8 120
+  store_local 0
+  const i8 10
+  store_local 1
+  load_local 0
+  load_local 1
+  binop add i8
+  store_local 2
+  load_local 2
+  ret
+.endfunc
+.func main ret=i32 params=0 locals=5
+.locals i32 i32 ptr i16 ptr
+  const i16 5
+  const i16 5
+  call ArmTest_testfun i32 (i16,i16)
+  store_local 0
+  const_str "Hello, ARM World! Num %d, %s, %d, %d\x0A"
+  const i32 42
+  const_str "Other String"
+  load_local 0
+  const i16 10
+  const i16 20
+  call ArmTest_testfun i32 (i16,i16)
+  binop add i32
+  call ArmTest_overflowi8 i8 ()
+  convert sext i8 i32
+  call printf i32 (ptr,i32,ptr,i32,i32)
+  drop i32
+  const i32 100
+  store_local 1
+  addr_local 1
+  store_local 2
+  const_str "Pointer value: %d\x0A"
+  load_local 2
+  load_indirect i32
+  call printf i32 (ptr,i32)
+  drop i32
+  const i16 769
+  store_local 3
+  addr_local 3
+  store_local 4
+  const_str "First byte: %d, Second byte: %d\x0A"
+  load_local 4
+  convert bitcast ptr i64
+  const i32 0
+  convert sext i32 i64
+  binop add i64
+  convert bitcast i64 ptr
+  load_indirect i8
+  load_local 4
+  convert bitcast ptr i64
+  const i32 1
+  convert sext i32 i64
+  binop add i64
+  convert bitcast i64 ptr
+  load_indirect i8
+  call printf i32 (ptr,i8,i8)
+  drop i32
+  call ArmTest_testLiteral i32 ()
+  const i32 7
+  binop div i32
+  ret
+.endfunc
+.func ArmTest_testLiteral ret=i32 params=0 locals=0
+.literal
+    mov w9, #5                  // load 5 into w9
+    add w9, w9, #2              // add 2, result = 7
+    mov w0, w9                  // move result into return register
+    ret
+.endliteral
+.endfunc

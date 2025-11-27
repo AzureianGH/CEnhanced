@@ -33,7 +33,13 @@ extern char **environ;
 #define CHANCECODEC_EXT ""
 #endif
 
-typedef enum { ARCH_NONE = 0, ARCH_X86 } TargetArch;
+typedef enum
+{
+  ARCH_NONE = 0,
+  ARCH_X86,
+  ARCH_ARM64,
+  ARCH_BSLASH
+} TargetArch;
 
 static const char *default_chancecodec_name =
 #ifdef _WIN32
@@ -121,7 +127,8 @@ static void verbose_progress(const char *tag, int current, int total)
 
 static const char *asm_syntax_to_option(AsmSyntax syntax)
 {
-  switch (syntax) {
+  switch (syntax)
+  {
   case ASM_INTEL:
     return "intel";
   case ASM_ATT:
@@ -135,9 +142,14 @@ static const char *asm_syntax_to_option(AsmSyntax syntax)
 
 static const char *target_arch_to_macro(TargetArch arch)
 {
-  switch (arch) {
+  switch (arch)
+  {
   case ARCH_X86:
     return "x86";
+  case ARCH_ARM64:
+    return "arm64";
+  case ARCH_BSLASH:
+    return "bslash";
   case ARCH_NONE:
   default:
     return NULL;
@@ -150,17 +162,23 @@ static void verbose_print_config(
     int emit_library, int freestanding, AsmSyntax asm_syntax,
     int include_dir_count, int ce_count, int ccb_count, int cclib_count,
     int obj_count, const char *chancecodec_cmd, int chancecodec_has_override,
-  int needs_chancecodec, const char *chancecode_backend,
-  int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
+    int needs_chancecodec, const char *chancecode_backend,
+    int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
 {
   if (!compiler_verbose_enabled())
-    return;
+      return;
   verbose_section("Configuration");
   verbose_table_row("Output", output_path ? output_path : "(default)");
   char opt_buf[16];
   snprintf(opt_buf, sizeof(opt_buf), "-O%d", opt_level);
   verbose_table_row("Optimization", opt_buf);
-  const char *arch = target_arch == ARCH_X86 ? "x86-64" : "none";
+  const char *arch = "none";
+  if (target_arch == ARCH_X86)
+    arch = "x86-64";
+  else if (target_arch == ARCH_ARM64)
+    arch = "arm64";
+  else if (target_arch == ARCH_BSLASH)
+    arch = "bslash";
   verbose_table_row("Backend", arch);
   verbose_table_row("Target OS", target_os_to_option(target_os));
   verbose_table_row("Stop after .ccb", bool_str(stop_after_ccb));
@@ -184,20 +202,24 @@ static void verbose_print_config(
   verbose_table_row("OBJ inputs", count_buf);
   verbose_table_row("ChanceCode backend",
                     chancecode_backend ? chancecode_backend : "(auto)");
-  if (needs_chancecodec) {
+  if (needs_chancecodec)
+  {
     verbose_table_row("Chancecodec cmd",
                       chancecodec_cmd && *chancecodec_cmd ? chancecodec_cmd
-                                                           : "(unresolved)");
+                                                          : "(unresolved)");
     verbose_table_row("Chancecodec override",
                       bool_str(chancecodec_has_override));
     verbose_table_row("Chancecodec fallback",
                       bool_str(chancecodec_uses_fallback));
-  } else {
+  }
+  else
+  {
     verbose_table_row("Chancecodec cmd", "(not required)");
   }
 }
 
-typedef struct {
+typedef struct
+{
   char *input_path;
   char *src;
   char *stripped;
@@ -216,7 +238,8 @@ int sema_check_unit(SemaContext *sc, Node *unit);
 #define _stricmp strcasecmp
 #endif
 
-static void usage(const char *prog) {
+static void usage(const char *prog)
+{
   fprintf(stderr, "Usage: %s [options] input.ce [more.ce ...]\n", prog);
   fprintf(stderr, "       %s [options] project.ceproj\n", prog);
   fprintf(stderr, "       %s new <template> [name]\n", prog);
@@ -235,7 +258,10 @@ static void usage(const char *prog) {
   fprintf(stderr, "  -m32|-m64         Target bitness (currently -m64 only)\n");
   fprintf(stderr, "  -x86              Select x86-64 backend for "
                   "assembly/object/executable output\n");
-  fprintf(stderr, "  --target-os <os>  Backend target OS: windows|linux\n");
+  fprintf(stderr, "  -arm64            Select ARM64 macOS backend for "
+                  "assembly/object/executable output\n");
+  fprintf(stderr, "  -bslash           Select BSlash backend for assembly output\n");
+  fprintf(stderr, "  --target-os <os>  Backend target OS: windows|linux|macos\n");
   fprintf(
       stderr,
       "  --asm-syntax <s>  Assembly syntax: intel|att|nasm (default intel)\n");
@@ -246,18 +272,20 @@ static void usage(const char *prog) {
           "  -I <dir>          Add include search directory for #include <>\n");
   fprintf(stderr, "  -Nno-formatting  Disable formatting guidance notes\n");
   fprintf(stderr,
-    "  -v, --verbose    Enable verbose diagnostics and progress\n");
+          "  -v, --verbose    Enable verbose diagnostics and progress\n");
   fprintf(stderr,
-    "  -vd             Verbose + optimizer deep-dive visuals\n");
+          "  -vd             Verbose + optimizer deep-dive visuals\n");
   fprintf(stderr,
-    "  --no-ansi        Disable colored diagnostics (verbose too)\n");
+          "  --no-ansi        Disable colored diagnostics (verbose too)\n");
   fprintf(stderr, "  --library         Emit a .cclib library instead of "
-      "compiling/linking\n");
+                  "compiling/linking\n");
 }
 
-static char *read_all(const char *path, int *out_len) {
+static char *read_all(const char *path, int *out_len)
+{
   FILE *f = fopen(path, "rb");
-  if (!f) {
+  if (!f)
+  {
     perror("fopen");
     return NULL;
   }
@@ -265,7 +293,8 @@ static char *read_all(const char *path, int *out_len) {
   long sz = ftell(f);
   fseek(f, 0, SEEK_SET);
   char *buf = (char *)xmalloc((size_t)sz + 1);
-  if (fread(buf, 1, sz, f) != (size_t)sz) {
+  if (fread(buf, 1, sz, f) != (size_t)sz)
+  {
     perror("fread");
     fclose(f);
     free(buf);
@@ -278,7 +307,8 @@ static char *read_all(const char *path, int *out_len) {
   return buf;
 }
 
-static int ends_with_icase(const char *s, const char *suf) {
+static int ends_with_icase(const char *s, const char *suf)
+{
   if (!s || !suf)
     return 0;
   size_t ls = strlen(s), lu = strlen(suf);
@@ -288,7 +318,8 @@ static int ends_with_icase(const char *s, const char *suf) {
 #if defined(_WIN32)
   return _stricmp(p, suf) == 0;
 #else
-  for (size_t i = 0; i < lu; ++i) {
+  for (size_t i = 0; i < lu; ++i)
+  {
     char a = p[i], b = suf[i];
     if (a >= 'A' && a <= 'Z')
       a = (char)(a - 'A' + 'a');
@@ -302,7 +333,8 @@ static int ends_with_icase(const char *s, const char *suf) {
 }
 
 static void split_path(const char *path, char *dir, size_t dsz,
-                       char *base_noext, size_t bsz) {
+                       char *base_noext, size_t bsz)
+{
   if (dir && dsz)
     dir[0] = '\0';
   if (base_noext && bsz)
@@ -313,18 +345,24 @@ static void split_path(const char *path, char *dir, size_t dsz,
   const char *slash2 = strrchr(path, '\\');
   const char *base = path;
   const char *dirend = path;
-  if (slash1 && slash2) {
+  if (slash1 && slash2)
+  {
     const char *mx = (slash1 > slash2 ? slash1 : slash2);
     base = mx + 1;
     dirend = mx;
-  } else if (slash1) {
+  }
+  else if (slash1)
+  {
     base = slash1 + 1;
     dirend = slash1;
-  } else if (slash2) {
+  }
+  else if (slash2)
+  {
     base = slash2 + 1;
     dirend = slash2;
   }
-  if (dir && dsz) {
+  if (dir && dsz)
+  {
     size_t n = (size_t)(dirend - path);
     if (n >= dsz)
       n = dsz - 1;
@@ -332,7 +370,8 @@ static void split_path(const char *path, char *dir, size_t dsz,
     dir[n] = '\0';
   }
   const char *dot = strrchr(base, '.');
-  if (base_noext && bsz) {
+  if (base_noext && bsz)
+  {
     size_t n = dot ? (size_t)(dot - base) : strlen(base);
     if (n >= bsz)
       n = bsz - 1;
@@ -342,7 +381,8 @@ static void split_path(const char *path, char *dir, size_t dsz,
 }
 
 static void build_path_with_ext(const char *dir, const char *base,
-                                const char *ext, char *buffer, size_t bufsz) {
+                                const char *ext, char *buffer, size_t bufsz)
+{
 #ifdef _WIN32
   const char sep = '\\';
 #else
@@ -358,7 +398,8 @@ static void build_path_with_ext(const char *dir, const char *base,
     snprintf(buffer, bufsz, "%s%s", base, ext);
 }
 
-static int is_regular_file(const char *path) {
+static int is_regular_file(const char *path)
+{
   if (!path || !*path)
     return 0;
   struct stat st;
@@ -371,7 +412,8 @@ static int is_regular_file(const char *path) {
 #endif
 }
 
-static int parent_directory(const char *path, char *out, size_t outsz) {
+static int parent_directory(const char *path, char *out, size_t outsz)
+{
   if (!out || outsz == 0)
     return 1;
   out[0] = '\0';
@@ -386,9 +428,11 @@ static int parent_directory(const char *path, char *out, size_t outsz) {
     len--;
   while (len > 0 && (path[len - 1] == '/' || path[len - 1] == '\\'))
     len--;
-  if (len == 0) {
+  if (len == 0)
+  {
 #ifdef _WIN32
-    if (path[0] && path[1] == ':') {
+    if (path[0] && path[1] == ':')
+    {
       out[0] = path[0];
       out[1] = ':';
       out[2] = '\0';
@@ -404,7 +448,8 @@ static int parent_directory(const char *path, char *out, size_t outsz) {
   return 0;
 }
 
-static void strip_wrapping_quotes(const char *in, char *out, size_t outsz) {
+static void strip_wrapping_quotes(const char *in, char *out, size_t outsz)
+{
   if (!out || outsz == 0)
     return;
   out[0] = '\0';
@@ -416,9 +461,11 @@ static void strip_wrapping_quotes(const char *in, char *out, size_t outsz) {
   while (len > 0 && (in[len - 1] == ' ' || in[len - 1] == '\t' ||
                      in[len - 1] == '\n' || in[len - 1] == '\r'))
     --len;
-  if (len >= 2) {
+  if (len >= 2)
+  {
     if ((in[0] == '"' && in[len - 1] == '"') ||
-        (in[0] == '\'' && in[len - 1] == '\'')) {
+        (in[0] == '\'' && in[len - 1] == '\''))
+    {
       ++in;
       len -= 2;
     }
@@ -429,7 +476,8 @@ static void strip_wrapping_quotes(const char *in, char *out, size_t outsz) {
   out[len] = '\0';
 }
 
-static int get_executable_dir(char *dir, size_t dirsz, const char *argv0) {
+static int get_executable_dir(char *dir, size_t dirsz, const char *argv0)
+{
   if (!dir || dirsz == 0)
     return 1;
   dir[0] = '\0';
@@ -441,7 +489,8 @@ static int get_executable_dir(char *dir, size_t dirsz, const char *argv0) {
   char resolved[PATH_MAX];
   if (!argv0)
     argv0 = "";
-  if (!realpath(argv0, resolved)) {
+  if (!realpath(argv0, resolved))
+  {
 #if defined(__linux__)
     ssize_t len = readlink("/proc/self/exe", resolved, sizeof(resolved) - 1);
     if (len <= 0)
@@ -456,20 +505,23 @@ static int get_executable_dir(char *dir, size_t dirsz, const char *argv0) {
   return dir[0] ? 0 : 1;
 }
 
-static int locate_chancecodec(char *out, size_t outsz, const char *exe_dir) {
+static int locate_chancecodec(char *out, size_t outsz, const char *exe_dir)
+{
   if (!out || outsz == 0)
     return 1;
   out[0] = '\0';
   const char *env_cmd = getenv("CHANCECODEC_CMD");
   if (!env_cmd || !*env_cmd)
     env_cmd = getenv("CHANCECODEC");
-  if (env_cmd && *env_cmd) {
+  if (env_cmd && *env_cmd)
+  {
     strip_wrapping_quotes(env_cmd, out, outsz);
     if (out[0])
       return 0;
   }
   const char *env_home = getenv("CHANCECODE_HOME");
-  if (env_home && *env_home) {
+  if (env_home && *env_home)
+  {
     char home_build[1024];
     snprintf(home_build, sizeof(home_build), "%s%cbuild", env_home,
              CHANCE_PATH_SEP);
@@ -482,12 +534,14 @@ static int locate_chancecodec(char *out, size_t outsz, const char *exe_dir) {
     if (is_regular_file(out))
       return 0;
   }
-  if (exe_dir && *exe_dir) {
+  if (exe_dir && *exe_dir)
+  {
     build_path_with_ext(exe_dir, CHANCECODEC_BASE, CHANCECODEC_EXT, out, outsz);
     if (is_regular_file(out))
       return 0;
     char parent[1024];
-    if (parent_directory(exe_dir, parent, sizeof(parent)) == 0 && parent[0]) {
+    if (parent_directory(exe_dir, parent, sizeof(parent)) == 0 && parent[0])
+    {
       char sibling[1024];
       snprintf(sibling, sizeof(sibling), "%s%cChanceCode", parent,
                CHANCE_PATH_SEP);
@@ -503,7 +557,8 @@ static int locate_chancecodec(char *out, size_t outsz, const char *exe_dir) {
         return 0;
       char grandparent[1024];
       if (parent_directory(parent, grandparent, sizeof(grandparent)) == 0 &&
-          grandparent[0]) {
+          grandparent[0])
+      {
         snprintf(sibling, sizeof(sibling), "%s%cChanceCode", grandparent,
                  CHANCE_PATH_SEP);
         build_path_with_ext(sibling, CHANCECODEC_BASE, CHANCECODEC_EXT, out,
@@ -523,21 +578,27 @@ static int locate_chancecodec(char *out, size_t outsz, const char *exe_dir) {
   return 1;
 }
 
-static const char *target_os_to_option(TargetOS os) {
-  switch (os) {
+static const char *target_os_to_option(TargetOS os)
+{
+  switch (os)
+  {
   case OS_WINDOWS:
     return "windows";
   case OS_LINUX:
     return "linux";
+  case OS_MACOS:
+    return "macos";
   default:
     return NULL;
   }
 }
 
-static int equals_icase(const char *a, const char *b) {
+static int equals_icase(const char *a, const char *b)
+{
   if (!a || !b)
     return 0;
-  while (*a && *b) {
+  while (*a && *b)
+  {
     unsigned char ca = (unsigned char)*a;
     unsigned char cb = (unsigned char)*b;
     if (tolower(ca) != tolower(cb))
@@ -548,7 +609,8 @@ static int equals_icase(const char *a, const char *b) {
   return *a == '\0' && *b == '\0';
 }
 
-static void trim_whitespace_inplace(char *text) {
+static void trim_whitespace_inplace(char *text)
+{
   if (!text)
     return;
   char *start = text;
@@ -565,23 +627,27 @@ static void trim_whitespace_inplace(char *text) {
   text[len] = '\0';
 }
 
-static int parse_bool_value(const char *text, int *out) {
+static int parse_bool_value(const char *text, int *out)
+{
   if (!text || !out)
     return -1;
   if (equals_icase(text, "true") || equals_icase(text, "1") ||
-      equals_icase(text, "yes") || equals_icase(text, "on")) {
+      equals_icase(text, "yes") || equals_icase(text, "on"))
+  {
     *out = 1;
     return 0;
   }
   if (equals_icase(text, "false") || equals_icase(text, "0") ||
-      equals_icase(text, "no") || equals_icase(text, "off")) {
+      equals_icase(text, "no") || equals_icase(text, "off"))
+  {
     *out = 0;
     return 0;
   }
   return -1;
 }
 
-static int is_path_absolute_simple(const char *path) {
+static int is_path_absolute_simple(const char *path)
+{
   if (!path || !*path)
     return 0;
 #ifdef _WIN32
@@ -597,19 +663,22 @@ static int is_path_absolute_simple(const char *path) {
 
 static void resolve_project_relative_path(char *dst, size_t dstsz,
                                           const char *base_dir,
-                                          const char *rel) {
+                                          const char *rel)
+{
   if (!dst || dstsz == 0)
     return;
   dst[0] = '\0';
   if (!rel)
     return;
-  if (is_path_absolute_simple(rel) || !base_dir || !*base_dir) {
+  if (is_path_absolute_simple(rel) || !base_dir || !*base_dir)
+  {
     snprintf(dst, dstsz, "%s", rel);
     return;
   }
   size_t base_len = strlen(base_dir);
   int needs_sep = 1;
-  if (base_len > 0) {
+  if (base_len > 0)
+  {
     char last = base_dir[base_len - 1];
     if (last == '/' || last == '\\')
       needs_sep = 0;
@@ -620,7 +689,8 @@ static void resolve_project_relative_path(char *dst, size_t dstsz,
     snprintf(dst, dstsz, "%s%s", base_dir, rel);
 }
 
-typedef struct {
+typedef struct
+{
   const char ***items;
   int *count;
   int *cap;
@@ -630,16 +700,19 @@ typedef struct {
 } ProjectInputList;
 
 static int push_input_entry(const char *value, ProjectInputList list,
-                            int make_copy) {
+                            int make_copy)
+{
   if (!value || !list.items || !list.count || !list.cap || !list.owned_items ||
       !list.owned_count || !list.owned_cap)
     return -1;
   const char **arr = *list.items;
-  if (*list.count == *list.cap) {
+  if (*list.count == *list.cap)
+  {
     int new_cap = *list.cap ? (*list.cap * 2) : 8;
     const char **new_arr =
         (const char **)realloc((void *)arr, sizeof(char *) * (size_t)new_cap);
-    if (!new_arr) {
+    if (!new_arr)
+    {
       fprintf(stderr,
               "error: out of memory while growing project input list\n");
       return -1;
@@ -649,14 +722,17 @@ static int push_input_entry(const char *value, ProjectInputList list,
     *list.cap = new_cap;
   }
   const char *stored = value;
-  if (make_copy) {
+  if (make_copy)
+  {
     char *dup = xstrdup(value);
     char **owned = *list.owned_items;
-    if (*list.owned_count == *list.owned_cap) {
+    if (*list.owned_count == *list.owned_cap)
+    {
       int new_cap = *list.owned_cap ? (*list.owned_cap * 2) : 8;
       char **new_owned =
           (char **)realloc(owned, sizeof(char *) * (size_t)new_cap);
-      if (!new_owned) {
+      if (!new_owned)
+      {
         fprintf(stderr,
                 "error: out of memory while growing project-owned strings\n");
         free(dup);
@@ -676,11 +752,13 @@ static int push_input_entry(const char *value, ProjectInputList list,
 }
 
 static int add_file_list_entries(const char *value, const char *project_dir,
-                                 ProjectInputList list) {
+                                 ProjectInputList list)
+{
   if (!value)
     return 0;
   const char *cursor = value;
-  while (*cursor) {
+  while (*cursor)
+  {
     while (*cursor == ';' || *cursor == ',' || isspace((unsigned char)*cursor))
       ++cursor;
     if (!*cursor)
@@ -693,7 +771,8 @@ static int add_file_list_entries(const char *value, const char *project_dir,
       --end;
     while (start < end && isspace((unsigned char)*start))
       ++start;
-    if (end > start) {
+    if (end > start)
+    {
       size_t len = (size_t)(end - start);
       char token[1024];
       if (len >= sizeof(token))
@@ -713,11 +792,13 @@ static int add_file_list_entries(const char *value, const char *project_dir,
 }
 
 static int add_include_dir_list(const char *value, const char *project_dir,
-                                char ***include_dirs, int *include_dir_count) {
+                                char ***include_dirs, int *include_dir_count)
+{
   if (!value || !include_dirs || !include_dir_count)
     return 0;
   const char *cursor = value;
-  while (*cursor) {
+  while (*cursor)
+  {
     while (*cursor == ';' || *cursor == ',' || isspace((unsigned char)*cursor))
       ++cursor;
     if (!*cursor)
@@ -730,7 +811,8 @@ static int add_include_dir_list(const char *value, const char *project_dir,
       --end;
     while (start < end && isspace((unsigned char)*start))
       ++start;
-    if (end > start) {
+    if (end > start)
+    {
       size_t len = (size_t)(end - start);
       char token[1024];
       if (len >= sizeof(token))
@@ -748,7 +830,8 @@ static int add_include_dir_list(const char *value, const char *project_dir,
   return 0;
 }
 
-static void strip_utf8_bom(char *text) {
+static void strip_utf8_bom(char *text)
+{
   if (!text)
     return;
   unsigned char *u = (unsigned char *)text;
@@ -762,9 +845,11 @@ static int parse_ceproj_file(
     char ***include_dirs, int *include_dir_count, int *output_overridden,
     const char **out, char **project_output_alloc, TargetArch *target_arch,
     const char **chancecode_backend, int *stop_after_ccb, int *stop_after_asm,
-    int *emit_library, int *no_link, int *freestanding, TargetOS *target_os) {
+    int *emit_library, int *no_link, int *freestanding, TargetOS *target_os)
+{
   FILE *f = fopen(proj_path, "rb");
-  if (!f) {
+  if (!f)
+  {
     fprintf(stderr, "error: failed to open project file '%s': %s\n", proj_path,
             strerror(errno));
     return -1;
@@ -776,7 +861,8 @@ static int parse_ceproj_file(
   char line[2048];
   int lineno = 0;
   int rc = 0;
-  while (fgets(line, sizeof(line), f)) {
+  while (fgets(line, sizeof(line), f))
+  {
     lineno++;
     char work[2048];
     snprintf(work, sizeof(work), "%s", line);
@@ -792,7 +878,8 @@ static int parse_ceproj_file(
     if (work[0] == '[')
       continue;
     char *eq = strchr(work, '=');
-    if (!eq) {
+    if (!eq)
+    {
       fprintf(stderr, "error: expected key=value in '%s' (line %d)\n",
               proj_path, lineno);
       rc = -1;
@@ -810,82 +897,137 @@ static int parse_ceproj_file(
     char value_buf[2048];
     strip_wrapping_quotes(value, value_buf, sizeof(value_buf));
     trim_whitespace_inplace(value_buf);
-    if (strcmp(key, "ce") == 0 || strcmp(key, "source") == 0) {
-      if (add_file_list_entries(value_buf, project_dir, ce_list) != 0) {
+    if (strcmp(key, "ce") == 0 || strcmp(key, "source") == 0)
+    {
+      if (add_file_list_entries(value_buf, project_dir, ce_list) != 0)
+      {
         rc = -1;
         break;
       }
-    } else if (strcmp(key, "ccb") == 0) {
-      if (add_file_list_entries(value_buf, project_dir, ccb_list) != 0) {
+    }
+    else if (strcmp(key, "ccb") == 0)
+    {
+      if (add_file_list_entries(value_buf, project_dir, ccb_list) != 0)
+      {
         rc = -1;
         break;
       }
-    } else if (strcmp(key, "cclib") == 0 || strcmp(key, "library") == 0) {
-      if (add_file_list_entries(value_buf, project_dir, cclib_list) != 0) {
+    }
+    else if (strcmp(key, "cclib") == 0 || strcmp(key, "library") == 0)
+    {
+      if (add_file_list_entries(value_buf, project_dir, cclib_list) != 0)
+      {
         rc = -1;
         break;
       }
-    } else if (strcmp(key, "obj") == 0 || strcmp(key, "object") == 0) {
-      if (add_file_list_entries(value_buf, project_dir, obj_list) != 0) {
+    }
+    else if (strcmp(key, "obj") == 0 || strcmp(key, "object") == 0)
+    {
+      if (add_file_list_entries(value_buf, project_dir, obj_list) != 0)
+      {
         rc = -1;
         break;
       }
-    } else if (strcmp(key, "include") == 0 || strcmp(key, "includedir") == 0) {
+    }
+    else if (strcmp(key, "include") == 0 || strcmp(key, "includedir") == 0)
+    {
       if (add_include_dir_list(value_buf, project_dir, include_dirs,
-                               include_dir_count) != 0) {
+                               include_dir_count) != 0)
+      {
         rc = -1;
         break;
       }
-    } else if (strcmp(key, "output") == 0) {
+    }
+    else if (strcmp(key, "output") == 0)
+    {
       if (!out || !project_output_alloc || !output_overridden)
         continue;
       char resolved[1024];
       resolve_project_relative_path(resolved, sizeof(resolved), project_dir,
                                     value_buf);
-      if (*project_output_alloc) {
+      if (*project_output_alloc)
+      {
         free(*project_output_alloc);
         *project_output_alloc = NULL;
       }
       *project_output_alloc = xstrdup(resolved);
       *out = *project_output_alloc;
       *output_overridden = 1;
-    } else if (strcmp(key, "backend") == 0) {
-      if (equals_icase(value_buf, "x86")) {
+    }
+    else if (strcmp(key, "backend") == 0)
+    {
+      if (equals_icase(value_buf, "x86"))
+      {
         if (target_arch)
           *target_arch = ARCH_X86;
         if (chancecode_backend)
           *chancecode_backend = "x86-gas";
-      } else if (equals_icase(value_buf, "none")) {
+      }
+      else if (equals_icase(value_buf, "arm64") ||
+               equals_icase(value_buf, "arm64-macos"))
+      {
+        if (target_arch)
+          *target_arch = ARCH_ARM64;
+        if (chancecode_backend)
+          *chancecode_backend = "arm64-macos";
+        if (target_os)
+          *target_os = OS_MACOS;
+      }
+      else if (equals_icase(value_buf, "bslash") || equals_icase(value_buf, "bslash"))
+      {
+        if (target_arch)
+          *target_arch = ARCH_BSLASH;
+        if (chancecode_backend)
+          *chancecode_backend = "bslash";
+        if (stop_after_asm)
+          *stop_after_asm = 1;
+      }
+      else if (equals_icase(value_buf, "none"))
+      {
         if (target_arch)
           *target_arch = ARCH_NONE;
         if (chancecode_backend)
           *chancecode_backend = NULL;
-      } else {
+      }
+      else
+      {
         fprintf(stderr, "error: unknown backend '%s' in '%s' (line %d)\n",
                 value_buf, proj_path, lineno);
         rc = -1;
         break;
       }
-    } else if (strcmp(key, "type") == 0) {
-      if (equals_icase(value_buf, "library")) {
+    }
+    else if (strcmp(key, "type") == 0)
+    {
+      if (equals_icase(value_buf, "library"))
+      {
         if (emit_library)
           *emit_library = 1;
       }
-    } else if (strcmp(key, "stop_after") == 0 ||
-               strcmp(key, "stopafter") == 0) {
+    }
+    else if (strcmp(key, "stop_after") == 0 ||
+             strcmp(key, "stopafter") == 0)
+    {
       if ((!stop_after_asm || !*stop_after_asm) &&
-          (!stop_after_ccb || !*stop_after_ccb)) {
-        if (equals_icase(value_buf, "ccb")) {
+          (!stop_after_ccb || !*stop_after_ccb))
+      {
+        if (equals_icase(value_buf, "ccb"))
+        {
           if (stop_after_ccb)
             *stop_after_ccb = 1;
-        } else if (equals_icase(value_buf, "asm")) {
+        }
+        else if (equals_icase(value_buf, "asm"))
+        {
           if (stop_after_asm)
             *stop_after_asm = 1;
         }
       }
-    } else if (strcmp(key, "no_link") == 0 || strcmp(key, "nolink") == 0) {
+    }
+    else if (strcmp(key, "no_link") == 0 || strcmp(key, "nolink") == 0)
+    {
       int val = 0;
-      if (parse_bool_value(value_buf, &val) != 0) {
+      if (parse_bool_value(value_buf, &val) != 0)
+      {
         fprintf(stderr,
                 "error: expected boolean for no_link in '%s' (line %d)\n",
                 proj_path, lineno);
@@ -894,9 +1036,12 @@ static int parse_ceproj_file(
       }
       if (no_link)
         *no_link = val;
-    } else if (strcmp(key, "freestanding") == 0) {
+    }
+    else if (strcmp(key, "freestanding") == 0)
+    {
       int val = 0;
-      if (parse_bool_value(value_buf, &val) != 0) {
+      if (parse_bool_value(value_buf, &val) != 0)
+      {
         fprintf(stderr,
                 "error: expected boolean for freestanding in '%s' (line %d)\n",
                 proj_path, lineno);
@@ -905,20 +1050,34 @@ static int parse_ceproj_file(
       }
       if (freestanding)
         *freestanding = val;
-    } else if (strcmp(key, "target_os") == 0 || strcmp(key, "targetos") == 0) {
-      if (equals_icase(value_buf, "windows")) {
+    }
+    else if (strcmp(key, "target_os") == 0 || strcmp(key, "targetos") == 0)
+    {
+      if (equals_icase(value_buf, "windows"))
+      {
         if (target_os)
           *target_os = OS_WINDOWS;
-      } else if (equals_icase(value_buf, "linux")) {
+      }
+      else if (equals_icase(value_buf, "linux"))
+      {
         if (target_os)
           *target_os = OS_LINUX;
-      } else {
+      }
+      else if (equals_icase(value_buf, "macos"))
+      {
+        if (target_os)
+          *target_os = OS_MACOS;
+      }
+      else
+      {
         fprintf(stderr, "error: unknown target_os '%s' in '%s' (line %d)\n",
                 value_buf, proj_path, lineno);
         rc = -1;
         break;
       }
-    } else {
+    }
+    else
+    {
       fprintf(stderr,
               "warning: ignoring unrecognized key '%s' in '%s' (line %d)\n",
               key, proj_path, lineno);
@@ -928,32 +1087,38 @@ static int parse_ceproj_file(
   return rc;
 }
 
-static int path_has_separator(const char *name) {
+static int path_has_separator(const char *name)
+{
   if (!name)
     return 0;
-  for (const char *p = name; *p; ++p) {
+  for (const char *p = name; *p; ++p)
+  {
     if (*p == '/' || *p == '\\')
       return 1;
   }
   return 0;
 }
 
-static int create_directory_checked(const char *path, int fail_if_exists) {
+static int create_directory_checked(const char *path, int fail_if_exists)
+{
   if (!path || !*path)
     return -1;
   struct stat st;
-  if (stat(path, &st) == 0) {
+  if (stat(path, &st) == 0)
+  {
 #if defined(S_ISDIR)
     int is_dir = S_ISDIR(st.st_mode) != 0;
 #else
     int is_dir = (st.st_mode & _S_IFDIR) != 0;
 #endif
-    if (!is_dir) {
+    if (!is_dir)
+    {
       fprintf(stderr,
               "error: path '%s' already exists and is not a directory\n", path);
       return -1;
     }
-    if (fail_if_exists) {
+    if (fail_if_exists)
+    {
       fprintf(stderr, "error: directory '%s' already exists\n", path);
       return -1;
     }
@@ -974,16 +1139,19 @@ static int create_directory_checked(const char *path, int fail_if_exists) {
   return 0;
 }
 
-static int write_text_file(const char *path, const char *content) {
+static int write_text_file(const char *path, const char *content)
+{
   if (!path || !content)
     return -1;
   FILE *f = fopen(path, "wb");
-  if (!f) {
+  if (!f)
+  {
     fprintf(stderr, "error: failed to write '%s': %s\n", path, strerror(errno));
     return -1;
   }
   size_t len = strlen(content);
-  if (fwrite(content, 1, len, f) != len) {
+  if (fwrite(content, 1, len, f) != len)
+  {
     fprintf(stderr, "error: failed to write '%s': %s\n", path, strerror(errno));
     fclose(f);
     return -1;
@@ -992,41 +1160,49 @@ static int write_text_file(const char *path, const char *content) {
   return 0;
 }
 
-static int handle_new_command(int argc, char **argv) {
-  if (argc < 2) {
+static int handle_new_command(int argc, char **argv)
+{
+  if (argc < 2)
+  {
     fprintf(stderr, "Usage: chancec new <Template> [ProjectName]\n");
     return 2;
   }
-  if (!equals_icase(argv[0], "new")) {
+  if (!equals_icase(argv[0], "new"))
+  {
     fprintf(stderr, "error: internal new-command usage mismatch\n");
     return 2;
   }
   const char *template_name = argv[1];
   if (equals_icase(template_name, "--help") ||
-      equals_icase(template_name, "-h")) {
+      equals_icase(template_name, "-h"))
+  {
     fprintf(stderr, "Usage: chancec new Console [ProjectName]\n");
     fprintf(stderr, "Creates a new Chance project in a directory matching the "
                     "project name.\n");
     return 0;
   }
-  if (!equals_icase(template_name, "console")) {
+  if (!equals_icase(template_name, "console"))
+  {
     fprintf(stderr,
             "error: unknown template '%s'. Supported templates: Console\n",
             template_name);
     return 2;
   }
-  if (argc > 3) {
+  if (argc > 3)
+  {
     fprintf(stderr, "error: too many arguments for 'chancec new'. Usage: "
                     "chancec new Console [ProjectName]\n");
     return 2;
   }
   const char *project_name =
       (argc >= 3 && argv[2] && argv[2][0]) ? argv[2] : "ConsoleApp";
-  if (strcmp(project_name, ".") == 0 || strcmp(project_name, "..") == 0) {
+  if (strcmp(project_name, ".") == 0 || strcmp(project_name, "..") == 0)
+  {
     fprintf(stderr, "error: project name '%s' is not allowed\n", project_name);
     return 2;
   }
-  if (path_has_separator(project_name)) {
+  if (path_has_separator(project_name))
+  {
     fprintf(stderr,
             "error: project name '%s' must not contain path separators\n",
             project_name);
@@ -1096,7 +1272,8 @@ static int handle_new_command(int argc, char **argv) {
   return 0;
 }
 
-typedef struct LibraryFunction {
+typedef struct LibraryFunction
+{
   char *name;
   char *backend_name;
   char *return_spec;
@@ -1107,13 +1284,15 @@ typedef struct LibraryFunction {
   int is_exposed;
 } LibraryFunction;
 
-typedef struct LibraryGlobal {
+typedef struct LibraryGlobal
+{
   char *name;
   char *type_spec;
   int is_const;
 } LibraryGlobal;
 
-typedef struct LibraryStruct {
+typedef struct LibraryStruct
+{
   char *name;
   char **field_names;
   char **field_specs;
@@ -1123,7 +1302,8 @@ typedef struct LibraryStruct {
   int is_exposed;
 } LibraryStruct;
 
-typedef struct LibraryEnum {
+typedef struct LibraryEnum
+{
   char *name;
   char **value_names;
   int32_t *values;
@@ -1131,7 +1311,8 @@ typedef struct LibraryEnum {
   int is_exposed;
 } LibraryEnum;
 
-typedef struct LibraryModuleData {
+typedef struct LibraryModuleData
+{
   char *module_name;
   LibraryFunction *functions;
   int function_count;
@@ -1151,7 +1332,8 @@ typedef struct LibraryModuleData {
   size_t ccbin_size;
 } LibraryModuleData;
 
-typedef struct LoadedLibraryFunction {
+typedef struct LoadedLibraryFunction
+{
   char *name;
   char *backend_name;
   char *qualified_name;
@@ -1164,7 +1346,8 @@ typedef struct LoadedLibraryFunction {
   int is_exposed;
 } LoadedLibraryFunction;
 
-typedef struct LoadedLibrary {
+typedef struct LoadedLibrary
+{
   char *path;
   CclibFile file;
   Type **allocated_types;
@@ -1173,13 +1356,15 @@ typedef struct LoadedLibrary {
   char **ccbin_temp_paths;
 } LoadedLibrary;
 
-static char *dup_string_or_null(const char *s) {
+static char *dup_string_or_null(const char *s)
+{
   if (!s)
     return NULL;
   return xstrdup(s);
 }
 
-static char *format_string(const char *fmt, ...) {
+static char *format_string(const char *fmt, ...)
+{
   va_list ap;
   va_start(ap, fmt);
   int needed = vsnprintf(NULL, 0, fmt, ap);
@@ -1194,13 +1379,15 @@ static char *format_string(const char *fmt, ...) {
   return buffer;
 }
 
-static char *module_name_to_prefix_copy(const char *module_full) {
+static char *module_name_to_prefix_copy(const char *module_full)
+{
   if (!module_full || !*module_full)
     return NULL;
   size_t len = strlen(module_full);
   char *copy = (char *)xmalloc(len + 1);
   memcpy(copy, module_full, len + 1);
-  for (size_t i = 0; i < len; ++i) {
+  for (size_t i = 0; i < len; ++i)
+  {
     if (copy[i] == '.')
       copy[i] = '_';
   }
@@ -1208,7 +1395,8 @@ static char *module_name_to_prefix_copy(const char *module_full) {
 }
 
 static char *make_backend_name_from_module(const char *module_full,
-                                           const char *fn_name) {
+                                           const char *fn_name)
+{
   if (!module_full || !fn_name)
     return NULL;
   char *prefix = module_name_to_prefix_copy(module_full);
@@ -1220,14 +1408,16 @@ static char *make_backend_name_from_module(const char *module_full,
 }
 
 static char *make_qualified_function_name(const char *module_full,
-                                          const char *fn_name) {
+                                          const char *fn_name)
+{
   if (!module_full || !fn_name)
     return NULL;
   return format_string("%s.%s", module_full, fn_name);
 }
 
 static int read_file_bytes(const char *path, uint8_t **out_data,
-                           size_t *out_size) {
+                           size_t *out_size)
+{
   if (!path || !out_data || !out_size)
     return 1;
   *out_data = NULL;
@@ -1235,30 +1425,36 @@ static int read_file_bytes(const char *path, uint8_t **out_data,
   FILE *f = fopen(path, "rb");
   if (!f)
     return errno ? errno : EIO;
-  if (fseek(f, 0, SEEK_END) != 0) {
+  if (fseek(f, 0, SEEK_END) != 0)
+  {
     int err = errno ? errno : EIO;
     fclose(f);
     return err;
   }
   long sz = ftell(f);
-  if (sz < 0) {
+  if (sz < 0)
+  {
     int err = errno ? errno : EIO;
     fclose(f);
     return err;
   }
-  if (fseek(f, 0, SEEK_SET) != 0) {
+  if (fseek(f, 0, SEEK_SET) != 0)
+  {
     int err = errno ? errno : EIO;
     fclose(f);
     return err;
   }
   uint8_t *buf = (uint8_t *)malloc((size_t)sz);
-  if (!buf) {
+  if (!buf)
+  {
     fclose(f);
     return ENOMEM;
   }
-  if (sz > 0) {
+  if (sz > 0)
+  {
     size_t read = fread(buf, 1, (size_t)sz, f);
-    if (read != (size_t)sz) {
+    if (read != (size_t)sz)
+    {
       int err = ferror(f) ? errno : EIO;
       free(buf);
       fclose(f);
@@ -1272,22 +1468,26 @@ static int read_file_bytes(const char *path, uint8_t **out_data,
 }
 
 static int write_file_bytes(const char *path, const uint8_t *data,
-                            size_t size) {
+                            size_t size)
+{
   if (!path)
     return EINVAL;
   FILE *f = fopen(path, "wb");
   if (!f)
     return errno ? errno : EIO;
-  if (size > 0 && data) {
+  if (size > 0 && data)
+  {
     size_t written = fwrite(data, 1, size, f);
-    if (written != size) {
+    if (written != size)
+    {
       int err = ferror(f) ? errno : EIO;
       fclose(f);
       remove(path);
       return err ? err : EIO;
     }
   }
-  if (fclose(f) != 0) {
+  if (fclose(f) != 0)
+  {
     int err = errno ? errno : EIO;
     remove(path);
     return err;
@@ -1313,7 +1513,8 @@ static Type builtin_ty_void = {.kind = TY_VOID};
 static Type builtin_ty_char = {.kind = TY_CHAR};
 static Type builtin_ty_bool = {.kind = TY_BOOL};
 
-static char *type_to_spec(Type *ty) {
+static char *type_to_spec(Type *ty)
+{
   if (!ty)
     return xstrdup("void");
 
@@ -1321,7 +1522,8 @@ static char *type_to_spec(Type *ty) {
   if (!ty)
     return xstrdup("void");
 
-  switch (ty->kind) {
+  switch (ty->kind)
+  {
   case TY_I8:
     return xstrdup("i8");
   case TY_U8:
@@ -1350,20 +1552,23 @@ static char *type_to_spec(Type *ty) {
     return xstrdup("char");
   case TY_BOOL:
     return xstrdup("bool");
-  case TY_PTR: {
+  case TY_PTR:
+  {
     char *inner = type_to_spec(ty->pointee);
     char *res = format_string("ptr(%s)", inner ? inner : "void");
     free(inner);
     return res;
   }
-  case TY_STRUCT: {
+  case TY_STRUCT:
+  {
     const char *module = module_registry_find_struct_module(ty);
     const char *name = ty->struct_name ? ty->struct_name : "";
     if (!module)
       module = "";
     return format_string("struct(%s,%s)", module, name);
   }
-  case TY_IMPORT: {
+  case TY_IMPORT:
+  {
     const char *module = ty->import_module ? ty->import_module : "";
     const char *name = ty->import_type_name ? ty->import_type_name : "";
     return format_string("import(%s,%s)", module, name);
@@ -1374,7 +1579,8 @@ static char *type_to_spec(Type *ty) {
   return xstrdup("void");
 }
 
-static Type *spec_to_type(const char *spec) {
+static Type *spec_to_type(const char *spec)
+{
   if (!spec || !*spec)
     return &builtin_ty_void;
 
@@ -1407,7 +1613,8 @@ static Type *spec_to_type(const char *spec) {
   if (strcmp(spec, "bool") == 0)
     return &builtin_ty_bool;
 
-  if (strncmp(spec, "ptr(", 4) == 0) {
+  if (strncmp(spec, "ptr(", 4) == 0)
+  {
     size_t len = strlen(spec);
     if (len < 6 || spec[len - 1] != ')')
       return &builtin_ty_void;
@@ -1419,7 +1626,8 @@ static Type *spec_to_type(const char *spec) {
     return type_ptr(inner_type);
   }
 
-  if (strncmp(spec, "struct(", 7) == 0 || strncmp(spec, "import(", 7) == 0) {
+  if (strncmp(spec, "struct(", 7) == 0 || strncmp(spec, "import(", 7) == 0)
+  {
     int is_import = (spec[0] == 'i');
     const char *open = strchr(spec, '(');
     const char *comma = open ? strchr(open + 1, ',') : NULL;
@@ -1437,7 +1645,8 @@ static Type *spec_to_type(const char *spec) {
     Type *resolved = NULL;
     if (!is_import)
       resolved = module_registry_lookup_struct(module, name);
-    if (resolved) {
+    if (resolved)
+    {
       free(module);
       free(name);
       return resolved;
@@ -1454,14 +1663,17 @@ static Type *spec_to_type(const char *spec) {
 
 static LibraryModuleData *find_or_add_module(LibraryModuleData **modules,
                                              int *module_count, int *module_cap,
-                                             const char *module_name) {
+                                             const char *module_name)
+{
   if (!module_name || !*module_name)
     return NULL;
-  for (int i = 0; i < *module_count; ++i) {
+  for (int i = 0; i < *module_count; ++i)
+  {
     if (strcmp((*modules)[i].module_name, module_name) == 0)
       return &(*modules)[i];
   }
-  if (*module_count == *module_cap) {
+  if (*module_count == *module_cap)
+  {
     int new_cap = *module_cap ? *module_cap * 2 : 4;
     LibraryModuleData *grown = (LibraryModuleData *)realloc(
         *modules, (size_t)new_cap * sizeof(LibraryModuleData));
@@ -1479,10 +1691,12 @@ static LibraryModuleData *find_or_add_module(LibraryModuleData **modules,
 }
 
 static int append_library_function(LibraryModuleData *mod,
-                                   const LibraryFunction *fn) {
+                                   const LibraryFunction *fn)
+{
   if (!mod || !fn)
     return 1;
-  if (mod->function_count == mod->function_cap) {
+  if (mod->function_count == mod->function_cap)
+  {
     int new_cap = mod->function_cap ? mod->function_cap * 2 : 4;
     LibraryFunction *grown = (LibraryFunction *)realloc(
         mod->functions, (size_t)new_cap * sizeof(LibraryFunction));
@@ -1496,10 +1710,12 @@ static int append_library_function(LibraryModuleData *mod,
 }
 
 static int append_library_global(LibraryModuleData *mod,
-                                 const LibraryGlobal *gl) {
+                                 const LibraryGlobal *gl)
+{
   if (!mod || !gl)
     return 1;
-  if (mod->global_count == mod->global_cap) {
+  if (mod->global_count == mod->global_cap)
+  {
     int new_cap = mod->global_cap ? mod->global_cap * 2 : 4;
     LibraryGlobal *grown = (LibraryGlobal *)realloc(
         mod->globals, (size_t)new_cap * sizeof(LibraryGlobal));
@@ -1513,10 +1729,12 @@ static int append_library_global(LibraryModuleData *mod,
 }
 
 static int append_library_struct(LibraryModuleData *mod,
-                                 const LibraryStruct *st) {
+                                 const LibraryStruct *st)
+{
   if (!mod || !st)
     return 1;
-  if (mod->struct_count == mod->struct_cap) {
+  if (mod->struct_count == mod->struct_cap)
+  {
     int new_cap = mod->struct_cap ? mod->struct_cap * 2 : 4;
     LibraryStruct *grown = (LibraryStruct *)realloc(
         mod->structs, (size_t)new_cap * sizeof(LibraryStruct));
@@ -1529,10 +1747,12 @@ static int append_library_struct(LibraryModuleData *mod,
   return 0;
 }
 
-static int append_library_enum(LibraryModuleData *mod, const LibraryEnum *en) {
+static int append_library_enum(LibraryModuleData *mod, const LibraryEnum *en)
+{
   if (!mod || !en)
     return 1;
-  if (mod->enum_count == mod->enum_cap) {
+  if (mod->enum_count == mod->enum_cap)
+  {
     int new_cap = mod->enum_cap ? mod->enum_cap * 2 : 4;
     LibraryEnum *grown = (LibraryEnum *)realloc(
         mod->enums, (size_t)new_cap * sizeof(LibraryEnum));
@@ -1545,13 +1765,15 @@ static int append_library_enum(LibraryModuleData *mod, const LibraryEnum *en) {
   return 0;
 }
 
-static void free_library_function(LibraryFunction *fn) {
+static void free_library_function(LibraryFunction *fn)
+{
   if (!fn)
     return;
   free(fn->name);
   free(fn->backend_name);
   free(fn->return_spec);
-  if (fn->param_specs) {
+  if (fn->param_specs)
+  {
     for (int i = 0; i < fn->param_count; ++i)
       free(fn->param_specs[i]);
     free(fn->param_specs);
@@ -1559,7 +1781,8 @@ static void free_library_function(LibraryFunction *fn) {
   memset(fn, 0, sizeof(*fn));
 }
 
-static void free_library_global(LibraryGlobal *gl) {
+static void free_library_global(LibraryGlobal *gl)
+{
   if (!gl)
     return;
   free(gl->name);
@@ -1567,16 +1790,19 @@ static void free_library_global(LibraryGlobal *gl) {
   memset(gl, 0, sizeof(*gl));
 }
 
-static void free_library_struct(LibraryStruct *st) {
+static void free_library_struct(LibraryStruct *st)
+{
   if (!st)
     return;
   free(st->name);
-  if (st->field_names) {
+  if (st->field_names)
+  {
     for (uint32_t i = 0; i < st->field_count; ++i)
       free(st->field_names[i]);
     free(st->field_names);
   }
-  if (st->field_specs) {
+  if (st->field_specs)
+  {
     for (uint32_t i = 0; i < st->field_count; ++i)
       free(st->field_specs[i]);
     free(st->field_specs);
@@ -1585,11 +1811,13 @@ static void free_library_struct(LibraryStruct *st) {
   memset(st, 0, sizeof(*st));
 }
 
-static void free_library_enum(LibraryEnum *en) {
+static void free_library_enum(LibraryEnum *en)
+{
   if (!en)
     return;
   free(en->name);
-  if (en->value_names) {
+  if (en->value_names)
+  {
     for (uint32_t i = 0; i < en->value_count; ++i)
       free(en->value_names[i]);
     free(en->value_names);
@@ -1598,7 +1826,8 @@ static void free_library_enum(LibraryEnum *en) {
   memset(en, 0, sizeof(*en));
 }
 
-static void free_library_module(LibraryModuleData *mod) {
+static void free_library_module(LibraryModuleData *mod)
+{
   if (!mod)
     return;
   free(mod->module_name);
@@ -1620,7 +1849,8 @@ static void free_library_module(LibraryModuleData *mod) {
   memset(mod, 0, sizeof(*mod));
 }
 
-static void free_library_module_array(LibraryModuleData *mods, int count) {
+static void free_library_module_array(LibraryModuleData *mods, int count)
+{
   if (!mods)
     return;
   for (int i = 0; i < count; ++i)
@@ -1629,10 +1859,12 @@ static void free_library_module_array(LibraryModuleData *mods, int count) {
 }
 
 static int library_module_has_function(const LibraryModuleData *mod,
-                                       const char *name) {
+                                       const char *name)
+{
   if (!mod || !name)
     return 0;
-  for (int i = 0; i < mod->function_count; ++i) {
+  for (int i = 0; i < mod->function_count; ++i)
+  {
     if (mod->functions[i].name && strcmp(mod->functions[i].name, name) == 0)
       return 1;
   }
@@ -1640,10 +1872,12 @@ static int library_module_has_function(const LibraryModuleData *mod,
 }
 
 static int library_module_has_struct(const LibraryModuleData *mod,
-                                     const char *name) {
+                                     const char *name)
+{
   if (!mod || !name)
     return 0;
-  for (int i = 0; i < mod->struct_count; ++i) {
+  for (int i = 0; i < mod->struct_count; ++i)
+  {
     if (mod->structs[i].name && strcmp(mod->structs[i].name, name) == 0)
       return 1;
   }
@@ -1651,10 +1885,12 @@ static int library_module_has_struct(const LibraryModuleData *mod,
 }
 
 static int library_module_has_enum(const LibraryModuleData *mod,
-                                   const char *name) {
+                                   const char *name)
+{
   if (!mod || !name)
     return 0;
-  for (int i = 0; i < mod->enum_count; ++i) {
+  for (int i = 0; i < mod->enum_count; ++i)
+  {
     if (mod->enums[i].name && strcmp(mod->enums[i].name, name) == 0)
       return 1;
   }
@@ -1662,10 +1898,12 @@ static int library_module_has_enum(const LibraryModuleData *mod,
 }
 
 static int collect_functions_from_unit(const Node *unit,
-                                       LibraryModuleData *mod) {
+                                       LibraryModuleData *mod)
+{
   if (!unit || unit->kind != ND_UNIT || !mod)
     return 0;
-  for (int i = 0; i < unit->stmt_count; ++i) {
+  for (int i = 0; i < unit->stmt_count; ++i)
+  {
     const Node *fn = unit->stmts[i];
     if (!fn || fn->kind != ND_FUNC)
       continue;
@@ -1681,19 +1919,23 @@ static int collect_functions_from_unit(const Node *unit,
     Type *ret_ty = fn->ret_type ? fn->ret_type : type_i32();
     out.return_spec = type_to_spec(ret_ty);
     out.param_count = fn->param_count;
-    if (out.param_count > 0) {
+    if (out.param_count > 0)
+    {
       out.param_specs =
           (char **)xcalloc((size_t)out.param_count, sizeof(char *));
-      if (!out.param_specs) {
+      if (!out.param_specs)
+      {
         free_library_function(&out);
         return 1;
       }
-      for (int pi = 0; pi < out.param_count; ++pi) {
+      for (int pi = 0; pi < out.param_count; ++pi)
+      {
         Type *pt = (fn->param_types && pi < fn->param_count)
                        ? fn->param_types[pi]
                        : NULL;
         out.param_specs[pi] = type_to_spec(pt);
-        if (!out.param_specs[pi]) {
+        if (!out.param_specs[pi])
+        {
           free_library_function(&out);
           return 1;
         }
@@ -1702,7 +1944,8 @@ static int collect_functions_from_unit(const Node *unit,
     out.is_varargs = fn->is_varargs ? 1 : 0;
     out.is_noreturn = fn->is_noreturn;
     out.is_exposed = fn->is_exposed;
-    if (append_library_function(mod, &out) != 0) {
+    if (append_library_function(mod, &out) != 0)
+    {
       free_library_function(&out);
       return 1;
     }
@@ -1711,11 +1954,13 @@ static int collect_functions_from_unit(const Node *unit,
 }
 
 static int collect_structs_for_module(const char *module_name,
-                                      LibraryModuleData *mod) {
+                                      LibraryModuleData *mod)
+{
   if (!module_name || !mod)
     return 0;
   int total = module_registry_struct_entry_count();
-  for (int i = 0; i < total; ++i) {
+  for (int i = 0; i < total; ++i)
+  {
     const char *entry_module = module_registry_struct_entry_module(i);
     if (!entry_module || strcmp(entry_module, module_name) != 0)
       continue;
@@ -1728,16 +1973,19 @@ static int collect_structs_for_module(const char *module_name,
     LibraryStruct st = {0};
     st.name = struct_name ? xstrdup(struct_name) : NULL;
     int field_count = ty->strct.field_count;
-    if (field_count > 0) {
+    if (field_count > 0)
+    {
       st.field_names = (char **)xcalloc((size_t)field_count, sizeof(char *));
       st.field_specs = (char **)xcalloc((size_t)field_count, sizeof(char *));
       st.field_offsets =
           (uint32_t *)xcalloc((size_t)field_count, sizeof(uint32_t));
-      if (!st.field_names || !st.field_specs || !st.field_offsets) {
+      if (!st.field_names || !st.field_specs || !st.field_offsets)
+      {
         free_library_struct(&st);
         return 1;
       }
-      for (int fi = 0; fi < field_count; ++fi) {
+      for (int fi = 0; fi < field_count; ++fi)
+      {
         const char *fname = (ty->strct.field_names && fi < field_count)
                                 ? ty->strct.field_names[fi]
                                 : NULL;
@@ -1750,7 +1998,8 @@ static int collect_structs_for_module(const char *module_name,
                          ? ty->strct.field_offsets[fi]
                          : 0;
         st.field_offsets[fi] = offset < 0 ? 0u : (uint32_t)offset;
-        if (!st.field_specs[fi]) {
+        if (!st.field_specs[fi])
+        {
           free_library_struct(&st);
           return 1;
         }
@@ -1760,7 +2009,8 @@ static int collect_structs_for_module(const char *module_name,
     st.size_bytes =
         ty->strct.size_bytes < 0 ? 0u : (uint32_t)ty->strct.size_bytes;
     st.is_exposed = ty->is_exposed != 0;
-    if (append_library_struct(mod, &st) != 0) {
+    if (append_library_struct(mod, &st) != 0)
+    {
       free_library_struct(&st);
       return 1;
     }
@@ -1769,12 +2019,14 @@ static int collect_structs_for_module(const char *module_name,
 }
 
 static int collect_enums_for_module(const char *module_name,
-                                    LibraryModuleData *mod) {
+                                    LibraryModuleData *mod)
+{
   if (!module_name || !mod)
     return 0;
   int enum_total = module_registry_enum_entry_count();
   int value_total = module_registry_enum_value_entry_count();
-  for (int i = 0; i < enum_total; ++i) {
+  for (int i = 0; i < enum_total; ++i)
+  {
     const char *entry_module = module_registry_enum_entry_module(i);
     if (!entry_module || strcmp(entry_module, module_name) != 0)
       continue;
@@ -1784,7 +2036,8 @@ static int collect_enums_for_module(const char *module_name,
     LibraryEnum en = {0};
     en.name = enum_name ? xstrdup(enum_name) : NULL;
     int count = 0;
-    for (int vi = 0; vi < value_total; ++vi) {
+    for (int vi = 0; vi < value_total; ++vi)
+    {
       const char *value_module = module_registry_enum_value_entry_module(vi);
       const char *value_enum = module_registry_enum_value_entry_enum(vi);
       if (value_module && value_enum &&
@@ -1792,15 +2045,18 @@ static int collect_enums_for_module(const char *module_name,
           strcmp(value_enum, enum_name) == 0)
         ++count;
     }
-    if (count > 0) {
+    if (count > 0)
+    {
       en.value_names = (char **)xcalloc((size_t)count, sizeof(char *));
       en.values = (int32_t *)xcalloc((size_t)count, sizeof(int32_t));
-      if (!en.value_names || !en.values) {
+      if (!en.value_names || !en.values)
+      {
         free_library_enum(&en);
         return 1;
       }
       int idx = 0;
-      for (int vi = 0; vi < value_total; ++vi) {
+      for (int vi = 0; vi < value_total; ++vi)
+      {
         const char *value_module = module_registry_enum_value_entry_module(vi);
         const char *value_enum = module_registry_enum_value_entry_enum(vi);
         if (!value_module || !value_enum ||
@@ -1809,7 +2065,8 @@ static int collect_enums_for_module(const char *module_name,
           continue;
         const char *value_name = module_registry_enum_value_entry_name(vi);
         int value = module_registry_enum_value_entry_value(vi);
-        if (idx < count) {
+        if (idx < count)
+        {
           en.value_names[idx] = value_name ? xstrdup(value_name) : NULL;
           en.values[idx] = (int32_t)value;
           ++idx;
@@ -1818,7 +2075,8 @@ static int collect_enums_for_module(const char *module_name,
       en.value_count = (uint32_t)count;
     }
     en.is_exposed = 1;
-    if (append_library_enum(mod, &en) != 0) {
+    if (append_library_enum(mod, &en) != 0)
+    {
       free_library_enum(&en);
       return 1;
     }
@@ -1828,7 +2086,8 @@ static int collect_enums_for_module(const char *module_name,
 
 static int collect_metadata_for_unit(const Node *unit, const char *ccb_path,
                                      LibraryModuleData **modules,
-                                     int *module_count, int *module_cap) {
+                                     int *module_count, int *module_cap)
+{
   if (!unit || unit->kind != ND_UNIT || !modules || !module_count ||
       !module_cap)
     return 0;
@@ -1851,7 +2110,8 @@ static int collect_metadata_for_unit(const Node *unit, const char *ccb_path,
 }
 
 static int write_library_file(const char *path, LibraryModuleData *mods,
-                              int module_count) {
+                              int module_count)
+{
   if (!path || !mods || module_count <= 0)
     return EINVAL;
 
@@ -1867,28 +2127,34 @@ static int write_library_file(const char *path, LibraryModuleData *mods,
 
   int err = 0;
 
-  for (int i = 0; i < module_count && !err; ++i) {
+  for (int i = 0; i < module_count && !err; ++i)
+  {
     LibraryModuleData *src = &mods[i];
     CclibModule *dst = &modules[i];
     dst->module_name = src->module_name;
 
-    if (!src->ccbin_data) {
+    if (!src->ccbin_data)
+    {
       err = EINVAL;
       break;
     }
-    if (src->ccbin_size > UINT32_MAX) {
+    if (src->ccbin_size > UINT32_MAX)
+    {
       err = ERANGE;
       break;
     }
 
-    if (src->function_count > 0) {
+    if (src->function_count > 0)
+    {
       dst->functions = (CclibFunction *)xcalloc((size_t)src->function_count,
                                                 sizeof(CclibFunction));
-      if (!dst->functions) {
+      if (!dst->functions)
+      {
         err = ENOMEM;
         break;
       }
-      for (int fi = 0; fi < src->function_count; ++fi) {
+      for (int fi = 0; fi < src->function_count; ++fi)
+      {
         LibraryFunction *lf = &src->functions[fi];
         CclibFunction *cf = &dst->functions[fi];
         cf->name = lf->name;
@@ -1904,14 +2170,17 @@ static int write_library_file(const char *path, LibraryModuleData *mods,
     dst->function_count =
         (uint32_t)(src->function_count < 0 ? 0 : src->function_count);
 
-    if (src->struct_count > 0) {
+    if (src->struct_count > 0)
+    {
       dst->structs = (CclibStruct *)xcalloc((size_t)src->struct_count,
                                             sizeof(CclibStruct));
-      if (!dst->structs) {
+      if (!dst->structs)
+      {
         err = ENOMEM;
         break;
       }
-      for (int si = 0; si < src->struct_count; ++si) {
+      for (int si = 0; si < src->struct_count; ++si)
+      {
         LibraryStruct *ls = &src->structs[si];
         CclibStruct *cs = &dst->structs[si];
         cs->name = ls->name;
@@ -1926,25 +2195,31 @@ static int write_library_file(const char *path, LibraryModuleData *mods,
     dst->struct_count =
         (uint32_t)(src->struct_count < 0 ? 0 : src->struct_count);
 
-    if (src->enum_count > 0) {
+    if (src->enum_count > 0)
+    {
       dst->enums =
           (CclibEnum *)xcalloc((size_t)src->enum_count, sizeof(CclibEnum));
-      if (!dst->enums) {
+      if (!dst->enums)
+      {
         err = ENOMEM;
         break;
       }
-      for (int ei = 0; ei < src->enum_count; ++ei) {
+      for (int ei = 0; ei < src->enum_count; ++ei)
+      {
         LibraryEnum *le = &src->enums[ei];
         CclibEnum *ce = &dst->enums[ei];
         ce->name = le->name;
-        if (le->value_count > 0) {
+        if (le->value_count > 0)
+        {
           ce->values = (CclibEnumValue *)xcalloc((size_t)le->value_count,
                                                  sizeof(CclibEnumValue));
-          if (!ce->values) {
+          if (!ce->values)
+          {
             err = ENOMEM;
             break;
           }
-          for (uint32_t vi = 0; vi < le->value_count; ++vi) {
+          for (uint32_t vi = 0; vi < le->value_count; ++vi)
+          {
             ce->values[vi].name = le->value_names ? le->value_names[vi] : NULL;
             ce->values[vi].value = le->values ? le->values[vi] : 0;
           }
@@ -1955,14 +2230,17 @@ static int write_library_file(const char *path, LibraryModuleData *mods,
     }
     dst->enum_count = (uint32_t)(src->enum_count < 0 ? 0 : src->enum_count);
 
-    if (src->global_count > 0) {
+    if (src->global_count > 0)
+    {
       dst->globals = (CclibGlobal *)xcalloc((size_t)src->global_count,
                                             sizeof(CclibGlobal));
-      if (!dst->globals) {
+      if (!dst->globals)
+      {
         err = ENOMEM;
         break;
       }
-      for (int gi = 0; gi < src->global_count; ++gi) {
+      for (int gi = 0; gi < src->global_count; ++gi)
+      {
         LibraryGlobal *lg = &src->globals[gi];
         CclibGlobal *cg = &dst->globals[gi];
         cg->name = lg->name;
@@ -1977,18 +2255,22 @@ static int write_library_file(const char *path, LibraryModuleData *mods,
     dst->ccbin_size = (uint32_t)src->ccbin_size;
   }
 
-  if (!err) {
+  if (!err)
+  {
     err = cclib_write(path, &file);
   }
 
-  for (int i = 0; i < module_count; ++i) {
+  for (int i = 0; i < module_count; ++i)
+  {
     CclibModule *dst = &modules[i];
     if (dst->functions)
       free(dst->functions);
     if (dst->structs)
       free(dst->structs);
-    if (dst->enums) {
-      for (uint32_t vi = 0; vi < dst->enum_count; ++vi) {
+    if (dst->enums)
+    {
+      for (uint32_t vi = 0; vi < dst->enum_count; ++vi)
+      {
         if (dst->enums[vi].values)
           free(dst->enums[vi].values);
       }
@@ -2002,10 +2284,12 @@ static int write_library_file(const char *path, LibraryModuleData *mods,
   return err;
 }
 
-static int loaded_library_add_type(LoadedLibrary *lib, Type *ty) {
+static int loaded_library_add_type(LoadedLibrary *lib, Type *ty)
+{
   if (!lib || !ty)
     return 1;
-  if (lib->allocated_type_count == lib->allocated_type_cap) {
+  if (lib->allocated_type_count == lib->allocated_type_cap)
+  {
     int new_cap = lib->allocated_type_cap ? lib->allocated_type_cap * 2 : 8;
     Type **grown = (Type **)realloc(lib->allocated_types,
                                     (size_t)new_cap * sizeof(Type *));
@@ -2018,11 +2302,14 @@ static int loaded_library_add_type(LoadedLibrary *lib, Type *ty) {
   return 0;
 }
 
-static void free_loaded_library_type(Type *ty) {
+static void free_loaded_library_type(Type *ty)
+{
   if (!ty)
     return;
-  if (ty->kind == TY_STRUCT) {
-    if (ty->strct.field_names) {
+  if (ty->kind == TY_STRUCT)
+  {
+    if (ty->strct.field_names)
+    {
       char **names = (char **)ty->strct.field_names;
       for (int i = 0; i < ty->strct.field_count; ++i)
         free(names[i]);
@@ -2033,7 +2320,9 @@ static void free_loaded_library_type(Type *ty) {
     if (ty->strct.field_offsets)
       free(ty->strct.field_offsets);
     free((void *)ty->struct_name);
-  } else if (ty->kind == TY_IMPORT) {
+  }
+  else if (ty->kind == TY_IMPORT)
+  {
     free((void *)ty->import_module);
     free((void *)ty->import_type_name);
     // import_resolved is not owned
@@ -2041,7 +2330,8 @@ static void free_loaded_library_type(Type *ty) {
   free(ty);
 }
 
-static void free_loaded_library_function(LoadedLibraryFunction *fn) {
+static void free_loaded_library_function(LoadedLibraryFunction *fn)
+{
   if (!fn)
     return;
   free(fn->name);
@@ -2053,10 +2343,12 @@ static void free_loaded_library_function(LoadedLibraryFunction *fn) {
 }
 
 static int append_loaded_function(LoadedLibraryFunction **funcs, int *count,
-                                  int *cap, const LoadedLibraryFunction *fn) {
+                                  int *cap, const LoadedLibraryFunction *fn)
+{
   if (!funcs || !count || !cap || !fn)
     return 1;
-  if (*count == *cap) {
+  if (*count == *cap)
+  {
     int new_cap = *cap ? *cap * 2 : 8;
     LoadedLibraryFunction *grown = (LoadedLibraryFunction *)realloc(
         *funcs, (size_t)new_cap * sizeof(LoadedLibraryFunction));
@@ -2072,10 +2364,12 @@ static int append_loaded_function(LoadedLibraryFunction **funcs, int *count,
 
 static int register_structs_from_cclib_module(LoadedLibrary *lib,
                                               const char *module_name,
-                                              const CclibModule *module) {
+                                              const CclibModule *module)
+{
   if (!lib || !module_name || !module)
     return 0;
-  for (uint32_t si = 0; si < module->struct_count; ++si) {
+  for (uint32_t si = 0; si < module->struct_count; ++si)
+  {
     const CclibStruct *st = &module->structs[si];
     if (!st->name)
       continue;
@@ -2088,22 +2382,26 @@ static int register_structs_from_cclib_module(LoadedLibrary *lib,
     int field_count = (int)st->field_count;
     ty->strct.field_count = field_count;
     ty->strct.size_bytes = (int)st->size_bytes;
-    if (loaded_library_add_type(lib, ty)) {
+    if (loaded_library_add_type(lib, ty))
+    {
       free_loaded_library_type(ty);
       return 1;
     }
     module_registry_register_struct(module_name, ty);
-    if (field_count > 0) {
+    if (field_count > 0)
+    {
       char **names = (char **)xcalloc((size_t)field_count, sizeof(char *));
       Type **types = (Type **)xcalloc((size_t)field_count, sizeof(Type *));
       int *offsets = (int *)xcalloc((size_t)field_count, sizeof(int));
-      if (!names || !types || !offsets) {
+      if (!names || !types || !offsets)
+      {
         free(names);
         free(types);
         free(offsets);
         return 1;
       }
-      for (int fi = 0; fi < field_count; ++fi) {
+      for (int fi = 0; fi < field_count; ++fi)
+      {
         names[fi] = st->field_names && fi < field_count && st->field_names[fi]
                         ? xstrdup(st->field_names[fi])
                         : NULL;
@@ -2124,10 +2422,12 @@ static int register_structs_from_cclib_module(LoadedLibrary *lib,
 
 static int register_enums_from_cclib_module(LoadedLibrary *lib,
                                             const char *module_name,
-                                            const CclibModule *module) {
+                                            const CclibModule *module)
+{
   if (!lib || !module_name || !module)
     return 0;
-  for (uint32_t ei = 0; ei < module->enum_count; ++ei) {
+  for (uint32_t ei = 0; ei < module->enum_count; ++ei)
+  {
     const CclibEnum *en = &module->enums[ei];
     if (!en->name)
       continue;
@@ -2136,12 +2436,14 @@ static int register_enums_from_cclib_module(LoadedLibrary *lib,
       return 1;
     enum_type->kind = TY_I32;
     enum_type->is_exposed = en->is_exposed;
-    if (loaded_library_add_type(lib, enum_type)) {
+    if (loaded_library_add_type(lib, enum_type))
+    {
       free(enum_type);
       return 1;
     }
     module_registry_register_enum(module_name, en->name, enum_type);
-    for (uint32_t vi = 0; vi < en->value_count; ++vi) {
+    for (uint32_t vi = 0; vi < en->value_count; ++vi)
+    {
       const char *value_name = en->values[vi].name;
       int value = (int)en->values[vi].value;
       if (value_name)
@@ -2154,10 +2456,12 @@ static int register_enums_from_cclib_module(LoadedLibrary *lib,
 
 static int harvest_functions_from_cclib_module(
     const CclibModule *module, const char *module_name,
-    LoadedLibraryFunction **out_funcs, int *func_count, int *func_cap) {
+    LoadedLibraryFunction **out_funcs, int *func_count, int *func_cap)
+{
   if (!module || !module_name || !out_funcs || !func_count || !func_cap)
     return 0;
-  for (uint32_t fi = 0; fi < module->function_count; ++fi) {
+  for (uint32_t fi = 0; fi < module->function_count; ++fi)
+  {
     const CclibFunction *fn = &module->functions[fi];
     if (!fn->name || !fn->is_exposed)
       continue;
@@ -2168,7 +2472,8 @@ static int harvest_functions_from_cclib_module(
     lf.module_name = xstrdup(module_name);
     const char *backend_src = fn->backend_name;
     char *generated_backend = NULL;
-    if (!backend_src || !*backend_src) {
+    if (!backend_src || !*backend_src)
+    {
       generated_backend = make_backend_name_from_module(module_name, fn->name);
       backend_src = generated_backend;
     }
@@ -2176,13 +2481,16 @@ static int harvest_functions_from_cclib_module(
     free(generated_backend);
     lf.return_type = spec_to_type(fn->return_type);
     lf.param_count = (int)fn->param_count;
-    if (lf.param_count > 0) {
+    if (lf.param_count > 0)
+    {
       lf.param_types = (Type **)xcalloc((size_t)lf.param_count, sizeof(Type *));
-      if (!lf.param_types) {
+      if (!lf.param_types)
+      {
         free_loaded_library_function(&lf);
         return 1;
       }
-      for (int pi = 0; pi < lf.param_count; ++pi) {
+      for (int pi = 0; pi < lf.param_count; ++pi)
+      {
         const char *ps = (fn->param_types && (uint32_t)pi < fn->param_count)
                              ? fn->param_types[pi]
                              : NULL;
@@ -2192,7 +2500,8 @@ static int harvest_functions_from_cclib_module(
     lf.is_varargs = fn->is_varargs ? 1 : 0;
     lf.is_noreturn = fn->is_noreturn ? 1 : 0;
     lf.is_exposed = fn->is_exposed ? 1 : 0;
-    if (append_loaded_function(out_funcs, func_count, func_cap, &lf) != 0) {
+    if (append_loaded_function(out_funcs, func_count, func_cap, &lf) != 0)
+    {
       free_loaded_library_function(&lf);
       return 1;
     }
@@ -2200,19 +2509,24 @@ static int harvest_functions_from_cclib_module(
   return 0;
 }
 
-static void free_loaded_library(LoadedLibrary *lib) {
+static void free_loaded_library(LoadedLibrary *lib)
+{
   if (!lib)
     return;
-  if (lib->ccbin_temp_paths) {
-    for (uint32_t i = 0; i < lib->file.module_count; ++i) {
-      if (lib->ccbin_temp_paths[i]) {
+  if (lib->ccbin_temp_paths)
+  {
+    for (uint32_t i = 0; i < lib->file.module_count; ++i)
+    {
+      if (lib->ccbin_temp_paths[i])
+      {
         remove(lib->ccbin_temp_paths[i]);
         free(lib->ccbin_temp_paths[i]);
       }
     }
     free(lib->ccbin_temp_paths);
   }
-  if (lib->allocated_types) {
+  if (lib->allocated_types)
+  {
     for (int i = 0; i < lib->allocated_type_count; ++i)
       free_loaded_library_type(lib->allocated_types[i]);
     free(lib->allocated_types);
@@ -2222,16 +2536,19 @@ static void free_loaded_library(LoadedLibrary *lib) {
   memset(lib, 0, sizeof(*lib));
 }
 
-static int unit_has_auto_import(const Node *unit, const char *module_full) {
+static int unit_has_auto_import(const Node *unit, const char *module_full)
+{
   if (!unit || unit->kind != ND_UNIT || !module_full || !*module_full)
     return 0;
   if (!unit->imports || unit->import_count <= 0)
     return 0;
-  for (int i = 0; i < unit->import_count; ++i) {
+  for (int i = 0; i < unit->import_count; ++i)
+  {
     const ModulePath *imp = &unit->imports[i];
     if (!imp || !imp->full_name)
       continue;
-    if (strcmp(imp->full_name, module_full) == 0) {
+    if (strcmp(imp->full_name, module_full) == 0)
+    {
       if (imp->alias && imp->alias[0])
         return 0;
       return 1;
@@ -2242,11 +2559,13 @@ static int unit_has_auto_import(const Node *unit, const char *module_full) {
 
 static void symtab_add_library_functions(SemaContext *sc, Node *unit,
                                          const LoadedLibraryFunction *funcs,
-                                         int func_count) {
+                                         int func_count)
+{
   if (!sc || !sc->syms || !funcs || func_count <= 0)
     return;
   SymTable *syms = sc->syms;
-  for (int i = 0; i < func_count; ++i) {
+  for (int i = 0; i < func_count; ++i)
+  {
     const LoadedLibraryFunction *lf = &funcs[i];
     if (!lf->qualified_name)
       continue;
@@ -2263,7 +2582,8 @@ static void symtab_add_library_functions(SemaContext *sc, Node *unit,
     sym.is_noreturn = lf->is_noreturn;
     symtab_add(syms, sym);
 
-    if (sym.backend_name && strcmp(sym.backend_name, sym.name) != 0) {
+    if (sym.backend_name && strcmp(sym.backend_name, sym.name) != 0)
+    {
       Symbol backend_alias = sym;
       backend_alias.name = sym.backend_name;
       symtab_add(syms, backend_alias);
@@ -2275,7 +2595,8 @@ static void symtab_add_library_functions(SemaContext *sc, Node *unit,
       continue;
     const char *module_full = lf->module_name;
 
-    if (unit_has_auto_import(unit, module_full)) {
+    if (unit_has_auto_import(unit, module_full))
+    {
       Symbol unqual = sym;
       unqual.name = lf->name;
       unqual.backend_name = sym.backend_name;
@@ -2287,7 +2608,8 @@ static void symtab_add_library_functions(SemaContext *sc, Node *unit,
 static int load_cclib_library(const char *path, LoadedLibrary **libs,
                               int *lib_count, int *lib_cap,
                               LoadedLibraryFunction **funcs, int *func_count,
-                              int *func_cap) {
+                              int *func_cap)
+{
   if (!path || !libs || !lib_count || !lib_cap || !funcs || !func_count ||
       !func_cap)
     return EINVAL;
@@ -2295,60 +2617,72 @@ static int load_cclib_library(const char *path, LoadedLibrary **libs,
   LoadedLibrary lib = {0};
   lib.path = xstrdup(path);
   int err = cclib_read(path, &lib.file);
-  if (err) {
+  if (err)
+  {
     fprintf(stderr, "error: failed to read cclib '%s' (%s)\n", path,
             strerror(err));
     free(lib.path);
     return err;
   }
-  if (lib.file.module_count > 0) {
+  if (lib.file.module_count > 0)
+  {
     lib.ccbin_temp_paths =
         (char **)xcalloc(lib.file.module_count, sizeof(char *));
-    if (!lib.ccbin_temp_paths) {
+    if (!lib.ccbin_temp_paths)
+    {
       free_loaded_library(&lib);
       return ENOMEM;
     }
   }
 
-  for (uint32_t mi = 0; mi < lib.file.module_count; ++mi) {
+  for (uint32_t mi = 0; mi < lib.file.module_count; ++mi)
+  {
     const CclibModule *mod = &lib.file.modules[mi];
     const char *module_name = mod->module_name;
     if (!module_name)
       continue;
-    if (register_structs_from_cclib_module(&lib, module_name, mod)) {
+    if (register_structs_from_cclib_module(&lib, module_name, mod))
+    {
       err = ENOMEM;
       break;
     }
-    if (register_enums_from_cclib_module(&lib, module_name, mod)) {
+    if (register_enums_from_cclib_module(&lib, module_name, mod))
+    {
       err = ENOMEM;
       break;
     }
     if (harvest_functions_from_cclib_module(mod, module_name, funcs, func_count,
-                                            func_cap)) {
+                                            func_cap))
+    {
       err = ENOMEM;
       break;
     }
   }
 
-  if (!err) {
-    if (*lib_count == *lib_cap) {
+  if (!err)
+  {
+    if (*lib_count == *lib_cap)
+    {
       int new_cap = *lib_cap ? *lib_cap * 2 : 4;
       LoadedLibrary *grown = (LoadedLibrary *)realloc(
           *libs, (size_t)new_cap * sizeof(LoadedLibrary));
       if (!grown)
         err = ENOMEM;
-      else {
+      else
+      {
         *libs = grown;
         *lib_cap = new_cap;
       }
     }
-    if (!err) {
+    if (!err)
+    {
       (*libs)[*lib_count] = lib;
       (*lib_count)++;
     }
   }
 
-  if (err) {
+  if (err)
+  {
     free_loaded_library(&lib);
   }
 
@@ -2359,10 +2693,12 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
                                    int opt_level, const char *asm_path,
                                    const char *ccb_path,
                                    const char *target_os_arg,
-                                   int *spawn_errno_out) {
+                                   int *spawn_errno_out)
+{
   if (spawn_errno_out)
     *spawn_errno_out = 0;
-  if (!cmd || !backend || !asm_path || !ccb_path) {
+  if (!cmd || !backend || !asm_path || !ccb_path)
+  {
     if (spawn_errno_out)
       *spawn_errno_out = EINVAL;
     return -1;
@@ -2373,7 +2709,8 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
   char optbuf[8];
   char target_option_buf[64];
   const char *target_option_value = NULL;
-  if (target_os_arg && *target_os_arg) {
+  if (target_os_arg && *target_os_arg)
+  {
     snprintf(target_option_buf, sizeof(target_option_buf), "target-os=%s",
              target_os_arg);
     target_option_value = target_option_buf;
@@ -2381,20 +2718,23 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
   args[idx++] = cmd;
   args[idx++] = "--backend";
   args[idx++] = backend;
-  if (opt_level > 0) {
+  if (opt_level > 0)
+  {
     snprintf(optbuf, sizeof(optbuf), "-O%d", opt_level);
     args[idx++] = optbuf;
   }
   args[idx++] = "--output";
   args[idx++] = asm_path;
-  if (target_option_value) {
+  if (target_option_value)
+  {
     args[idx++] = "--option";
     args[idx++] = target_option_value;
   }
   args[idx++] = ccb_path;
   args[idx] = NULL;
   intptr_t rc = _spawnvp(_P_WAIT, cmd, args);
-  if (rc == -1) {
+  if (rc == -1)
+  {
     if (spawn_errno_out)
       *spawn_errno_out = errno;
     return -1;
@@ -2406,7 +2746,8 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
   char optbuf[8];
   char target_option_buf[64];
   char *target_option_value = NULL;
-  if (target_os_arg && *target_os_arg) {
+  if (target_os_arg && *target_os_arg)
+  {
     snprintf(target_option_buf, sizeof(target_option_buf), "target-os=%s",
              target_os_arg);
     target_option_value = target_option_buf;
@@ -2414,13 +2755,15 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
   args[idx++] = (char *)cmd;
   args[idx++] = "--backend";
   args[idx++] = (char *)backend;
-  if (opt_level > 0) {
+  if (opt_level > 0)
+  {
     snprintf(optbuf, sizeof(optbuf), "-O%d", opt_level);
     args[idx++] = optbuf;
   }
   args[idx++] = "--output";
   args[idx++] = (char *)asm_path;
-  if (target_option_value) {
+  if (target_option_value)
+  {
     args[idx++] = "--option";
     args[idx++] = target_option_value;
   }
@@ -2428,14 +2771,16 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
   args[idx] = NULL;
   pid_t pid = 0;
   int rc = posix_spawnp(&pid, cmd, NULL, NULL, args, environ);
-  if (rc != 0) {
+  if (rc != 0)
+  {
     if (spawn_errno_out)
       *spawn_errno_out = rc;
     errno = rc;
     return -1;
   }
   int status = 0;
-  if (waitpid(pid, &status, 0) == -1) {
+  if (waitpid(pid, &status, 0) == -1)
+  {
     if (spawn_errno_out)
       *spawn_errno_out = errno;
     return -1;
@@ -2450,10 +2795,12 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
 
 static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
                                       const char *ccbin_path, int opt_level,
-                                      int *spawn_errno_out) {
+                                      int *spawn_errno_out)
+{
   if (spawn_errno_out)
     *spawn_errno_out = 0;
-  if (!cmd || !ccb_path || !ccbin_path) {
+  if (!cmd || !ccb_path || !ccbin_path)
+  {
     if (spawn_errno_out)
       *spawn_errno_out = EINVAL;
     return -1;
@@ -2463,7 +2810,8 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
   char optbuf[8];
   int idx = 0;
   args[idx++] = cmd;
-  if (opt_level > 0) {
+  if (opt_level > 0)
+  {
     snprintf(optbuf, sizeof(optbuf), "-O%d", opt_level);
     args[idx++] = optbuf;
   }
@@ -2472,7 +2820,8 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
   args[idx++] = ccbin_path;
   args[idx] = NULL;
   intptr_t rc = _spawnvp(_P_WAIT, cmd, args);
-  if (rc == -1) {
+  if (rc == -1)
+  {
     if (spawn_errno_out)
       *spawn_errno_out = errno;
     return -1;
@@ -2483,7 +2832,8 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
   char optbuf[8];
   int idx = 0;
   args[idx++] = (char *)cmd;
-  if (opt_level > 0) {
+  if (opt_level > 0)
+  {
     snprintf(optbuf, sizeof(optbuf), "-O%d", opt_level);
     args[idx++] = optbuf;
   }
@@ -2493,14 +2843,16 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
   args[idx] = NULL;
   pid_t pid = 0;
   int rc = posix_spawnp(&pid, cmd, NULL, NULL, args, environ);
-  if (rc != 0) {
+  if (rc != 0)
+  {
     if (spawn_errno_out)
       *spawn_errno_out = rc;
     errno = rc;
     return -1;
   }
   int status = 0;
-  if (waitpid(pid, &status, 0) == -1) {
+  if (waitpid(pid, &status, 0) == -1)
+  {
     if (spawn_errno_out)
       *spawn_errno_out = errno;
     return -1;
@@ -2513,7 +2865,8 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
 #endif
 }
 
-static int is_relocatable_obj(const char *path) {
+static int is_relocatable_obj(const char *path)
+{
   // Quick and permissive checks: ELF ET_REL, or COFF OBJ (not MZ/PE)
   FILE *f = fopen(path, "rb");
   if (!f)
@@ -2527,7 +2880,8 @@ static int is_relocatable_obj(const char *path) {
   if (hdr[0] == 'M' && hdr[1] == 'Z')
     return 0;
   // ELF?
-  if (hdr[0] == 0x7F && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F') {
+  if (hdr[0] == 0x7F && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F')
+  {
     // e_type at bytes 16-17 little-endian
     int et = hdr[16] | (hdr[17] << 8);
     return et == 1; // ET_REL
@@ -2541,7 +2895,8 @@ static int is_relocatable_obj(const char *path) {
   return 0;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv)
+{
   if (argc >= 2 && equals_icase(argv[1], "new"))
     return handle_new_command(argc - 1, argv + 1);
 #ifdef _WIN32
@@ -2563,6 +2918,8 @@ int main(int argc, char **argv) {
   const char *chancecodec_cmd_override = NULL;
 #ifdef _WIN32
   TargetOS target_os = OS_WINDOWS;
+#elif defined(__APPLE__)
+  TargetOS target_os = OS_MACOS;
 #else
   TargetOS target_os = OS_LINUX;
 #endif
@@ -2602,12 +2959,15 @@ int main(int argc, char **argv) {
   int loaded_library_function_cap = 0;
   char *project_output_alloc = NULL;
 
-  for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+  for (int i = 1; i < argc; i++)
+  {
+    if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
+    {
       usage(argv[0]);
       return 0;
     }
-    if (strcmp(argv[i], "--version") == 0) {
+    if (strcmp(argv[i], "--version") == 0)
+    {
       printf("chancec: CHance Compiler version 1.0.0\n");
       printf("chancec: CE language standard: H25-1\n");
       printf("chancec: License: MIT\n");
@@ -2615,26 +2975,32 @@ int main(int argc, char **argv) {
       printf("chancec: Created by Nathan Hornby (AzureianGH)\n");
       return 0;
     }
-    if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
+    if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
+    {
       out = argv[++i];
       output_overridden = 1;
       continue;
     }
-    if (strcmp(argv[i], "-S") == 0) {
+    if (strcmp(argv[i], "-S") == 0)
+    {
       stop_after_asm = 1;
       continue;
     }
-    if (strcmp(argv[i], "-Sccb") == 0) {
+    if (strcmp(argv[i], "-Sccb") == 0)
+    {
       stop_after_ccb = 1;
       continue;
     }
-    if (strncmp(argv[i], "-O", 2) == 0) {
+    if (strncmp(argv[i], "-O", 2) == 0)
+    {
       const char *level_str = argv[i] + 2;
       int level = 1;
-      if (*level_str != '\0') {
+      if (*level_str != '\0')
+      {
         char *endptr = NULL;
         long parsed = strtol(level_str, &endptr, 10);
-        if (!endptr || *endptr != '\0' || parsed < 0 || parsed > 3) {
+        if (!endptr || *endptr != '\0' || parsed < 0 || parsed > 3)
+        {
           fprintf(stderr,
                   "invalid optimization level '%s' (use -O0|-O1|-O2|-O3)\n",
                   argv[i]);
@@ -2645,15 +3011,19 @@ int main(int argc, char **argv) {
       opt_level = level;
       continue;
     }
-    if ((strcmp(argv[i], "-c") == 0) || (strcmp(argv[i], "--no-link") == 0)) {
+    if ((strcmp(argv[i], "-c") == 0) || (strcmp(argv[i], "--no-link") == 0))
+    {
       no_link = 1;
       // Accept optional object filename immediately following
-      if (i + 1 < argc && argv[i + 1][0] != '-') {
+      if (i + 1 < argc && argv[i + 1][0] != '-')
+      {
         const char *cand = argv[i + 1];
         size_t clen = strlen(cand);
-        if (clen >= 2) {
+        if (clen >= 2)
+        {
           const char *dot = strrchr(cand, '.');
-          if (dot && (_stricmp(dot, ".o") == 0 || _stricmp(dot, ".obj") == 0)) {
+          if (dot && (_stricmp(dot, ".o") == 0 || _stricmp(dot, ".obj") == 0))
+          {
             obj_override = cand;
             i++;
           }
@@ -2661,7 +3031,8 @@ int main(int argc, char **argv) {
       }
       continue;
     }
-    if (strcmp(argv[i], "--asm-syntax") == 0 && i + 1 < argc) {
+    if (strcmp(argv[i], "--asm-syntax") == 0 && i + 1 < argc)
+    {
       const char *arg = argv[++i];
       if (strcmp(arg, "intel") == 0)
         asm_syntax = ASM_INTEL;
@@ -2669,90 +3040,123 @@ int main(int argc, char **argv) {
         asm_syntax = ASM_ATT;
       else if (strcmp(arg, "nasm") == 0)
         asm_syntax = ASM_NASM;
-      else {
+      else
+      {
         fprintf(stderr, "Unknown asm syntax '%s' (use intel|att|nasm)\n", arg);
         return 2;
       }
       continue;
     }
-    if (strcmp(argv[i], "--chancecodec") == 0 && i + 1 < argc) {
+    if (strcmp(argv[i], "--chancecodec") == 0 && i + 1 < argc)
+    {
       chancecodec_cmd_override = argv[++i];
       continue;
     }
-    if (strcmp(argv[i], "--library") == 0) {
+    if (strcmp(argv[i], "--library") == 0)
+    {
       emit_library = 1;
       continue;
     }
-    if (strcmp(argv[i], "--freestanding") == 0) {
+    if (strcmp(argv[i], "--freestanding") == 0)
+    {
       freestanding = 1;
       continue;
     }
-    if (strcmp(argv[i], "-x86") == 0) {
+    if (strcmp(argv[i], "-x86") == 0)
+    {
       target_arch = ARCH_X86;
       chancecode_backend = "x86-gas";
       continue;
     }
-    if (strcmp(argv[i], "-m32") == 0) {
+    if (strcmp(argv[i], "-arm64") == 0)
+    {
+      target_arch = ARCH_ARM64;
+      chancecode_backend = "arm64-macos";
+      target_os = OS_MACOS;
+      continue;
+    }
+    if (strcmp(argv[i], "-bslash") == 0)
+    {
+      target_arch = ARCH_BSLASH;
+      chancecode_backend = "bslash";
+      stop_after_asm = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "-m32") == 0)
+    {
       m32 = 1;
       continue;
     }
-    if (strcmp(argv[i], "-m64") == 0) {
+    if (strcmp(argv[i], "-m64") == 0)
+    {
       m32 = 0;
       continue;
     }
-    if (strcmp(argv[i], "--target-os") == 0 && i + 1 < argc) {
+    if (strcmp(argv[i], "--target-os") == 0 && i + 1 < argc)
+    {
       const char *os = argv[++i];
       if (strcmp(os, "windows") == 0)
         target_os = OS_WINDOWS;
       else if (strcmp(os, "linux") == 0)
         target_os = OS_LINUX;
-      else {
-        fprintf(stderr, "Unknown --target-os '%s' (use windows|linux)\n", os);
+      else if (strcmp(os, "macos") == 0)
+        target_os = OS_MACOS;
+      else
+      {
+        fprintf(stderr,
+                "Unknown --target-os '%s' (use windows|linux|macos)\n", os);
         return 2;
       }
       continue;
     }
-    if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
+    if (strcmp(argv[i], "-I") == 0 && i + 1 < argc)
+    {
       chance_add_include_dir(&include_dirs, &include_dir_count, argv[++i]);
       continue;
     }
-    if (strcmp(argv[i], "-Nno-formatting") == 0) {
+    if (strcmp(argv[i], "-Nno-formatting") == 0)
+    {
       parser_set_disable_formatting_notes(1);
       continue;
     }
-    if (strcmp(argv[i], "-vd") == 0 || strcmp(argv[i], "--verbose-deep") == 0) {
+    if (strcmp(argv[i], "-vd") == 0 || strcmp(argv[i], "--verbose-deep") == 0)
+    {
       compiler_verbose_set_mode(1);
       compiler_verbose_set_deep(1);
       continue;
     }
-    if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0) {
+    if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0)
+    {
       compiler_verbose_set_mode(1);
       continue;
     }
-    if (strcmp(argv[i], "--no-ansi") == 0) {
+    if (strcmp(argv[i], "--no-ansi") == 0)
+    {
       diag_set_use_ansi(0);
       verbose_use_ansi = 0;
       compiler_verbose_set_use_ansi(0);
       continue;
     }
-    if (argv[i][0] == '-') {
+    if (argv[i][0] == '-')
+    {
       usage(argv[0]);
       return 2;
     }
     // classify input
     const char *arg = argv[i];
-    if (ends_with_icase(arg, ".ceproj")) {
-      ProjectInputList ce_list = {&ce_inputs,      &ce_count,
-                                  &ce_cap,         &owned_ce_inputs,
+    if (ends_with_icase(arg, ".ceproj"))
+    {
+      ProjectInputList ce_list = {&ce_inputs, &ce_count,
+                                  &ce_cap, &owned_ce_inputs,
                                   &owned_ce_count, &owned_ce_cap};
-      ProjectInputList ccb_list = {&ccb_inputs,      &ccb_count,
-                                   &ccb_cap,         &owned_ccb_inputs,
+      ProjectInputList ccb_list = {&ccb_inputs, &ccb_count,
+                                   &ccb_cap, &owned_ccb_inputs,
                                    &owned_ccb_count, &owned_ccb_cap};
-      ProjectInputList cclib_list = {&cclib_inputs,      &cclib_count,
-                                     &cclib_cap,         &owned_cclib_inputs,
+      ProjectInputList cclib_list = {&cclib_inputs, &cclib_count,
+                                     &cclib_cap, &owned_cclib_inputs,
                                      &owned_cclib_count, &owned_cclib_cap};
-      ProjectInputList obj_list = {&obj_inputs,      &obj_count,
-                                   &obj_cap,         &owned_obj_inputs,
+      ProjectInputList obj_list = {&obj_inputs, &obj_count,
+                                   &obj_cap, &owned_obj_inputs,
                                    &owned_obj_count, &owned_obj_cap};
       int perr = parse_ceproj_file(
           arg, ce_list, ccb_list, cclib_list, obj_list, &include_dirs,
@@ -2763,105 +3167,135 @@ int main(int argc, char **argv) {
         return 2;
       continue;
     }
-    if (ends_with_icase(arg, ".ce")) {
-      if (ce_count == ce_cap) {
+    if (ends_with_icase(arg, ".ce"))
+    {
+      if (ce_count == ce_cap)
+      {
         ce_cap = ce_cap ? ce_cap * 2 : 8;
         ce_inputs =
             (const char **)realloc((void *)ce_inputs, sizeof(char *) * ce_cap);
       }
       ce_inputs[ce_count++] = arg;
-    } else if (ends_with_icase(arg, ".ccb")) {
-      if (ccb_count == ccb_cap) {
+    }
+    else if (ends_with_icase(arg, ".ccb"))
+    {
+      if (ccb_count == ccb_cap)
+      {
         ccb_cap = ccb_cap ? ccb_cap * 2 : 8;
         ccb_inputs = (const char **)realloc((void *)ccb_inputs,
                                             sizeof(char *) * ccb_cap);
       }
       ccb_inputs[ccb_count++] = arg;
-    } else if (ends_with_icase(arg, ".cclib")) {
-      if (cclib_count == cclib_cap) {
+    }
+    else if (ends_with_icase(arg, ".cclib"))
+    {
+      if (cclib_count == cclib_cap)
+      {
         cclib_cap = cclib_cap ? cclib_cap * 2 : 4;
         cclib_inputs = (const char **)realloc((void *)cclib_inputs,
                                               sizeof(char *) * cclib_cap);
       }
       cclib_inputs[cclib_count++] = arg;
-    } else if (ends_with_icase(arg, ".o") || ends_with_icase(arg, ".obj")) {
-      if (obj_count == obj_cap) {
+    }
+    else if (ends_with_icase(arg, ".o") || ends_with_icase(arg, ".obj"))
+    {
+      if (obj_count == obj_cap)
+      {
         obj_cap = obj_cap ? obj_cap * 2 : 8;
         obj_inputs = (const char **)realloc((void *)obj_inputs,
                                             sizeof(char *) * obj_cap);
       }
       obj_inputs[obj_count++] = arg;
-    } else {
+    }
+    else
+    {
       fprintf(stderr,
               "error: unknown input type '%s' (expected .ce or .o/.obj)\n",
               arg);
       return 2;
     }
   }
-  if (stop_after_asm && stop_after_ccb) {
+  if (stop_after_asm && stop_after_ccb)
+  {
     fprintf(stderr, "error: -S and -Sccb cannot be used together\n");
     return 2;
   }
-  if (stop_after_asm && target_arch == ARCH_NONE) {
-    fprintf(stderr, "error: -S requires a backend selection (e.g., -x86)\n");
+  if (stop_after_asm && target_arch == ARCH_NONE)
+  {
+    fprintf(stderr, "error: -S requires a backend selection (e.g., -x86 or -arm64)\n");
     return 2;
   }
-  if (!emit_library && target_arch == ARCH_NONE) {
-    if (!stop_after_ccb) {
-      fprintf(stderr, "error: selecting a backend (e.g., -x86) is required "
+  if (!emit_library && target_arch == ARCH_NONE)
+  {
+    if (!stop_after_ccb)
+    {
+      fprintf(stderr, "error: selecting a backend (e.g., -x86 or -arm64) is required "
                       "unless stopping at bytecode with -Sccb\n");
       return 2;
     }
-    if (no_link) {
+    if (no_link)
+    {
       fprintf(stderr, "error: -c/--no-link is incompatible with -Sccb (no "
                       "object emission when stopping at bytecode)\n");
       return 2;
     }
-    if (obj_count > 0 || ccb_count > 0) {
+    if (obj_count > 0 || ccb_count > 0)
+    {
       fprintf(stderr, "error: providing .ccb/.o/.obj inputs requires selecting "
-                      "a backend (e.g., -x86)\n");
+                      "a backend (e.g., -x86 or -arm64)\n");
       return 2;
     }
   }
-  if (ce_count == 0 && obj_count == 0 && ccb_count == 0) {
+  if (ce_count == 0 && obj_count == 0 && ccb_count == 0)
+  {
     usage(argv[0]);
     return 2;
   }
-  if (emit_library) {
-    if (stop_after_asm) {
+  if (emit_library)
+  {
+    if (stop_after_asm)
+    {
       fprintf(stderr, "error: --library cannot be combined with -S\n");
       return 2;
     }
-    if (stop_after_ccb) {
+    if (stop_after_ccb)
+    {
       fprintf(stderr, "error: --library already stops after bytecode output\n");
       return 2;
     }
-    if (no_link) {
+    if (no_link)
+    {
       fprintf(stderr, "error: --library is incompatible with -c/--no-link\n");
       return 2;
     }
-    if (target_arch != ARCH_NONE) {
+    if (target_arch != ARCH_NONE)
+    {
       fprintf(stderr, "error: --library cannot be combined with backend "
-                      "selection (e.g., -x86)\n");
+                      "selection (e.g., -x86 or -arm64)\n");
       return 2;
     }
-    if (ccb_count > 0 || obj_count > 0 || cclib_count > 0) {
+    if (ccb_count > 0 || obj_count > 0 || cclib_count > 0)
+    {
       fprintf(stderr, "error: --library currently only accepts .ce inputs\n");
       return 2;
     }
-    if (ce_count == 0) {
+    if (ce_count == 0)
+    {
       fprintf(stderr, "error: --library requires at least one .ce input\n");
       return 2;
     }
-    if (!output_overridden) {
+    if (!output_overridden)
+    {
       out = "a.cclib";
     }
-    if (!ends_with_icase(out, ".cclib")) {
+    if (!ends_with_icase(out, ".cclib"))
+    {
       fprintf(stderr, "error: --library output must end with .cclib\n");
       return 2;
     }
   }
-  if (m32) {
+  if (m32)
+  {
     fprintf(stderr, "Error: -m32 not implemented yet\n");
     return 2;
   }
@@ -2871,29 +3305,37 @@ int main(int argc, char **argv) {
   const char *chancecodec_cmd_to_use = NULL;
   int chancecodec_uses_fallback = 0;
   int chancecodec_has_override = 0;
-  int needs_chancecodec = (target_arch == ARCH_X86) || emit_library;
-  if (needs_chancecodec) {
-    if (chancecodec_cmd_override && *chancecodec_cmd_override) {
+  int needs_chancecodec = (target_arch != ARCH_NONE) || emit_library;
+  if (needs_chancecodec)
+  {
+    if (chancecodec_cmd_override && *chancecodec_cmd_override)
+    {
       strip_wrapping_quotes(chancecodec_cmd_override, chancecodec_override_buf,
                             sizeof(chancecodec_override_buf));
-      if (!chancecodec_override_buf[0]) {
+      if (!chancecodec_override_buf[0])
+      {
         fprintf(stderr, "error: --chancecodec path is empty after trimming "
                         "quotes/whitespace\n");
         return 2;
       }
       chancecodec_cmd_to_use = chancecodec_override_buf;
       chancecodec_has_override = 1;
-    } else if (locate_chancecodec(chancecodec_exec_buf,
-                                  sizeof(chancecodec_exec_buf), exe_dir) == 0 &&
-               chancecodec_exec_buf[0]) {
+    }
+    else if (locate_chancecodec(chancecodec_exec_buf,
+                                sizeof(chancecodec_exec_buf), exe_dir) == 0 &&
+             chancecodec_exec_buf[0])
+    {
       chancecodec_cmd_to_use = chancecodec_exec_buf;
-    } else {
+    }
+    else
+    {
       chancecodec_cmd_to_use = default_chancecodec_name;
       chancecodec_uses_fallback = 1;
     }
   }
 
-  if (compiler_verbose_enabled()) {
+  if (compiler_verbose_enabled())
+  {
     verbose_print_config(out, opt_level, target_arch, target_os, stop_after_ccb,
                          stop_after_asm, no_link, emit_library, freestanding,
                          asm_syntax, include_dir_count, ce_count, ccb_count,
@@ -2902,9 +3344,11 @@ int main(int argc, char **argv) {
                          chancecode_backend, chancecodec_uses_fallback,
                          compiler_verbose_enabled(),
                          compiler_verbose_deep_enabled());
-    if (include_dir_count > 0) {
+    if (include_dir_count > 0)
+    {
       verbose_section("Include Directories");
-      for (int idx = 0; idx < include_dir_count; ++idx) {
+      for (int idx = 0; idx < include_dir_count; ++idx)
+      {
         char label[32];
         snprintf(label, sizeof(label), "dir[%d]", idx);
         verbose_table_row(label,
@@ -2913,33 +3357,41 @@ int main(int argc, char **argv) {
                               : "(null)");
       }
     }
-    if (ce_count > 0 && ce_inputs) {
+    if (ce_count > 0 && ce_inputs)
+    {
       verbose_section("CE Inputs");
-      for (int idx = 0; idx < ce_count; ++idx) {
+      for (int idx = 0; idx < ce_count; ++idx)
+      {
         char label[32];
         snprintf(label, sizeof(label), "ce[%d]", idx);
         verbose_table_row(label, ce_inputs[idx]);
       }
     }
-    if (ccb_count > 0 && ccb_inputs) {
+    if (ccb_count > 0 && ccb_inputs)
+    {
       verbose_section("CCB Inputs");
-      for (int idx = 0; idx < ccb_count; ++idx) {
+      for (int idx = 0; idx < ccb_count; ++idx)
+      {
         char label[32];
         snprintf(label, sizeof(label), "ccb[%d]", idx);
         verbose_table_row(label, ccb_inputs[idx]);
       }
     }
-    if (cclib_count > 0 && cclib_inputs) {
+    if (cclib_count > 0 && cclib_inputs)
+    {
       verbose_section("CCLib Inputs");
-      for (int idx = 0; idx < cclib_count; ++idx) {
+      for (int idx = 0; idx < cclib_count; ++idx)
+      {
         char label[32];
         snprintf(label, sizeof(label), "cclib[%d]", idx);
         verbose_table_row(label, cclib_inputs[idx]);
       }
     }
-    if (obj_count > 0 && obj_inputs) {
+    if (obj_count > 0 && obj_inputs)
+    {
       verbose_section("Object Inputs");
-      for (int idx = 0; idx < obj_count; ++idx) {
+      for (int idx = 0; idx < obj_count; ++idx)
+      {
         char label[32];
         snprintf(label, sizeof(label), "obj[%d]", idx);
         verbose_table_row(label, obj_inputs[idx]);
@@ -2950,30 +3402,39 @@ int main(int argc, char **argv) {
   // .ce and/or .o, we will compile .ce to temporary objects and link them
   // together with any provided .o files.
   // Validate modes
-  if (no_link) {
-    if (!obj_override) {
+  if (no_link)
+  {
+    if (!obj_override)
+    {
       // Per-file compile: must not include external .o inputs
-      if (obj_count > 0) {
+      if (obj_count > 0)
+      {
         fprintf(
             stderr,
             "error: providing .o files with -c but without an output object is "
             "invalid. Specify an output object after -c to merge.\n");
         goto fail;
       }
-      if (ce_count == 0) {
+      if (ce_count == 0)
+      {
         fprintf(stderr, "error: nothing to compile.\n");
         goto fail;
       }
-    } else {
+    }
+    else
+    {
       // Combined object: must have at least one .ce or .o input
-      if ((ce_count + obj_count) == 0) {
+      if ((ce_count + obj_count) == 0)
+      {
         fprintf(stderr, "error: no inputs provided to combine into '%s'.\n",
                 obj_override);
         goto fail;
       }
       // Validate external .o/.obj relocatable
-      for (int k = 0; k < obj_count; ++k) {
-        if (!is_relocatable_obj(obj_inputs[k])) {
+      for (int k = 0; k < obj_count; ++k)
+      {
+        if (!is_relocatable_obj(obj_inputs[k]))
+        {
           fprintf(stderr,
                   "error: input '%s' is not a relocatable object file.\n",
                   obj_inputs[k]);
@@ -2985,12 +3446,15 @@ int main(int argc, char **argv) {
 
   module_registry_reset();
   int rc = 0;
-  if (!emit_library && cclib_count > 0) {
-    for (int i = 0; i < cclib_count; ++i) {
+  if (!emit_library && cclib_count > 0)
+  {
+    for (int i = 0; i < cclib_count; ++i)
+    {
       if (load_cclib_library(
               cclib_inputs[i], &loaded_libraries, &loaded_library_count,
               &loaded_library_cap, &loaded_library_functions,
-              &loaded_library_function_count, &loaded_library_function_cap)) {
+              &loaded_library_function_count, &loaded_library_function_cap))
+      {
         rc = 1;
         goto cleanup;
       }
@@ -2998,12 +3462,15 @@ int main(int argc, char **argv) {
   }
 
   int library_codegen_units = 0;
-  if (!emit_library && loaded_library_count > 0) {
-    for (int i = 0; i < loaded_library_count; ++i) {
+  if (!emit_library && loaded_library_count > 0)
+  {
+    for (int i = 0; i < loaded_library_count; ++i)
+    {
       const LoadedLibrary *lib = &loaded_libraries[i];
       if (!lib)
         continue;
-      for (uint32_t mi = 0; mi < lib->file.module_count; ++mi) {
+      for (uint32_t mi = 0; mi < lib->file.module_count; ++mi)
+      {
         const CclibModule *mod = &lib->file.modules[mi];
         if (mod && mod->ccbin_data && mod->ccbin_size > 0)
           ++library_codegen_units;
@@ -3029,19 +3496,21 @@ int main(int argc, char **argv) {
 
   if (compiler_verbose_enabled() && ce_count > 0)
     verbose_section("Loading CE units");
-  for (int fi = 0; fi < ce_count; ++fi) {
+  for (int fi = 0; fi < ce_count; ++fi)
+  {
     const char *input = ce_inputs[fi];
     if (compiler_verbose_enabled())
       verbose_progress("ce-load", fi + 1, ce_count);
     int len = 0;
     char *src = read_all(input, &len);
-    if (!src) {
+    if (!src)
+    {
       rc = 1;
       break;
     }
     int pre_len = 0;
-  char *preprocessed = chance_preprocess_source(
-    input, src, len, &pre_len, target_arch_to_macro(target_arch));
+    char *preprocessed = chance_preprocess_source(
+        input, src, len, &pre_len, target_arch_to_macro(target_arch));
     SourceBuffer sb = {preprocessed ? preprocessed : src,
                        preprocessed ? pre_len : len, input};
     Parser *ps = parser_create(sb);
@@ -3065,10 +3534,12 @@ int main(int argc, char **argv) {
 
   if (compiler_verbose_enabled() && ce_count > 0)
     verbose_section("Registering CE externs");
-  for (int target = 0; target < ce_count; ++target) {
+  for (int target = 0; target < ce_count; ++target)
+  {
     if (compiler_verbose_enabled())
       verbose_progress("ce-extern", target + 1, ce_count);
-    for (int source = 0; source < ce_count; ++source) {
+    for (int source = 0; source < ce_count; ++source)
+    {
       if (target == source)
         continue;
       sema_register_foreign_unit_symbols(units[target].sc, units[target].unit,
@@ -3078,7 +3549,8 @@ int main(int argc, char **argv) {
 
   if (compiler_verbose_enabled() && ce_count > 0)
     verbose_section("Codegen CE units");
-  for (int fi = 0; fi < ce_count && rc == 0; ++fi) {
+  for (int fi = 0; fi < ce_count && rc == 0; ++fi)
+  {
     UnitCompile *uc = &units[fi];
     Node *unit = uc->unit;
     SemaContext *sc = uc->sc;
@@ -3088,7 +3560,8 @@ int main(int argc, char **argv) {
       verbose_progress("ce-codegen", fi + 1, ce_count);
 
     int serr = sema_check_unit(sc, unit);
-    if (!serr) {
+    if (!serr)
+    {
       char dir[512], base[512];
       split_path(uc->input_path, dir, sizeof(dir), base, sizeof(base));
 
@@ -3099,16 +3572,25 @@ int main(int argc, char **argv) {
       int ccb_is_temp = 1;
 
       char asm_path[1024];
-      build_path_with_ext(dir, base, ".S", asm_path, sizeof(asm_path));
-      if (stop_after_asm && ends_with_icase(out, ".s"))
-        snprintf(asm_path, sizeof(asm_path), "%s", out);
+      const char *asm_ext = (target_arch == ARCH_BSLASH) ? ".bas" : ".S";
+      build_path_with_ext(dir, base, asm_ext, asm_path, sizeof(asm_path));
+      if (stop_after_asm)
+      {
+        int wants_override = ends_with_icase(out, ".s");
+        if (target_arch == ARCH_BSLASH)
+          wants_override |= ends_with_icase(out, ".bas");
+        if (wants_override)
+          snprintf(asm_path, sizeof(asm_path), "%s", out);
+      }
 
       char objOut[1024] = {0};
       int obj_is_temp = 0;
       int need_obj = (!stop_after_ccb && !stop_after_asm) &&
                      (no_link || multi_link || target_arch != ARCH_NONE);
-      if (need_obj) {
-        if (no_link && obj_override) {
+      if (need_obj)
+      {
+        if (no_link && obj_override)
+        {
           build_path_with_ext(dir, base,
 #ifdef _WIN32
                               ".co.tmp.obj"
@@ -3117,7 +3599,9 @@ int main(int argc, char **argv) {
 #endif
                               ,
                               objOut, sizeof(objOut));
-        } else if (no_link) {
+        }
+        else if (no_link)
+        {
           build_path_with_ext(dir, base,
 #ifdef _WIN32
                               ".obj"
@@ -3126,7 +3610,9 @@ int main(int argc, char **argv) {
 #endif
                               ,
                               objOut, sizeof(objOut));
-        } else if (multi_link) {
+        }
+        else if (multi_link)
+        {
           build_path_with_ext(dir, base,
 #ifdef _WIN32
                               ".co.tmp.obj"
@@ -3136,7 +3622,9 @@ int main(int argc, char **argv) {
                               ,
                               objOut, sizeof(objOut));
           obj_is_temp = 1;
-        } else {
+        }
+        else
+        {
           build_path_with_ext(dir, base,
 #ifdef _WIN32
                               ".tmp.obj"
@@ -3148,6 +3636,9 @@ int main(int argc, char **argv) {
           obj_is_temp = 1;
         }
       }
+
+      int imported_count = 0;
+      Symbol *imported_syms = sema_copy_imported_function_symbols(sc, &imported_count);
 
       CodegenOptions co = {.freestanding = freestanding != 0,
                            .m32 = m32 != 0,
@@ -3161,33 +3652,44 @@ int main(int argc, char **argv) {
                            .os = target_os,
                            .externs = NULL,
                            .extern_count = 0,
+               .imported_externs = imported_syms,
+               .imported_extern_count = imported_count,
                            .opt_level = opt_level};
       int extern_count = 0;
       const Symbol *extern_syms = parser_get_externs(ps, &extern_count);
       co.externs = extern_syms;
       co.extern_count = extern_count;
       rc = codegen_ccb_write_module(unit, &co);
+      free(imported_syms);
 
-      if (!rc) {
+      if (!rc)
+      {
         if (codegen_ccb_resolve_module_path(&co, ccb_path, sizeof(ccb_path)))
           rc = 1;
       }
 
-      if (!rc && emit_library) {
+      if (!rc && emit_library)
+      {
         if (collect_metadata_for_unit(unit, ccb_path, &library_modules,
                                       &library_module_count,
-                                      &library_module_cap)) {
+                                      &library_module_cap))
+        {
           rc = 1;
-        } else {
+        }
+        else
+        {
           const char *module_name = unit->module_path.full_name;
           LibraryModuleData *libmod =
               module_name
                   ? find_or_add_module(&library_modules, &library_module_count,
                                        &library_module_cap, module_name)
                   : NULL;
-          if (!libmod) {
+          if (!libmod)
+          {
             rc = 1;
-          } else {
+          }
+          else
+          {
             char ccbin_dir[512];
             char ccbin_base[512];
             split_path(ccb_path, ccbin_dir, sizeof(ccbin_dir), ccbin_base,
@@ -3195,16 +3697,20 @@ int main(int argc, char **argv) {
             char ccbin_path[1024];
             build_path_with_ext(ccbin_dir, ccbin_base, ".ccbin", ccbin_path,
                                 sizeof(ccbin_path));
-            if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use) {
+            if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
+            {
               fprintf(stderr, "error: chancecodec executable not resolved "
                               "(required for --library)\n");
               rc = 1;
-            } else {
+            }
+            else
+            {
               int spawn_errno = 0;
               int ccbin_rc = run_chancecodec_emit_ccbin(
                   chancecodec_cmd_to_use, ccb_path, ccbin_path, opt_level,
                   &spawn_errno);
-              if (ccbin_rc != 0) {
+              if (ccbin_rc != 0)
+              {
                 if (ccbin_rc < 0)
                   fprintf(stderr, "failed to launch chancecodec '%s': %s\n",
                           chancecodec_cmd_to_use, strerror(spawn_errno));
@@ -3215,18 +3721,23 @@ int main(int argc, char **argv) {
                 rc = 1;
                 remove(ccbin_path);
                 remove(ccb_path);
-              } else {
+              }
+              else
+              {
                 uint8_t *ccbin_data = NULL;
                 size_t ccbin_size = 0;
                 int read_err =
                     read_file_bytes(ccbin_path, &ccbin_data, &ccbin_size);
-                if (read_err != 0) {
+                if (read_err != 0)
+                {
                   fprintf(stderr, "error: failed reading ccbin '%s' (%s)\n",
                           ccbin_path, strerror(read_err));
                   rc = 1;
                   remove(ccbin_path);
                   remove(ccb_path);
-                } else {
+                }
+                else
+                {
                   if (libmod->ccbin_data)
                     free(libmod->ccbin_data);
                   libmod->ccbin_data = ccbin_data;
@@ -3242,17 +3753,43 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (!rc && target_arch == ARCH_X86 && !stop_after_ccb) {
-        const char *backend =
-            chancecode_backend ? chancecode_backend : "x86-gas";
-        const char *target_os_option = target_os_to_option(target_os);
-        if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use) {
+      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 || target_arch == ARCH_BSLASH) &&
+          !stop_after_ccb)
+      {
+        const char *backend = chancecode_backend;
+        if (!backend)
+        {
+          if (target_arch == ARCH_X86)
+            backend = "x86-gas";
+          else if (target_arch == ARCH_ARM64)
+            backend = "arm64-macos";
+          else
+            backend = "bslash";
+        }
+        const char *target_os_option = NULL;
+        if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
+          target_os_option = target_os_to_option(target_os);
+        if (target_arch == ARCH_ARM64 && (!target_os_option ||
+                                          strcmp(target_os_option, "macos") != 0))
+        {
+          fprintf(stderr,
+                  "arm64 backend requires --target-os macos (current target-os is '%s')\n",
+                  target_os_option ? target_os_option : "<unset>");
+          rc = 1;
+        }
+        if (rc)
+          break;
+        if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
+        {
           fprintf(stderr,
                   "internal error: ChanceCode CLI command unresolved\n");
           rc = 1;
-        } else {
+        }
+        else
+        {
           char display_cmd[4096];
-          if (opt_level > 0) {
+          if (opt_level > 0)
+          {
             if (target_os_option)
               snprintf(display_cmd, sizeof(display_cmd),
                        "\"%s\" --backend %s -O%d --output \"%s\" --option "
@@ -3264,7 +3801,9 @@ int main(int argc, char **argv) {
                        "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
                        chancecodec_cmd_to_use, backend, opt_level, asm_path,
                        ccb_path);
-          } else {
+          }
+          else
+          {
             if (target_os_option)
               snprintf(display_cmd, sizeof(display_cmd),
                        "\"%s\" --backend %s --output \"%s\" --option "
@@ -3281,15 +3820,20 @@ int main(int argc, char **argv) {
           int chance_rc = run_chancecodec_process(
               chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path,
               target_os_option, &spawn_errno);
-          if (chance_rc != 0) {
-            if (chance_rc < 0) {
+          if (chance_rc != 0)
+          {
+            if (chance_rc < 0)
+            {
               fprintf(stderr, "failed to launch chancecodec '%s': %s\n",
                       chancecodec_cmd_to_use, strerror(spawn_errno));
-            } else {
+            }
+            else
+            {
               fprintf(stderr, "chancecodec failed (rc=%d): %s\n", chance_rc,
                       display_cmd);
             }
-            if (!chancecodec_has_override && chancecodec_uses_fallback) {
+            if (!chancecodec_has_override && chancecodec_uses_fallback)
+            {
               fprintf(stderr,
                       "hint: use --chancecodec <path> or set CHANCECODEC_CMD "
                       "to point at the ChanceCode CLI executable\n");
@@ -3299,36 +3843,50 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (!rc && target_arch == ARCH_X86 && !stop_after_ccb &&
-          !stop_after_asm) {
-        if (!need_obj) {
+      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb &&
+          !stop_after_asm)
+      {
+        if (!need_obj)
+        {
           fprintf(stderr,
                   "internal error: object output expected but path missing\n");
           rc = 1;
-        } else {
+        }
+        else
+        {
           char cc_cmd[4096];
           size_t pos =
               (size_t)snprintf(cc_cmd, sizeof(cc_cmd), "cc -c \"%s\" -o \"%s\"",
                                asm_path, objOut);
-          if (pos >= sizeof(cc_cmd)) {
+          if (pos >= sizeof(cc_cmd))
+          {
             fprintf(stderr, "command buffer exhausted for cc invocation\n");
             rc = 1;
-          } else {
-            if (freestanding) {
+          }
+          else
+          {
+            if (freestanding)
+            {
               strncat(cc_cmd, " -ffreestanding -nostdlib",
                       sizeof(cc_cmd) - strlen(cc_cmd) - 1);
             }
 #ifdef _WIN32
             strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
-            if (opt_level > 0) {
+            if (target_arch == ARCH_ARM64)
+              strncat(cc_cmd, " -arch arm64",
+                      sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+            if (opt_level > 0)
+            {
               char optbuf[8];
               snprintf(optbuf, sizeof(optbuf), " -O%d", opt_level);
               strncat(cc_cmd, optbuf, sizeof(cc_cmd) - strlen(cc_cmd) - 1);
             }
 
             int cc_rc = system(cc_cmd);
-            if (cc_rc != 0) {
+            if (cc_rc != 0)
+            {
               fprintf(stderr, "assembler failed (rc=%d): %s\n", cc_rc, cc_cmd);
               rc = 1;
             }
@@ -3336,29 +3894,37 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (!rc && target_arch == ARCH_X86) {
+      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+                  target_arch == ARCH_BSLASH))
+      {
         if (!stop_after_ccb && ccb_is_temp)
           remove(ccb_path);
         if (!stop_after_asm)
           remove(asm_path);
       }
 
-      if (!rc && target_arch == ARCH_X86 && !stop_after_ccb &&
-          !stop_after_asm && !no_link && !multi_link) {
+      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb &&
+          !stop_after_asm && !no_link && !multi_link)
+      {
         snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
         have_single_obj = 1;
         single_obj_is_temp = obj_is_temp;
       }
 
       if (!rc && ((no_link && obj_override) || multi_link) &&
-          objOut[0] != '\0') {
-        if (to_cnt == to_cap) {
+          objOut[0] != '\0')
+      {
+        if (to_cnt == to_cap)
+        {
           to_cap = to_cap ? to_cap * 2 : 8;
           temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
         }
         temp_objs[to_cnt++] = xstrdup(objOut);
       }
-    } else {
+    }
+    else
+    {
       rc = 1;
     }
 
@@ -3366,19 +3932,23 @@ int main(int argc, char **argv) {
     uc->sc = NULL;
     ast_free(unit);
     uc->unit = NULL;
-    if (ps) {
+    if (ps)
+    {
       parser_destroy(ps);
       uc->parser = NULL;
     }
-    if (uc->stripped) {
+    if (uc->stripped)
+    {
       free(uc->stripped);
       uc->stripped = NULL;
     }
-    if (uc->src) {
+    if (uc->src)
+    {
       free(uc->src);
       uc->src = NULL;
     }
-    if (uc->input_path) {
+    if (uc->input_path)
+    {
       free(uc->input_path);
       uc->input_path = NULL;
     }
@@ -3386,10 +3956,12 @@ int main(int argc, char **argv) {
     if (rc)
       break;
   }
-  if (!emit_library) {
+  if (!emit_library)
+  {
     if (compiler_verbose_enabled() && ccb_count > 0)
       verbose_section("Processing CCB inputs");
-    for (int ci = 0; !rc && ci < ccb_count; ++ci) {
+    for (int ci = 0; !rc && ci < ccb_count; ++ci)
+    {
       const char *ccb_input = ccb_inputs[ci];
       if (compiler_verbose_enabled())
         verbose_progress("ccb-proc", ci + 1, ccb_count);
@@ -3401,16 +3973,25 @@ int main(int argc, char **argv) {
       int ccb_is_temp = 0;
 
       char asm_path[1024];
-      build_path_with_ext(dir, base, ".S", asm_path, sizeof(asm_path));
-      if (stop_after_asm && ends_with_icase(out, ".s"))
-        snprintf(asm_path, sizeof(asm_path), "%s", out);
+      const char *asm_ext = (target_arch == ARCH_BSLASH) ? ".bas" : ".S";
+      build_path_with_ext(dir, base, asm_ext, asm_path, sizeof(asm_path));
+      if (stop_after_asm)
+      {
+        int wants_override = ends_with_icase(out, ".s");
+        if (target_arch == ARCH_BSLASH)
+          wants_override |= ends_with_icase(out, ".bas");
+        if (wants_override)
+          snprintf(asm_path, sizeof(asm_path), "%s", out);
+      }
 
       char objOut[1024] = {0};
       int obj_is_temp = 0;
       int need_obj = (!stop_after_ccb && !stop_after_asm) &&
                      (no_link || multi_link || target_arch != ARCH_NONE);
-      if (need_obj) {
-        if (no_link && obj_override) {
+      if (need_obj)
+      {
+        if (no_link && obj_override)
+        {
           build_path_with_ext(dir, base,
 #ifdef _WIN32
                               ".co.tmp.obj"
@@ -3419,7 +4000,9 @@ int main(int argc, char **argv) {
 #endif
                               ,
                               objOut, sizeof(objOut));
-        } else if (no_link) {
+        }
+        else if (no_link)
+        {
           build_path_with_ext(dir, base,
 #ifdef _WIN32
                               ".obj"
@@ -3428,7 +4011,9 @@ int main(int argc, char **argv) {
 #endif
                               ,
                               objOut, sizeof(objOut));
-        } else if (multi_link) {
+        }
+        else if (multi_link)
+        {
           build_path_with_ext(dir, base,
 #ifdef _WIN32
                               ".co.tmp.obj"
@@ -3438,7 +4023,9 @@ int main(int argc, char **argv) {
                               ,
                               objOut, sizeof(objOut));
           obj_is_temp = 1;
-        } else {
+        }
+        else
+        {
           build_path_with_ext(dir, base,
 #ifdef _WIN32
                               ".tmp.obj"
@@ -3451,18 +4038,42 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (target_arch == ARCH_X86 && !stop_after_ccb) {
-        const char *backend =
-            chancecode_backend ? chancecode_backend : "x86-gas";
-        const char *target_os_option = target_os_to_option(target_os);
-        if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use) {
+      if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+           target_arch == ARCH_BSLASH) &&
+          !stop_after_ccb)
+      {
+        const char *backend = chancecode_backend;
+        if (!backend)
+        {
+          if (target_arch == ARCH_X86)
+            backend = "x86-gas";
+          else if (target_arch == ARCH_ARM64)
+            backend = "arm64-macos";
+          else
+            backend = "bslash";
+        }
+        const char *target_os_option = NULL;
+        if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
+          target_os_option = target_os_to_option(target_os);
+        if (target_arch == ARCH_ARM64 &&
+            (!target_os_option || strcmp(target_os_option, "macos") != 0))
+        {
+          fprintf(stderr,
+                  "arm64 backend requires --target-os macos (current target-os is '%s')\n",
+                  target_os_option ? target_os_option : "<unset>");
+          rc = 1;
+          break;
+        }
+        if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
+        {
           fprintf(stderr,
                   "internal error: ChanceCode CLI command unresolved\n");
           rc = 1;
           break;
         }
         char display_cmd[4096];
-        if (opt_level > 0) {
+        if (opt_level > 0)
+        {
           if (target_os_option)
             snprintf(display_cmd, sizeof(display_cmd),
                      "\"%s\" --backend %s -O%d --output \"%s\" --option "
@@ -3474,7 +4085,9 @@ int main(int argc, char **argv) {
                      "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
                      chancecodec_cmd_to_use, backend, opt_level, asm_path,
                      ccb_path);
-        } else {
+        }
+        else
+        {
           if (target_os_option)
             snprintf(display_cmd, sizeof(display_cmd),
                      "\"%s\" --backend %s --output \"%s\" --option "
@@ -3488,18 +4101,23 @@ int main(int argc, char **argv) {
         }
 
         int spawn_errno = 0;
-        int chance_rc = run_chancecodec_process(chancecodec_cmd_to_use, backend,
-                                                opt_level, asm_path, ccb_path,
-                                                target_os_option, &spawn_errno);
-        if (chance_rc != 0) {
-          if (chance_rc < 0) {
+        int chance_rc = run_chancecodec_process(
+            chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path,
+            target_os_option, &spawn_errno);
+        if (chance_rc != 0)
+        {
+          if (chance_rc < 0)
+          {
             fprintf(stderr, "failed to launch chancecodec '%s': %s\n",
                     chancecodec_cmd_to_use, strerror(spawn_errno));
-          } else {
+          }
+          else
+          {
             fprintf(stderr, "chancecodec failed (rc=%d): %s\n", chance_rc,
                     display_cmd);
           }
-          if (!chancecodec_has_override && chancecodec_uses_fallback) {
+          if (!chancecodec_has_override && chancecodec_uses_fallback)
+          {
             fprintf(stderr,
                     "hint: use --chancecodec <path> or set CHANCECODEC_CMD to "
                     "point at the ChanceCode CLI executable\n");
@@ -3509,8 +4127,11 @@ int main(int argc, char **argv) {
         }
       }
 
-      if (target_arch == ARCH_X86 && !stop_after_ccb && !stop_after_asm) {
-        if (!need_obj) {
+      if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb && !stop_after_asm)
+      {
+        if (!need_obj)
+        {
           fprintf(stderr,
                   "internal error: object output expected but path missing\n");
           rc = 1;
@@ -3520,46 +4141,59 @@ int main(int argc, char **argv) {
         char cc_cmd[4096];
         size_t pos = (size_t)snprintf(
             cc_cmd, sizeof(cc_cmd), "cc -c \"%s\" -o \"%s\"", asm_path, objOut);
-        if (pos >= sizeof(cc_cmd)) {
+        if (pos >= sizeof(cc_cmd))
+        {
           fprintf(stderr, "command buffer exhausted for cc invocation\n");
           rc = 1;
           break;
         }
-        if (freestanding) {
+        if (freestanding)
+        {
           strncat(cc_cmd, " -ffreestanding -nostdlib",
                   sizeof(cc_cmd) - strlen(cc_cmd) - 1);
         }
 #ifdef _WIN32
         strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
-        if (opt_level > 0) {
+        if (target_arch == ARCH_ARM64)
+          strncat(cc_cmd, " -arch arm64",
+                  sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+        if (opt_level > 0)
+        {
           char optbuf[8];
           snprintf(optbuf, sizeof(optbuf), " -O%d", opt_level);
           strncat(cc_cmd, optbuf, sizeof(cc_cmd) - strlen(cc_cmd) - 1);
         }
 
         int cc_rc = system(cc_cmd);
-        if (cc_rc != 0) {
+        if (cc_rc != 0)
+        {
           fprintf(stderr, "assembler failed (rc=%d): %s\n", cc_rc, cc_cmd);
           rc = 1;
           break;
         }
       }
 
-      if (target_arch == ARCH_X86) {
+      if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+          target_arch == ARCH_BSLASH)
+      {
         if (!stop_after_asm)
           remove(asm_path);
       }
 
-      if (target_arch == ARCH_X86 && !stop_after_ccb && !stop_after_asm &&
-          !no_link && !multi_link) {
+      if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+          !stop_after_ccb && !stop_after_asm &&
+          !no_link && !multi_link)
+      {
         snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
         have_single_obj = 1;
         single_obj_is_temp = obj_is_temp;
       }
 
-      if (((no_link && obj_override) || multi_link) && objOut[0] != '\0') {
-        if (to_cnt == to_cap) {
+      if (((no_link && obj_override) || multi_link) && objOut[0] != '\0')
+      {
+        if (to_cnt == to_cap)
+        {
           to_cap = to_cap ? to_cap * 2 : 8;
           temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
         }
@@ -3567,13 +4201,19 @@ int main(int argc, char **argv) {
       }
     }
   }
-  if (!rc && !emit_library && target_arch == ARCH_X86 && !stop_after_ccb) {
+  if (!rc && !emit_library &&
+      (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+       target_arch == ARCH_BSLASH) &&
+      !stop_after_ccb)
+  {
     if (compiler_verbose_enabled() && library_codegen_units > 0)
       verbose_section("Processing library modules");
     int verbose_lib_progress = 0;
-    for (int li = 0; li < loaded_library_count && !rc; ++li) {
+    for (int li = 0; li < loaded_library_count && !rc; ++li)
+    {
       LoadedLibrary *lib = &loaded_libraries[li];
-      for (uint32_t mi = 0; mi < lib->file.module_count && !rc; ++mi) {
+      for (uint32_t mi = 0; mi < lib->file.module_count && !rc; ++mi)
+      {
         const CclibModule *mod = &lib->file.modules[mi];
         if (!mod->ccbin_data || mod->ccbin_size == 0)
           continue;
@@ -3599,13 +4239,15 @@ int main(int argc, char **argv) {
         char ccbin_path[1024];
         build_path_with_ext(lib_dir, base_component, ".tmp.ccbin", ccbin_path,
                             sizeof(ccbin_path));
-        if (lib->ccbin_temp_paths) {
+        if (lib->ccbin_temp_paths)
+        {
           free(lib->ccbin_temp_paths[mi]);
           lib->ccbin_temp_paths[mi] = xstrdup(ccbin_path);
         }
         int write_err =
             write_file_bytes(ccbin_path, mod->ccbin_data, mod->ccbin_size);
-        if (write_err != 0) {
+        if (write_err != 0)
+        {
           fprintf(stderr, "error: failed to materialize ccbin '%s' (%s)\n",
                   ccbin_path, strerror(write_err));
           rc = 1;
@@ -3613,17 +4255,26 @@ int main(int argc, char **argv) {
         }
 
         char asm_path[1024];
-        build_path_with_ext(lib_dir, base_component, ".S", asm_path,
+        const char *asm_ext = (target_arch == ARCH_BSLASH) ? ".bas" : ".S";
+        build_path_with_ext(lib_dir, base_component, asm_ext, asm_path,
                             sizeof(asm_path));
-        if (stop_after_asm && ends_with_icase(out, ".s"))
-          snprintf(asm_path, sizeof(asm_path), "%s", out);
+        if (stop_after_asm)
+        {
+          int wants_override = ends_with_icase(out, ".s");
+          if (target_arch == ARCH_BSLASH)
+            wants_override |= ends_with_icase(out, ".bas");
+          if (wants_override)
+            snprintf(asm_path, sizeof(asm_path), "%s", out);
+        }
 
         char objOut[1024] = {0};
         int obj_is_temp = 0;
         int need_obj = (!stop_after_ccb && !stop_after_asm) &&
                        (no_link || multi_link || target_arch != ARCH_NONE);
-        if (need_obj) {
-          if (no_link && obj_override) {
+        if (need_obj)
+        {
+          if (no_link && obj_override)
+          {
             build_path_with_ext(lib_dir, base_component,
 #ifdef _WIN32
                                 ".co.tmp.obj"
@@ -3632,7 +4283,9 @@ int main(int argc, char **argv) {
 #endif
                                 ,
                                 objOut, sizeof(objOut));
-          } else if (no_link) {
+          }
+          else if (no_link)
+          {
             build_path_with_ext(lib_dir, base_component,
 #ifdef _WIN32
                                 ".obj"
@@ -3641,7 +4294,9 @@ int main(int argc, char **argv) {
 #endif
                                 ,
                                 objOut, sizeof(objOut));
-          } else if (multi_link) {
+          }
+          else if (multi_link)
+          {
             build_path_with_ext(lib_dir, base_component,
 #ifdef _WIN32
                                 ".co.tmp.obj"
@@ -3651,7 +4306,9 @@ int main(int argc, char **argv) {
                                 ,
                                 objOut, sizeof(objOut));
             obj_is_temp = 1;
-          } else {
+          }
+          else
+          {
             build_path_with_ext(lib_dir, base_component,
 #ifdef _WIN32
                                 ".tmp.obj"
@@ -3664,11 +4321,22 @@ int main(int argc, char **argv) {
           }
         }
 
-        const char *backend =
-            chancecode_backend ? chancecode_backend : "x86-gas";
-        const char *target_os_option = target_os_to_option(target_os);
+        const char *backend = chancecode_backend;
+        if (!backend)
+        {
+          if (target_arch == ARCH_X86)
+            backend = "x86-gas";
+          else if (target_arch == ARCH_ARM64)
+            backend = "arm64-macos";
+          else
+            backend = "bslash";
+        }
+        const char *target_os_option = NULL;
+        if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
+          target_os_option = target_os_to_option(target_os);
         char display_cmd[4096];
-        if (opt_level > 0) {
+        if (opt_level > 0)
+        {
           if (target_os_option)
             snprintf(display_cmd, sizeof(display_cmd),
                      "\"%s\" --backend %s -O%d --output \"%s\" --option "
@@ -3680,7 +4348,9 @@ int main(int argc, char **argv) {
                      "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
                      chancecodec_cmd_to_use, backend, opt_level, asm_path,
                      ccbin_path);
-        } else {
+        }
+        else
+        {
           if (target_os_option)
             snprintf(display_cmd, sizeof(display_cmd),
                      "\"%s\" --backend %s --output \"%s\" --option "
@@ -3697,7 +4367,8 @@ int main(int argc, char **argv) {
         int chance_rc = run_chancecodec_process(chancecodec_cmd_to_use, backend,
                                                 opt_level, asm_path, ccbin_path,
                                                 target_os_option, &spawn_errno);
-        if (chance_rc != 0) {
+        if (chance_rc != 0)
+        {
           if (chance_rc < 0)
             fprintf(stderr, "failed to launch chancecodec '%s': %s\n",
                     chancecodec_cmd_to_use, strerror(spawn_errno));
@@ -3712,8 +4383,10 @@ int main(int argc, char **argv) {
           break;
         }
 
-        if (!stop_after_ccb && !stop_after_asm) {
-          if (!need_obj) {
+        if (!stop_after_ccb && !stop_after_asm)
+        {
+          if (!need_obj)
+          {
             fprintf(
                 stderr,
                 "internal error: object output expected but path missing\n");
@@ -3725,7 +4398,8 @@ int main(int argc, char **argv) {
           size_t pos =
               (size_t)snprintf(cc_cmd, sizeof(cc_cmd), "cc -c \"%s\" -o \"%s\"",
                                asm_path, objOut);
-          if (pos >= sizeof(cc_cmd)) {
+          if (pos >= sizeof(cc_cmd))
+          {
             fprintf(stderr, "command buffer exhausted for cc invocation\n");
             rc = 1;
             break;
@@ -3736,13 +4410,15 @@ int main(int argc, char **argv) {
 #ifdef _WIN32
           strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
-          if (opt_level > 0) {
+          if (opt_level > 0)
+          {
             char optbuf[8];
             snprintf(optbuf, sizeof(optbuf), " -O%d", opt_level);
             strncat(cc_cmd, optbuf, sizeof(cc_cmd) - strlen(cc_cmd) - 1);
           }
           int cc_rc = system(cc_cmd);
-          if (cc_rc != 0) {
+          if (cc_rc != 0)
+          {
             fprintf(stderr, "assembler failed (rc=%d): %s\n", cc_rc, cc_cmd);
             rc = 1;
             break;
@@ -3752,14 +4428,17 @@ int main(int argc, char **argv) {
         if (!stop_after_asm)
           remove(asm_path);
 
-        if (!stop_after_ccb && !stop_after_asm && !no_link && !multi_link) {
+        if (!stop_after_ccb && !stop_after_asm && !no_link && !multi_link)
+        {
           snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
           have_single_obj = 1;
           single_obj_is_temp = obj_is_temp;
         }
 
-        if (((no_link && obj_override) || multi_link) && objOut[0] != '\0') {
-          if (to_cnt == to_cap) {
+        if (((no_link && obj_override) || multi_link) && objOut[0] != '\0')
+        {
+          if (to_cnt == to_cap)
+          {
             to_cap = to_cap ? to_cap * 2 : 8;
             temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
           }
@@ -3767,7 +4446,8 @@ int main(int argc, char **argv) {
         }
 
         remove(ccbin_path);
-        if (lib->ccbin_temp_paths) {
+        if (lib->ccbin_temp_paths)
+        {
           free(lib->ccbin_temp_paths[mi]);
           lib->ccbin_temp_paths[mi] = NULL;
         }
@@ -3775,12 +4455,17 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (!rc && emit_library) {
-    if (library_module_count == 0) {
+  if (!rc && emit_library)
+  {
+    if (library_module_count == 0)
+    {
       fprintf(stderr, "error: --library did not collect any modules\n");
       rc = 1;
-    } else {
-      if (compiler_verbose_enabled()) {
+    }
+    else
+    {
+      if (compiler_verbose_enabled())
+      {
         verbose_section("Writing library");
         verbose_table_row("Output", out);
         char buf[32];
@@ -3788,7 +4473,8 @@ int main(int argc, char **argv) {
         verbose_table_row("Modules", buf);
       }
       int werr = write_library_file(out, library_modules, library_module_count);
-      if (werr != 0) {
+      if (werr != 0)
+      {
         fprintf(stderr, "error: failed to write library '%s' (%s)\n", out,
                 strerror(werr));
         rc = 1;
@@ -3797,14 +4483,21 @@ int main(int argc, char **argv) {
     goto cleanup;
   }
 
-  if (!rc && multi_link) {
+  if (!rc && multi_link)
+  {
     // Final link of temps + provided objects into an executable
     size_t cmdsz = 4096;
     char *cmd = (char *)xmalloc(cmdsz);
     snprintf(cmd, cmdsz, "cc -o \"%s\"", out);
-    for (int i = 0; i < to_cnt; ++i) {
+    if (target_arch == ARCH_ARM64)
+      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
+    if (target_arch == ARCH_ARM64)
+      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
+    for (int i = 0; i < to_cnt; ++i)
+    {
       size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
-      if (need > cmdsz) {
+      if (need > cmdsz)
+      {
         cmdsz = need + 1024;
         cmd = (char *)realloc(cmd, cmdsz);
       }
@@ -3813,9 +4506,11 @@ int main(int argc, char **argv) {
       strcat(cmd, temp_objs[i]);
       strcat(cmd, "\"");
     }
-    for (int i = 0; i < obj_count; ++i) {
+    for (int i = 0; i < obj_count; ++i)
+    {
       size_t need = strlen(cmd) + strlen(obj_inputs[i]) + 8;
-      if (need > cmdsz) {
+      if (need > cmdsz)
+      {
         cmdsz = need + 1024;
         cmd = (char *)realloc(cmd, cmdsz);
       }
@@ -3824,18 +4519,21 @@ int main(int argc, char **argv) {
       strcat(cmd, obj_inputs[i]);
       strcat(cmd, "\"");
     }
-    if (compiler_verbose_enabled()) {
+    if (compiler_verbose_enabled())
+    {
       verbose_section("Linking executable");
       verbose_table_row("Command", cmd);
     }
     int lrc = system(cmd);
-    if (lrc != 0) {
+    if (lrc != 0)
+    {
       fprintf(stderr, "link failed (rc=%d): %s\n", lrc, cmd);
       rc = 1;
     }
     free(cmd);
     // cleanup temp objects
-    for (int i = 0; i < to_cnt; ++i) {
+    for (int i = 0; i < to_cnt; ++i)
+    {
       remove(temp_objs[i]);
       free(temp_objs[i]);
     }
@@ -3844,32 +4542,45 @@ int main(int argc, char **argv) {
     to_cnt = 0;
     to_cap = 0;
   }
-  if (!rc && have_single_obj) {
+  if (!rc && have_single_obj)
+  {
     char link_cmd[4096];
     snprintf(link_cmd, sizeof(link_cmd), "cc -o \"%s\" \"%s\"", out,
              single_obj_path);
-    if (compiler_verbose_enabled()) {
+    if (target_arch == ARCH_ARM64)
+      strncat(link_cmd, " -arch arm64",
+              sizeof(link_cmd) - strlen(link_cmd) - 1);
+    if (compiler_verbose_enabled())
+    {
       verbose_section("Linking single object");
       verbose_table_row("Command", link_cmd);
     }
     int lrc = system(link_cmd);
-    if (lrc != 0) {
+    if (lrc != 0)
+    {
       fprintf(stderr, "link failed (rc=%d): %s\n", lrc, link_cmd);
       rc = 1;
     }
     if (single_obj_is_temp)
       remove(single_obj_path);
   }
-  if (!rc && no_link && obj_override) {
+  if (!rc && no_link && obj_override)
+  {
     // Merge temps + external objects into obj_override (relocatable link)
     // Build command
     // Validate external objects again (already checked)
     size_t cmdsz = 4096;
     char *cmd = (char *)xmalloc(cmdsz);
     snprintf(cmd, cmdsz, "cc -r -o \"%s\"", obj_override);
-    for (int i = 0; i < to_cnt; ++i) {
+    if (target_arch == ARCH_ARM64)
+      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
+    if (target_arch == ARCH_ARM64)
+      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
+    for (int i = 0; i < to_cnt; ++i)
+    {
       size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
-      if (need > cmdsz) {
+      if (need > cmdsz)
+      {
         cmdsz = need + 1024;
         cmd = (char *)realloc(cmd, cmdsz);
       }
@@ -3878,9 +4589,11 @@ int main(int argc, char **argv) {
       strcat(cmd, temp_objs[i]);
       strcat(cmd, "\"");
     }
-    for (int i = 0; i < obj_count; ++i) {
+    for (int i = 0; i < obj_count; ++i)
+    {
       size_t need = strlen(cmd) + strlen(obj_inputs[i]) + 8;
-      if (need > cmdsz) {
+      if (need > cmdsz)
+      {
         cmdsz = need + 1024;
         cmd = (char *)realloc(cmd, cmdsz);
       }
@@ -3889,18 +4602,21 @@ int main(int argc, char **argv) {
       strcat(cmd, obj_inputs[i]);
       strcat(cmd, "\"");
     }
-    if (compiler_verbose_enabled()) {
+    if (compiler_verbose_enabled())
+    {
       verbose_section("Merging objects");
       verbose_table_row("Command", cmd);
     }
     int lrc = system(cmd);
-    if (lrc != 0) {
+    if (lrc != 0)
+    {
       fprintf(stderr, "relocatable link failed (rc=%d): %s\n", lrc, cmd);
       rc = 1;
     }
     free(cmd);
     // cleanup temp objects
-    for (int i = 0; i < to_cnt; ++i) {
+    for (int i = 0; i < to_cnt; ++i)
+    {
       remove(temp_objs[i]);
       free(temp_objs[i]);
     }
@@ -3910,15 +4626,19 @@ int main(int argc, char **argv) {
     to_cap = 0;
   }
 cleanup:
-  if (temp_objs) {
-    for (int i = 0; i < to_cnt; ++i) {
+  if (temp_objs)
+  {
+    for (int i = 0; i < to_cnt; ++i)
+    {
       remove(temp_objs[i]);
       free(temp_objs[i]);
     }
     free(temp_objs);
   }
-  if (units) {
-    for (int i = 0; i < ce_count; ++i) {
+  if (units)
+  {
+    for (int i = 0; i < ce_count; ++i)
+    {
       UnitCompile *uc = &units[i];
       if (uc->sc)
         sema_destroy(uc->sc);
@@ -3939,32 +4659,38 @@ cleanup:
     free(include_dirs[i]);
   free(include_dirs);
   free_library_module_array(library_modules, library_module_count);
-  if (loaded_library_functions) {
+  if (loaded_library_functions)
+  {
     for (int i = 0; i < loaded_library_function_count; ++i)
       free_loaded_library_function(&loaded_library_functions[i]);
     free(loaded_library_functions);
   }
-  if (loaded_libraries) {
+  if (loaded_libraries)
+  {
     for (int i = 0; i < loaded_library_count; ++i)
       free_loaded_library(&loaded_libraries[i]);
     free(loaded_libraries);
   }
-  if (owned_ce_inputs) {
+  if (owned_ce_inputs)
+  {
     for (int i = 0; i < owned_ce_count; ++i)
       free(owned_ce_inputs[i]);
     free(owned_ce_inputs);
   }
-  if (owned_ccb_inputs) {
+  if (owned_ccb_inputs)
+  {
     for (int i = 0; i < owned_ccb_count; ++i)
       free(owned_ccb_inputs[i]);
     free(owned_ccb_inputs);
   }
-  if (owned_cclib_inputs) {
+  if (owned_cclib_inputs)
+  {
     for (int i = 0; i < owned_cclib_count; ++i)
       free(owned_cclib_inputs[i]);
     free(owned_cclib_inputs);
   }
-  if (owned_obj_inputs) {
+  if (owned_obj_inputs)
+  {
     for (int i = 0; i < owned_obj_count; ++i)
       free(owned_obj_inputs[i]);
     free(owned_obj_inputs);

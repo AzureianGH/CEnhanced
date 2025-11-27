@@ -352,6 +352,8 @@ const char *node_kind_name(NodeKind kind)
         return "logical AND";
     case ND_LOR:
         return "logical OR";
+    case ND_LNOT:
+        return "logical NOT";
     case ND_SIZEOF:
         return "sizeof expression";
     case ND_TYPEOF:

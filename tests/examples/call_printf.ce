@@ -232,8 +232,11 @@ expose fun main() -> i32
     assert(testintpp[0][0] == 123, "double pointer deref == 123");
 
     TC.SmallTest* addptr = Std.Memory.alloc(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
+    
     addptr[0] = construct_thing();
     addptr[1] = another;
+
+    
 
     assert(addptr[0].smallValue == 5, "addptr[0].smallValue == 5");
     assert(addptr[1].smallValue == 123, "addptr[1].smallValue == 123");
@@ -404,7 +407,8 @@ expose fun main() -> i32
     assert(varargs_sum == 150, "varargs sum is 150");
 
     
-    test_diffvarargs(77, 3.14f, "varargs test");
+    test_diffvarargs(10, 77, 3.14f, "varargs test");
+    internal_diffvarargs(0, 88, 2.71828, "internal varargs test");
 
     i32[3] fixed_array = {10, 20, 30};
     i32 fixed_sum = fixed_array[0] + fixed_array[1] + fixed_array[2];
@@ -475,6 +479,16 @@ expose fun main() -> i32
     printf("All tests completed successfully!\n");
 
     ret final_sum; // expect 168
+}
+expose fun internal_diffvarargs(i32 empty, ...) -> void
+{
+    va_list list = va_start();
+    i32 first = va_arg(list, i32);
+    f64 second = va_arg(list, f64);
+    string third = va_arg(list, string);
+    printf("internal_diffvarargs: first=%d, second=%lf, third=%s\n", first, second, third);
+    va_end(list);
+    ret;
 }
 
 hide fun funptr_test(i32 a, i32 b) -> i32

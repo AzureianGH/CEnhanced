@@ -88,6 +88,7 @@ typedef enum
     TK_MINUSMINUS, // --
     TK_ASSIGN,     // =
     TK_EQEQ,       // ==
+    TK_BANG,       // !
     TK_BANGEQ,     // !=
     TK_LT,         // <
     TK_GT,         // >
@@ -223,6 +224,7 @@ typedef enum
     ND_ADDR,
     ND_LAND,
     ND_LOR,
+    ND_LNOT,
     ND_SIZEOF,
     ND_TYPEOF,
     ND_EQ,
@@ -270,11 +272,18 @@ typedef struct Node
     int param_count;
     int is_varargs;
     int is_chancecode;
+    int is_literal;
+    int force_inline_literal;
     struct
     {
         char **lines;
         int count;
     } chancecode;
+    struct
+    {
+        char **lines;
+        int count;
+    } literal;
     // Metadata overrides for backend emission
     struct
     {
@@ -302,22 +311,22 @@ typedef struct Node
     const char *call_name;
     struct Node **args;
     int arg_count;
-    Type *call_func_type; // canonicalized function signature when available
-    int call_is_indirect; // 1 for pointer-based calls
-    int call_is_varargs;  // 1 when call accepts varargs (used for indirect calls)
+    Type *call_func_type;           // canonicalized function signature when available
+    int call_is_indirect;           // 1 for pointer-based calls
+    int call_is_varargs;            // 1 when call accepts varargs (used for indirect calls)
     const struct Node *call_target; // resolved direct call target when available
     // For ND_VAR_DECL
     const char *var_name;
     Type *var_type;
-    int var_is_const;  // for ND_VAR_DECL
-    int var_is_global; // set on declarations/references that live at global scope
-    int var_is_array;  // for ND_VAR references to array-typed variables
-    int var_is_function; // for ND_VAR references that name a function symbol
+    int var_is_const;                 // for ND_VAR_DECL
+    int var_is_global;                // set on declarations/references that live at global scope
+    int var_is_array;                 // for ND_VAR references to array-typed variables
+    int var_is_function;              // for ND_VAR references that name a function symbol
     struct Node *referenced_function; // points at referenced function definition when resolved
-    const ModulePath *module_ref; // tracks originating module for qualified references
-    int module_ref_parts;         // number of module path segments consumed in expression
-    const char *module_type_name; // resolved type name within module, when applicable
-    int module_type_is_enum;      // 1 when module_type_name refers to an enum for chained lookups
+    const ModulePath *module_ref;     // tracks originating module for qualified references
+    int module_ref_parts;             // number of module path segments consumed in expression
+    const char *module_type_name;     // resolved type name within module, when applicable
+    int module_type_is_enum;          // 1 when module_type_name refers to an enum for chained lookups
     // For ND_BLOCK
     struct Node **stmts;
     int stmt_count;
@@ -325,6 +334,7 @@ typedef struct Node
     const char *var_ref;
     int is_noreturn;
     int is_entrypoint;
+    int is_preserve;
     // For ND_MEMBER
     const char *field_name;
     int field_index;
@@ -337,7 +347,7 @@ typedef struct Node
         const char **designators; // NULL for positional
         int *field_indices;       // computed during sema, parallel to elems
         int count;
-        int is_zero; // for {} or {0} special cases
+        int is_zero;          // for {} or {0} special cases
         int is_array_literal; // track '[...]' initializers
     } init;
     // Module metadata (only valid for ND_UNIT)
@@ -354,6 +364,7 @@ void lexer_destroy(Lexer *lx);
 Token lexer_next(Lexer *lx);
 Token lexer_peek(Lexer *lx);
 Token lexer_peek_n(Lexer *lx, int n);
+int lexer_collect_literal_block(Lexer *lx, char **out_text);
 // Accessor for diagnostics: returns the source buffer associated with this
 // lexer
 const SourceBuffer *lexer_source(Lexer *lx);
@@ -398,7 +409,8 @@ typedef enum
 typedef enum
 {
     OS_WINDOWS = 0,
-    OS_LINUX = 1
+    OS_LINUX = 1,
+    OS_MACOS = 2
 } TargetOS;
 
 struct Symbol;
@@ -416,6 +428,8 @@ typedef struct
     TargetOS os;
     const struct Symbol *externs;
     int extern_count;
+    const struct Symbol *imported_externs;
+    int imported_extern_count;
     int opt_level;
 } CodegenOptions;
 
@@ -505,5 +519,6 @@ void sema_destroy(SemaContext *sc);
 int sema_check_unit(SemaContext *sc, Node *unit);
 void sema_register_foreign_unit_symbols(SemaContext *sc, Node *target_unit, Node *foreign_unit);
 void sema_track_imported_function(SemaContext *sc, const char *name, const char *module_full, const Symbol *symbol);
+Symbol *sema_copy_imported_function_symbols(const SemaContext *sc, int *out_count);
 
 #endif // CHANCE_AST_H
