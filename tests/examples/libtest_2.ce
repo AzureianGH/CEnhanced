@@ -28,13 +28,17 @@ expose fun test_varargs(i32 count, i32 unused, ...) -> i32
     ret total;
 }
 
-expose fun test_diffvarargs(...) -> void
+expose fun test_diffvarargs(i32 empty, ...) -> void
 {
     va_list list = va_start();
     i32 first = va_arg(list, i32);
     f64 second = va_arg(list, f64);
     string third = va_arg(list, string);
-    printf("test_diffvarargs: first=%d, second=%f, third=%s\n", first, second, third);
+    printf("test_diffvarargs: first=%d, second=%lf, third=%s\n", first, second, third);
+    if (empty)
+    {
+        printf("  (empty parameter was not zero!)\n");
+    }
     va_end(list);
     ret;
 }

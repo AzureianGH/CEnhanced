@@ -785,10 +785,8 @@ Token lexer_next(Lexer *lx)
             getc2(lx);
             return make_tok(lx, TK_BANGEQ, lx->src.src + lx->idx - 2, 2);
         }
-        diag_error_at(&lx->src, lx->line, lx->col,
-                      "unexpected character '%c' (did you mean '!='?)", c);
         getc2(lx);
-        return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);
+        return make_tok(lx, TK_BANG, lx->src.src + lx->idx - 1, 1);
     }
     // unknown
     diag_error_at(&lx->src, lx->line, lx->col, "unexpected character '%c'", c);

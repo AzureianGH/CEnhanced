@@ -1,0 +1,19 @@
+module Test;
+
+extend from "C" i32 printf(char *, ...);
+
+[EntryPoint]
+expose fun main() -> i32
+{
+    int x = 5;
+    int *p = &x;
+    {
+        int *tmp = p;
+        *tmp++ = 20;
+        p = tmp;
+    }
+
+
+    printf("Value of x after pointer manipulation: %d\n", x);
+    ret 0;
+}

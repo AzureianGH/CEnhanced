@@ -3008,6 +3008,22 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         return 0;
     }
+    case ND_LNOT:
+    {
+        if (!expr->lhs)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "logical '!' missing operand");
+            return 1;
+        }
+        if (ccb_emit_condition(fb, expr->lhs))
+            return 1;
+        if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  compare eq %s", cc_type_name(CC_TYPE_I32)))
+            return 1;
+        return 0;
+    }
     case ND_SUB:
     {
         if (!expr->lhs || !expr->rhs)

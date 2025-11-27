@@ -676,6 +676,12 @@ static void apply_override_metadata(Parser *ps, Node *fn, const struct PendingAt
                               "'.params' varargs ('...') must appear once at the end");
                 exit(1);
             }
+            if (count == 1)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "variadic function must have at least one explicit parameter before '...'");
+                exit(1);
+            }
             fn->is_varargs = 1;
             free(tokens[count - 1]);
             tokens[count - 1] = NULL;
@@ -2445,6 +2451,17 @@ static Node *parse_unary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (p.kind == TK_BANG)
+    {
+        lexer_next(ps->lx);
+        Node *operand = parse_unary(ps);
+        Node *n = new_node(ND_LNOT);
+        n->lhs = operand;
+        n->line = p.line;
+        n->col = p.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     return parse_postfix(ps);
 }
 
@@ -3215,6 +3232,13 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
                           "varargs ('...') must be the final parameter");
             exit(1);
         }
+        if (param_count == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "variadic function '%.*s' must have at least one explicit parameter before '...'",
+                          (int)name.length, name.lexeme);
+            exit(1);
+        }
     }
     expect(ps, TK_RPAREN, ")");
     expect(ps, TK_ARROW, "->");
@@ -3343,6 +3367,13 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
                               "varargs ('...') must be the final parameter");
                 exit(1);
             }
+            if (param_count == 0)
+            {
+                diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                              "variadic function '%.*s' must have at least one explicit parameter before '...'",
+                              (int)name.length, name.lexeme);
+                exit(1);
+            }
         }
         expect(ps, TK_RPAREN, ")");
         expect(ps, TK_ARROW, "->");
@@ -3451,6 +3482,13 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
         {
             diag_error_at(lexer_source(ps->lx), after.line, after.col,
                           "varargs ('...') must be the final parameter");
+            exit(1);
+        }
+        if (param_count == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "variadic function '%.*s' must have at least one explicit parameter before '...'",
+                          (int)name.length, name.lexeme);
             exit(1);
         }
     }

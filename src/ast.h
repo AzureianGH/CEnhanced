@@ -88,6 +88,7 @@ typedef enum
     TK_MINUSMINUS, // --
     TK_ASSIGN,     // =
     TK_EQEQ,       // ==
+    TK_BANG,       // !
     TK_BANGEQ,     // !=
     TK_LT,         // <
     TK_GT,         // >
@@ -223,6 +224,7 @@ typedef enum
     ND_ADDR,
     ND_LAND,
     ND_LOR,
+    ND_LNOT,
     ND_SIZEOF,
     ND_TYPEOF,
     ND_EQ,

@@ -2878,6 +2878,24 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = operand_type;
         return;
     }
+    if (e->kind == ND_LNOT)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "logical '!' requires an operand");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        if (!type_is_int(e->lhs->type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "logical '!' requires integer operand");
+            exit(1);
+        }
+        e->type = type_bool();
+        return;
+    }
     if (e->kind == ND_GT_EXPR || e->kind == ND_LT || e->kind == ND_LE || e->kind == ND_GE)
     {
         check_expr(sc, e->lhs);
@@ -4117,6 +4135,14 @@ static int inline_eval_const_expr(const Node *expr,
         if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &lhs))
             return 0;
         *out_value = inline_normalize_value(~lhs, expr->type);
+        return 1;
+    }
+    case ND_LNOT:
+    {
+        int64_t lhs = 0;
+        if (!inline_eval_const_expr(expr->lhs, bindings, binding_count, depth + 1, &lhs))
+            return 0;
+        *out_value = inline_normalize_value(!lhs, expr->type);
         return 1;
     }
     case ND_ADD:

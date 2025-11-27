@@ -1,0 +1,32 @@
+module Test.LogicalNot;
+
+[EntryPoint]
+expose fun main() -> i32
+{
+    i32 total = 0;
+
+    total = total + (!0);
+    total = total + (!1);
+    total = total + (!42);
+
+    i32 check = !(!0);
+    total = total + check;
+
+    i32 nested = !(!(!5));
+    if (nested != 0)
+    {
+        ret 99;
+    }
+
+    i32 x = 0;
+    if (!x)
+        total = total + 10;
+
+    x = 4;
+    if (!x)
+        total = total + 100;
+
+    if (total == 11)
+        ret 0;
+    ret total;
+}
