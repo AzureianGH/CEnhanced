@@ -536,6 +536,10 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_SIZEOF;
     else if (len == 6 && strncmp(p, "typeof", 6) == 0)
         k = TK_KW_TYPEOF;
+    else if (len == 7 && strncmp(p, "alignof", 7) == 0)
+        k = TK_KW_ALIGNOF;
+    else if (len == 8 && strncmp(p, "offsetof", 8) == 0)
+        k = TK_KW_OFFSETOF;
     return make_tok(lx, k, p, len);
 }
 

@@ -78,6 +78,22 @@ expose struct OtherElement
     AnElement* ptrToSmth;
 };
 
+struct AlignProbe
+{
+    u8 pad;
+    i64 payload;
+};
+
+hide fun alignof_alignprobe() -> i32
+{
+    ret alignof(AlignProbe);
+}
+
+hide fun offsetof_alignprobe_payload() -> i32
+{
+    ret offsetof(AlignProbe, .payload);
+}
+
 hide i32 total_test_count = 0;
 OtherElement globalElement = {}; // auto hide members
 
@@ -494,10 +510,62 @@ expose fun main() -> i32
 
     assert(structvarargs_result == 66, "structvarargs sum is 66");
 
+    constant i32 const_value = 555;
+    assert(const_value == 555, "constant value is 555");
+    //const_value = 552; // should error if uncommented
+
+
+    assert(use_constant(45) == 145, "use_constant(45) == 145"); // works fine
+    assert(use_constant(const_value as i32) == 655, "use_constant(const_value) == 655"); // throws warning
+
+    constant_test(const_value);
+    assert(const_value == 555, "constant value remains 555 after constant_test");
+    
+    constant u8* array = Std.Memory.alloc(10) as constant u8*;
+
+    // constant_ptr(array); // would error without explicit cast
+    constant_ptr(array as u8*); // force override to allow mutation
+
+    assert(array[0] == 42, "constant_ptr modified first byte to 42");
+    
+    i32 probe_align = alignof_alignprobe();
+    i32 builtin_probe_align = alignof(AlignProbe);
+    assert(probe_align == builtin_probe_align, "alignof(AlignProbe) matches helper");
+    i32 probe_offset = offsetof_alignprobe_payload();
+    i32 builtin_probe_offset = offsetof(AlignProbe, .payload);
+    assert(probe_offset == builtin_probe_offset, "offsetof(AlignProbe, .payload) matches helper");
+    assert((builtin_probe_offset % builtin_probe_align) == 0, "offsetof result respects alignment");
+
+    assert(alignof(i8) == 1, "alignof(i8) == 1");
+    assert(alignof(i16) == 2, "alignof(i16) == 2");
+    assert(alignof(i32) == 4, "alignof(i32) == 4");
+    assert(alignof(i64) == 8, "alignof(i64) == 8");
+    assert(alignof(f32) == 4, "alignof(f32) == 4");
+    assert(alignof(f64) == 8, "alignof(f64) == 8");
+
     printf("All tests completed successfully!\n");
 
     ret final_sum; // expect 168
 }
+
+expose fun use_constant(i32 val) -> i32
+{
+    constant i32 addend = 100;
+    ret val + addend;
+}
+
+expose fun constant_ptr(u8* data) -> void
+{
+    *data = 42; // should be allowed
+    ret;
+}
+
+expose fun constant_test(i32 val) -> void
+{
+    val = 20; // should cause no effect to caller
+    ret;
+}
+
 expose fun internal_diffvarargs(i32 empty, ...) -> void
 {
     va_list list = va_start();

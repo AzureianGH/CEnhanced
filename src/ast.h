@@ -57,6 +57,8 @@ typedef enum
     TK_KW_AS,
     TK_KW_SIZEOF,
     TK_KW_TYPEOF,
+    TK_KW_ALIGNOF,
+    TK_KW_OFFSETOF,
     TK_KW_NULL,
     TK_KW_NORETURN,
     TK_KW_MODULE,
@@ -227,6 +229,8 @@ typedef enum
     ND_LNOT,
     ND_SIZEOF,
     ND_TYPEOF,
+    ND_ALIGNOF,
+    ND_OFFSETOF,
     ND_EQ,
     ND_NE,
     ND_COND,      // ternary conditional expr: lhs ? rhs : body
@@ -269,6 +273,7 @@ typedef struct Node
     // parameters
     Type **param_types;
     const char **param_names;
+    unsigned char *param_const_flags;
     int param_count;
     int is_varargs;
     int is_chancecode;

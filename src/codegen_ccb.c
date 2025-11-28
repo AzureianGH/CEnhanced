@@ -214,6 +214,7 @@ static int ccb_emit_pointer_offset(CcbFunctionBuilder *fb, int offset, const Nod
 static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type, CcbLocal *dst_ptr, CcbLocal *src_ptr);
 static bool ccb_emit_load_local(CcbFunctionBuilder *fb, const CcbLocal *local);
 static bool ccb_emit_store_local(CcbFunctionBuilder *fb, const CcbLocal *local);
+static int ccb_promote_param_to_local(CcbFunctionBuilder *fb, const Node *site, CcbLocal **inout_local);
 static void ccb_scope_enter(CcbFunctionBuilder *fb);
 static void ccb_scope_leave(CcbFunctionBuilder *fb);
 static CCValueType ccb_type_for_expr(const Node *expr);
@@ -1203,6 +1204,45 @@ static CcbLocal *ccb_local_add(CcbFunctionBuilder *fb, const char *name, Type *t
     else
         fb->local_count++;
     return slot;
+}
+
+static int ccb_promote_param_to_local(CcbFunctionBuilder *fb, const Node *site, CcbLocal **inout_local)
+{
+    if (!fb || !inout_local || !*inout_local)
+        return 1;
+
+    CcbLocal *param = *inout_local;
+    if (!param->is_param)
+        return 0;
+
+    const char *param_name = (param->name && *param->name) ? param->name : "<anonymous>";
+
+    CcbLocal *shadow = ccb_local_add(fb, param->name, param->type, param->is_address_only, false);
+    if (!shadow)
+    {
+        diag_error_at(site ? site->src : NULL, site ? site->line : 0, site ? site->col : 0,
+                      "failed to create local copy for parameter '%s'", param_name);
+        return 1;
+    }
+
+    shadow->value_type = param->value_type;
+    shadow->scope_depth = param->scope_depth;
+
+    if (!ccb_emit_load_local(fb, param))
+    {
+        diag_error_at(site ? site->src : NULL, site ? site->line : 0, site ? site->col : 0,
+                      "failed to read parameter '%s'", param_name);
+        return 1;
+    }
+    if (!ccb_emit_store_local(fb, shadow))
+    {
+        diag_error_at(site ? site->src : NULL, site ? site->line : 0, site ? site->col : 0,
+                      "failed to copy parameter '%s' into local storage", param_name);
+        return 1;
+    }
+
+    *inout_local = shadow;
+    return 0;
 }
 
 static CcbLocal *ccb_local_from_slot(CcbFunctionBuilder *fb, ptrdiff_t slot)
@@ -3903,6 +3943,8 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
         return 0;
     }
     case ND_SIZEOF:
+    case ND_ALIGNOF:
+    case ND_OFFSETOF:
     {
         CCValueType ty = map_type_to_cc(expr->type);
         if (ty == CC_TYPE_INVALID || ty == CC_TYPE_VOID)
@@ -4207,9 +4249,8 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             }
             if (local->is_param)
             {
-                diag_error_at(target->src, target->line, target->col,
-                              "assignment to parameter '%s' not supported yet", target->var_ref);
-                return 1;
+                if (ccb_promote_param_to_local(fb, target, &local))
+                    return 1;
             }
 
             if (local->is_address_only && type_is_address_only(local->type))

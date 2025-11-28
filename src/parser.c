@@ -1313,6 +1313,67 @@ static int type_sizeof_simple(Type *ty)
     }
 }
 
+static int type_align_simple(Type *ty)
+{
+    ty = module_registry_canonical_type(ty);
+    if (!ty)
+        return 1;
+    switch (ty->kind)
+    {
+    case TY_BOOL:
+    case TY_CHAR:
+    case TY_I8:
+    case TY_U8:
+        return 1;
+    case TY_I16:
+    case TY_U16:
+        return 2;
+    case TY_I32:
+    case TY_U32:
+    case TY_F32:
+        return 4;
+    case TY_I64:
+    case TY_U64:
+    case TY_F64:
+    case TY_PTR:
+    case TY_VA_LIST:
+        return 8;
+    case TY_F128:
+        return 16;
+    case TY_ARRAY:
+        if (ty->array.elem)
+            return type_align_simple(ty->array.elem);
+        return 8;
+    case TY_STRUCT:
+    {
+        int max_align = 1;
+        if (!ty->strct.field_types || ty->strct.field_count <= 0)
+            return max_align;
+        for (int i = 0; i < ty->strct.field_count; ++i)
+        {
+            int field_align = type_align_simple(ty->strct.field_types[i]);
+            if (field_align > max_align)
+                max_align = field_align;
+        }
+        return max_align > 0 ? max_align : 1;
+    }
+    case TY_VOID:
+        return 1;
+    default:
+        return 1;
+    }
+}
+
+static int align_up(int value, int alignment)
+{
+    if (alignment <= 0)
+        return value;
+    int remainder = value % alignment;
+    if (remainder == 0)
+        return value;
+    return value + (alignment - remainder);
+}
+
 static int module_path_followed_by_call(Parser *ps)
 {
     if (!ps || !ps->lx)
@@ -1341,6 +1402,8 @@ static int is_type_start(Parser *ps, Token t)
 {
     switch (t.kind)
     {
+    case TK_KW_CONSTANT:
+        return 1;
     case TK_KW_I8:
     case TK_KW_U8:
     case TK_KW_I16:
@@ -1552,12 +1615,25 @@ static void parse_trailing_funptr_signature(Parser *ps, Type *ty)
 
 static Type *parse_type_spec(Parser *ps)
 {
-    // optional 'stack' storage class (ignored for now)
-    Token t = lexer_peek(ps->lx);
-    if (t.kind == TK_KW_STACK)
+    if (!ps)
+        return NULL;
+    // allow leading qualifiers like 'constant' and optional 'stack'
+    int consumed_stack = 0;
+    while (1)
     {
-        lexer_next(ps->lx);
-        t = lexer_peek(ps->lx);
+        Token t = lexer_peek(ps->lx);
+        if (t.kind == TK_KW_CONSTANT)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        if (!consumed_stack && t.kind == TK_KW_STACK)
+        {
+            lexer_next(ps->lx);
+            consumed_stack = 1;
+            continue;
+        }
+        break;
     }
     Type *base = NULL;
     Token b = lexer_next(ps->lx);
@@ -2074,6 +2150,45 @@ static Node *parse_primary(Parser *ps)
         n->col = t.col;
         n->src = lexer_source(ps->lx);
         n->var_type = operand_type;
+        return n;
+    }
+    if (t.kind == TK_KW_ALIGNOF)
+    {
+        expect(ps, TK_LPAREN, "(");
+        Token peek = lexer_peek(ps->lx);
+        Node *operand_expr = NULL;
+        Type *operand_type = NULL;
+        if (is_type_start(ps, peek))
+            operand_type = parse_type_spec(ps);
+        else
+            operand_expr = parse_expr(ps);
+        expect(ps, TK_RPAREN, ")");
+        Node *n = new_node(ND_ALIGNOF);
+        n->lhs = operand_expr;
+        n->var_type = operand_type;
+        n->type = type_i32();
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
+    if (t.kind == TK_KW_OFFSETOF)
+    {
+        expect(ps, TK_LPAREN, "(");
+        Type *struct_ty = parse_type_spec(ps);
+        expect(ps, TK_COMMA, ",");
+        Token maybe_dot = lexer_peek(ps->lx);
+        if (maybe_dot.kind == TK_DOT)
+            lexer_next(ps->lx);
+        Token field_tok = expect(ps, TK_IDENT, "field name");
+        expect(ps, TK_RPAREN, ")");
+        Node *n = new_node(ND_OFFSETOF);
+        n->var_type = struct_ty;
+        n->type = type_i32();
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
+        n->field_name = dup_token_text(field_tok);
         return n;
     }
     if (t.kind == TK_KW_TYPEOF)
@@ -3305,6 +3420,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
     // parameters: [type ident] *(, type ident) [,...]
     Type **param_types = NULL;
     const char **param_names = NULL;
+    unsigned char *param_const_flags = NULL;
     int param_count = 0, param_cap = 0;
     int saw_varargs = 0;
     while (1)
@@ -3326,6 +3442,13 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
             break;
         }
 
+        int param_is_const = 0;
+        Token maybe_const = lexer_peek(ps->lx);
+        if (maybe_const.kind == TK_KW_CONSTANT)
+        {
+            lexer_next(ps->lx);
+            param_is_const = 1;
+        }
         Type *pty = parse_type_spec(ps);
         Token pn = expect(ps, TK_IDENT, "parameter name");
         if (param_count == param_cap)
@@ -3334,12 +3457,15 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
             param_types = (Type **)realloc(param_types, sizeof(Type *) * param_cap);
             param_names =
                 (const char **)realloc(param_names, sizeof(char *) * param_cap);
+            param_const_flags = (unsigned char *)realloc(param_const_flags, sizeof(unsigned char) * param_cap);
         }
         param_types[param_count] = pty;
         char *nm = (char *)xmalloc((size_t)pn.length + 1);
         memcpy(nm, pn.lexeme, (size_t)pn.length);
         nm[pn.length] = '\0';
         param_names[param_count] = nm;
+        if (param_const_flags)
+            param_const_flags[param_count] = (unsigned char)param_is_const;
         param_count++;
 
         Token delim = lexer_peek(ps->lx);
@@ -3386,6 +3512,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
     fn->ret_type = rtype;
     fn->param_types = param_types;
     fn->param_names = param_names;
+    fn->param_const_flags = param_const_flags;
     fn->param_count = param_count;
     fn->is_varargs = saw_varargs;
     fn->line = name.line;
@@ -3459,6 +3586,12 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
                     lexer_next(ps->lx);
                     is_varargs = 1;
                     break;
+                }
+
+                Token maybe_const = lexer_peek(ps->lx);
+                if (maybe_const.kind == TK_KW_CONSTANT)
+                {
+                    lexer_next(ps->lx);
                 }
 
                 Type *pty = parse_type_spec(ps);
@@ -3569,6 +3702,12 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
                 lexer_next(ps->lx);
                 is_varargs = 1;
                 break;
+            }
+
+            Token maybe_const = lexer_peek(ps->lx);
+            if (maybe_const.kind == TK_KW_CONSTANT)
+            {
+                lexer_next(ps->lx);
             }
 
             Type *pty = parse_type_spec(ps);
@@ -4359,6 +4498,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
     int *foff = NULL;
     int fcnt = 0, fcap = 0;
     int offset = 0;
+    int max_align = 1;
     while (1)
     {
         Token t = lexer_peek(ps->lx);
@@ -4408,6 +4548,10 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
         fnames[fcnt] = nm;
         ftypes[fcnt] = fty;
         fcnt++;
+        int field_align = type_align_simple(fty);
+        if (field_align > max_align)
+            max_align = field_align;
+        offset = align_up(offset, field_align);
         int sz = type_sizeof_simple(fty);
         if (fty && fty->kind == TY_STRUCT && sz == 0)
         {
@@ -4423,6 +4567,8 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
     st->strct.field_types = ftypes;
     st->strct.field_offsets = foff;
     st->strct.field_count = fcnt;
+    int struct_align = max_align > 0 ? max_align : 1;
+    offset = align_up(offset, struct_align);
     st->strct.size_bytes = offset;
     // register named type
     named_type_add(ps, name.lexeme, name.length, st, is_exposed);

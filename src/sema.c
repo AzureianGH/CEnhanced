@@ -1043,6 +1043,58 @@ static int sizeof_type_bytes(Type *ty)
     }
 }
 
+static int alignof_type(Type *ty)
+{
+    ty = canonicalize_type_deep(ty);
+    if (!ty)
+        return 1;
+    switch (ty->kind)
+    {
+    case TY_BOOL:
+    case TY_CHAR:
+    case TY_I8:
+    case TY_U8:
+        return 1;
+    case TY_I16:
+    case TY_U16:
+        return 2;
+    case TY_I32:
+    case TY_U32:
+    case TY_F32:
+        return 4;
+    case TY_I64:
+    case TY_U64:
+    case TY_F64:
+    case TY_PTR:
+    case TY_VA_LIST:
+        return 8;
+    case TY_F128:
+        return 16;
+    case TY_ARRAY:
+        if (ty->array.elem)
+            return alignof_type(ty->array.elem);
+        return 8;
+    case TY_STRUCT:
+    {
+        int max_align = 1;
+        if (!ty->strct.field_types || ty->strct.field_count <= 0)
+            return max_align;
+        for (int i = 0; i < ty->strct.field_count; ++i)
+        {
+            Type *field_ty = ty->strct.field_types[i];
+            int field_align = alignof_type(field_ty);
+            if (field_align > max_align)
+                max_align = field_align;
+        }
+        return max_align > 0 ? max_align : 1;
+    }
+    case TY_VOID:
+        return 1;
+    default:
+        return 1;
+    }
+}
+
 static void populate_symbol_from_function(Symbol *s, Node *fn)
 {
     if (!s || !fn || fn->kind != ND_FUNC)
@@ -2081,8 +2133,156 @@ static const char *nodekind_name(NodeKind k)
         return "ND_ADDR";
     case ND_LOR:
         return "ND_LOR";
+    case ND_ALIGNOF:
+        return "ND_ALIGNOF";
+    case ND_OFFSETOF:
+        return "ND_OFFSETOF";
     default:
         return "<unknown-node>";
+    }
+}
+
+static Node *strip_casts(Node *n)
+{
+    while (n && n->kind == ND_CAST && n->lhs)
+        n = n->lhs;
+    return n;
+}
+
+static int expr_has_pointer_override(const Node *expr)
+{
+    const Node *n = expr;
+    while (n && n->kind == ND_CAST)
+    {
+        Type *cast_ty = canonicalize_type_deep(n->type);
+        if (cast_ty && cast_ty->kind == TY_PTR)
+            return 1;
+        n = n->lhs;
+    }
+    return 0;
+}
+
+static int expr_has_any_cast(const Node *expr)
+{
+    const Node *n = expr;
+    while (n && n->kind == ND_CAST)
+        return 1;
+    return 0;
+}
+
+static const Node *find_const_storage_origin(Node *expr);
+static const Node *find_const_pointer_origin(Node *expr);
+static const Node *find_pointer_to_const_origin(Node *expr);
+
+static const Node *find_const_pointer_origin(Node *expr)
+{
+    expr = strip_casts(expr);
+    if (!expr)
+        return NULL;
+    switch (expr->kind)
+    {
+    case ND_VAR:
+        return expr->var_is_const ? expr : NULL;
+    case ND_MEMBER:
+        return find_const_storage_origin(expr);
+    case ND_INDEX:
+    case ND_DEREF:
+        if (!expr->lhs)
+            return NULL;
+        return find_const_pointer_origin(expr->lhs);
+    case ND_ADDR:
+        if (!expr->lhs)
+            return NULL;
+        return find_const_storage_origin(expr->lhs);
+    case ND_CAST:
+        return find_const_pointer_origin(expr->lhs);
+    case ND_ADD:
+    case ND_SUB:
+    {
+        const Node *lhs_origin = NULL;
+        if (expr->lhs)
+        {
+            Type *lhs_type = canonicalize_type_deep(expr->lhs->type);
+            if (lhs_type && lhs_type->kind == TY_PTR)
+                lhs_origin = find_const_pointer_origin(expr->lhs);
+        }
+        if (lhs_origin)
+            return lhs_origin;
+        if (expr->rhs)
+        {
+            Type *rhs_type = canonicalize_type_deep(expr->rhs->type);
+            if (rhs_type && rhs_type->kind == TY_PTR)
+                return find_const_pointer_origin(expr->rhs);
+        }
+        return NULL;
+    }
+    default:
+        return NULL;
+    }
+}
+
+static const Node *find_const_storage_origin(Node *expr)
+{
+    expr = strip_casts(expr);
+    if (!expr)
+        return NULL;
+    switch (expr->kind)
+    {
+    case ND_VAR:
+        return expr->var_is_const ? expr : NULL;
+    case ND_MEMBER:
+        if (!expr->lhs)
+            return NULL;
+        if (expr->is_pointer_deref)
+            return find_const_pointer_origin(expr->lhs);
+        return find_const_storage_origin(expr->lhs);
+    case ND_INDEX:
+    case ND_DEREF:
+        if (!expr->lhs)
+            return NULL;
+        return find_const_pointer_origin(expr->lhs);
+    default:
+        return NULL;
+    }
+}
+
+static const Node *find_pointer_to_const_origin(Node *expr)
+{
+    expr = strip_casts(expr);
+    if (!expr)
+        return NULL;
+    Type *ty = canonicalize_type_deep(expr->type);
+    if (ty && ty->kind == TY_PTR && ty->pointee)
+    {
+        Type *pointee = canonicalize_type_deep(ty->pointee);
+        if (pointee && pointee->kind == TY_PTR)
+        {
+            const Node *inner = find_const_storage_origin(expr);
+            if (inner)
+                return inner;
+        }
+    }
+    switch (expr->kind)
+    {
+    case ND_VAR:
+        return expr->var_is_const ? expr : NULL;
+    case ND_MEMBER:
+        if (!expr->lhs)
+            return NULL;
+        if (expr->is_pointer_deref)
+            return find_pointer_to_const_origin(expr->lhs);
+        return find_pointer_to_const_origin(expr->lhs);
+    case ND_INDEX:
+    case ND_DEREF:
+        if (!expr->lhs)
+            return NULL;
+        return find_pointer_to_const_origin(expr->lhs);
+    case ND_ADDR:
+        if (!expr->lhs)
+            return NULL;
+        return find_pointer_to_const_origin(expr->lhs);
+    default:
+        return NULL;
     }
 }
 
@@ -2255,6 +2455,73 @@ static void check_expr(SemaContext *sc, Node *e)
             ty = canonicalize_type_deep(ty);
         int sz = sizeof_type_bytes(ty);
         e->int_val = sz;
+        e->type = &ty_i32;
+        return;
+    }
+    if (e->kind == ND_ALIGNOF)
+    {
+        Type *ty = e->var_type;
+        if (!ty && e->lhs)
+        {
+            check_expr(sc, e->lhs);
+            if (e->lhs->kind == ND_VAR && e->lhs->var_type)
+                ty = e->lhs->var_type;
+            else if (e->lhs->type)
+                ty = e->lhs->type;
+        }
+        ty = canonicalize_type_deep(ty);
+        if (!ty || ty->kind == TY_IMPORT)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "alignof operand must resolve to a concrete type");
+            exit(1);
+        }
+        int align = alignof_type(ty);
+        if (align <= 0)
+            align = 1;
+        e->int_val = align;
+        e->type = &ty_i32;
+        return;
+    }
+    if (e->kind == ND_OFFSETOF)
+    {
+        Type *st = canonicalize_type_deep(e->var_type);
+        if (!st || st->kind != TY_STRUCT)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "offsetof requires a struct type operand");
+            exit(1);
+        }
+        if (!e->field_name || !*e->field_name)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "offsetof requires a field designator");
+            exit(1);
+        }
+        if (st->kind == TY_STRUCT && (!st->strct.field_types || st->strct.field_count <= 0))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "struct '%s' is incomplete",
+                          st->struct_name ? st->struct_name : "<anonymous>");
+            exit(1);
+        }
+        int idx = struct_find_field(st, e->field_name);
+        if (idx < 0)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "unknown field '%s' on struct '%s'",
+                          e->field_name,
+                          st->struct_name ? st->struct_name : "<anonymous>");
+            exit(1);
+        }
+        if (!st->strct.field_offsets)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "struct '%s' is missing offset metadata",
+                          st->struct_name ? st->struct_name : "<anonymous>");
+            exit(1);
+        }
+        e->int_val = st->strct.field_offsets[idx];
         e->type = &ty_i32;
         return;
     }
@@ -3059,6 +3326,7 @@ static void check_expr(SemaContext *sc, Node *e)
                           "lvalue required as left operand of assignment");
             exit(1);
         }
+        const Node *const_origin = NULL;
         if (lhs_base->kind == ND_VAR)
         {
             if (lhs_base->var_is_const)
@@ -3068,6 +3336,19 @@ static void check_expr(SemaContext *sc, Node *e)
                               lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
                 exit(1);
             }
+        }
+        else
+        {
+            const_origin = find_const_storage_origin(lhs_base);
+        }
+        if (!const_origin && (lhs_base->kind == ND_INDEX || lhs_base->kind == ND_DEREF))
+            const_origin = find_pointer_to_const_origin(lhs_base->lhs);
+        if (const_origin)
+        {
+            const char *const_name = const_origin->var_ref ? const_origin->var_ref : "<unnamed>";
+            diag_warning_at(e->src, e->line, e->col,
+                            "assignment modifies data derived from constant '%s' (treating operands as writable)",
+                            const_name);
         }
         check_expr(sc, e->rhs);
         Type *lhs_type = lhs_expr->type;
@@ -3339,6 +3620,43 @@ static void check_expr(SemaContext *sc, Node *e)
                               "argument %d type mismatch: expected %s, got %s",
                               i + 1, want, got);
                 exit(1);
+            }
+
+            int param_is_const = 0;
+            if (e->call_target && e->call_target->param_const_flags && i < e->call_target->param_count)
+                param_is_const = e->call_target->param_const_flags[i];
+            Type *canon_expected = canonicalize_type_deep(expected_ty);
+            if (param_is_const)
+                continue;
+
+            const Node *const_origin = NULL;
+            if (canon_expected && canon_expected->kind == TY_PTR)
+                const_origin = find_pointer_to_const_origin(e->args[i]);
+            else
+                const_origin = find_const_storage_origin(e->args[i]);
+
+            if (!const_origin)
+                continue;
+
+            const char *const_name = const_origin->var_ref ? const_origin->var_ref : "<unnamed>";
+            if (canon_expected && canon_expected->kind == TY_PTR)
+            {
+                if (!expr_has_pointer_override(e->args[i]))
+                {
+                    diag_error_at(e->args[i]->src, e->args[i]->line, e->args[i]->col,
+                                  "argument %d to '%s' passes pointer derived from constant '%s'; cast to a mutable pointer to override",
+                                  i + 1, diag_name, const_name);
+                    exit(1);
+                }
+            }
+            else
+            {
+                if (!expr_has_any_cast(e->args[i]))
+                {
+                    diag_warning_at(e->args[i]->src, e->args[i]->line, e->args[i]->col,
+                                    "argument %d to '%s' derives from constant '%s'",
+                                    i + 1, diag_name, const_name);
+                }
             }
         }
 
@@ -3754,7 +4072,8 @@ static int sema_check_function(SemaContext *sc, Node *fn)
     for (int i = 0; i < fn->param_count; i++)
     {
         fn->param_types[i] = canonicalize_type_deep(fn->param_types[i]);
-        scope_add(sc, fn->param_names[i], fn->param_types[i], 0);
+        int param_is_const = (fn->param_const_flags && i < fn->param_count) ? fn->param_const_flags[i] : 0;
+        scope_add(sc, fn->param_names[i], fn->param_types[i], param_is_const);
     }
     int has_return = 0;
     int rc;
