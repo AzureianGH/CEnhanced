@@ -1,21 +1,23 @@
-MIT License
+# OpenAzure License (2025)
 
-Copyright (c) 2025 Nathan Hornby
+Copyright (c) 2025 Nathan Thomas Hornby (Azureian)  
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+## Permissions
+- You are free to **use, fork, modify, and distribute** this software.
+- You may use this software in **commercial or paid products**, as long as the software itself is **not sold separately**.
+- You may **claim ownership of your modifications**, but you **cannot claim ownership of the original software**.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+## Requirements
+- **Attribution is mandatory**: You must credit the original author (Nathan Thomas Hornby, Azureian) wherever the software is publicly visible, including in:
+  - A `LICENSE.md` or equivalent file included with the software, OR
+  - A publicly accessible website listing the software.
+- You must provide a **link to the original source** of this software, unchanged, even if you modify it.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+## Restrictions
+- You **may not sell the software itself**. It may only be bundled as part of a larger product or service.
+- You **cannot remove or obscure attribution** to the original author.
+- You **cannot claim the original software as your own**, even if modified.
+
+## Disclaimer
+- This software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement.
+- In no event shall the author be liable for any claim, damages, or other liability arising from the use of this software.
