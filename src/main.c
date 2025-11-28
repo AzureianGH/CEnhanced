@@ -156,6 +156,28 @@ static const char *target_arch_to_macro(TargetArch arch)
   }
 }
 
+static void maybe_generate_dsym(const char *binary_path, int debug_symbols,
+                                TargetOS target_os)
+{
+#if defined(__APPLE__)
+  if (!binary_path || !debug_symbols || target_os != OS_MACOS)
+    return;
+  char ds_cmd[4096];
+  snprintf(ds_cmd, sizeof(ds_cmd), "dsymutil \"%s\"", binary_path);
+  int ds_rc = system(ds_cmd);
+  if (ds_rc != 0)
+  {
+    fprintf(stderr,
+            "warning: dsymutil failed (rc=%d) while processing '%s'\n",
+            ds_rc, binary_path);
+  }
+#else
+  (void)binary_path;
+  (void)debug_symbols;
+  (void)target_os;
+#endif
+}
+
 static void verbose_print_config(
     const char *output_path, int opt_level, TargetArch target_arch,
     TargetOS target_os, int stop_after_ccb, int stop_after_asm, int no_link,
@@ -264,6 +286,8 @@ static void usage(const char *prog)
           "  -Sccb             Stop after emitting Chance bytecode (.ccb)\n");
   fprintf(stderr,
           "  -O0|-O1|-O2|-O3   Select optimization level (default -O0)\n");
+    fprintf(stderr,
+      "  -g                Emit debug symbols in assembler/link stages\n");
   fprintf(stderr, "  -c [obj] | --no-link [obj]\n");
   fprintf(stderr, "                    Compile only; do not link (emit "
                   "object). Optional obj output path.\n");
@@ -2947,6 +2971,7 @@ int main(int argc, char **argv)
   int freestanding = 0;
   int m32 = 0;
   int opt_level = 0;
+  int debug_symbols = 0;
   AsmSyntax asm_syntax = ASM_INTEL;
   TargetArch target_arch = ARCH_NONE;
   const char *chancecode_backend = NULL;
@@ -3028,6 +3053,11 @@ int main(int argc, char **argv)
     if (strcmp(argv[i], "-Sccb") == 0)
     {
       stop_after_ccb = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "-g") == 0)
+    {
+      debug_symbols = 1;
       continue;
     }
     if (strncmp(argv[i], "-O", 2) == 0)
@@ -4046,6 +4076,11 @@ int main(int argc, char **argv)
           }
           else
           {
+            if (debug_symbols)
+            {
+              strncat(cc_cmd, " -g -gdwarf-4",
+                      sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+            }
             if (freestanding)
             {
               strncat(cc_cmd, " -ffreestanding -nostdlib",
@@ -4327,6 +4362,9 @@ int main(int argc, char **argv)
           rc = 1;
           break;
         }
+        if (debug_symbols)
+          strncat(cc_cmd, " -g -gdwarf-4",
+                  sizeof(cc_cmd) - strlen(cc_cmd) - 1);
         if (freestanding)
         {
           strncat(cc_cmd, " -ffreestanding -nostdlib",
@@ -4584,6 +4622,8 @@ int main(int argc, char **argv)
             rc = 1;
             break;
           }
+            strncat(cc_cmd, " -g -gdwarf-4",
+              sizeof(cc_cmd) - strlen(cc_cmd) - 1);
           if (freestanding)
             strncat(cc_cmd, " -ffreestanding -nostdlib",
                     sizeof(cc_cmd) - strlen(cc_cmd) - 1);
@@ -4668,7 +4708,10 @@ int main(int argc, char **argv)
     // Final link of temps + provided objects into an executable
     size_t cmdsz = 4096;
     char *cmd = (char *)xmalloc(cmdsz);
-    snprintf(cmd, cmdsz, "cc -o \"%s\"", out);
+    if (debug_symbols)
+      snprintf(cmd, cmdsz, "cc -g -gdwarf-4 -o \"%s\"", out);
+    else
+      snprintf(cmd, cmdsz, "cc -o \"%s\"", out);
     if (target_arch == ARCH_ARM64)
       strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
     if (target_arch == ARCH_ARM64)
@@ -4710,6 +4753,10 @@ int main(int argc, char **argv)
       fprintf(stderr, "link failed (rc=%d): %s\n", lrc, cmd);
       rc = 1;
     }
+    else
+    {
+      maybe_generate_dsym(out, debug_symbols, target_os);
+    }
     free(cmd);
     // cleanup temp objects
     for (int i = 0; i < to_cnt; ++i)
@@ -4725,8 +4772,13 @@ int main(int argc, char **argv)
   if (!rc && have_single_obj)
   {
     char link_cmd[4096];
-    snprintf(link_cmd, sizeof(link_cmd), "cc -o \"%s\" \"%s\"", out,
-             single_obj_path);
+    if (debug_symbols)
+      snprintf(link_cmd, sizeof(link_cmd),
+               "cc -g -gdwarf-4 -o \"%s\" \"%s\"", out,
+               single_obj_path);
+    else
+      snprintf(link_cmd, sizeof(link_cmd), "cc -o \"%s\" \"%s\"", out,
+               single_obj_path);
     if (target_arch == ARCH_ARM64)
       strncat(link_cmd, " -arch arm64",
               sizeof(link_cmd) - strlen(link_cmd) - 1);
@@ -4741,6 +4793,10 @@ int main(int argc, char **argv)
       fprintf(stderr, "link failed (rc=%d): %s\n", lrc, link_cmd);
       rc = 1;
     }
+    else
+    {
+      maybe_generate_dsym(out, debug_symbols, target_os);
+    }
     if (single_obj_is_temp)
       remove(single_obj_path);
   }
@@ -4751,7 +4807,10 @@ int main(int argc, char **argv)
     // Validate external objects again (already checked)
     size_t cmdsz = 4096;
     char *cmd = (char *)xmalloc(cmdsz);
-    snprintf(cmd, cmdsz, "cc -r -o \"%s\"", obj_override);
+    if (debug_symbols)
+      snprintf(cmd, cmdsz, "cc -g -gdwarf-4 -r -o \"%s\"", obj_override);
+    else
+      snprintf(cmd, cmdsz, "cc -r -o \"%s\"", obj_override);
     if (target_arch == ARCH_ARM64)
       strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
     if (target_arch == ARCH_ARM64)

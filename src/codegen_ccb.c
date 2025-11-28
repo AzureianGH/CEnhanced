@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -15,6 +16,14 @@ typedef struct
     char **items;
     size_t count;
     size_t capacity;
+    uint32_t *debug_files;
+    uint32_t *debug_lines;
+    uint32_t *debug_columns;
+    bool track_debug;
+    bool has_active_debug;
+    uint32_t active_debug_file;
+    uint32_t active_debug_line;
+    uint32_t active_debug_column;
 } StringList;
 
 static void string_list_init(StringList *list)
@@ -24,6 +33,14 @@ static void string_list_init(StringList *list)
     list->items = NULL;
     list->count = 0;
     list->capacity = 0;
+    list->debug_files = NULL;
+    list->debug_lines = NULL;
+    list->debug_columns = NULL;
+    list->track_debug = false;
+    list->has_active_debug = false;
+    list->active_debug_file = 0;
+    list->active_debug_line = 0;
+    list->active_debug_column = 0;
 }
 
 static void string_list_free(StringList *list)
@@ -33,9 +50,166 @@ static void string_list_free(StringList *list)
     for (size_t i = 0; i < list->count; ++i)
         free(list->items[i]);
     free(list->items);
+    free(list->debug_files);
+    free(list->debug_lines);
+    free(list->debug_columns);
     list->items = NULL;
     list->count = 0;
     list->capacity = 0;
+    list->debug_files = NULL;
+    list->debug_lines = NULL;
+    list->debug_columns = NULL;
+    list->track_debug = false;
+    list->has_active_debug = false;
+    list->active_debug_file = 0;
+    list->active_debug_line = 0;
+    list->active_debug_column = 0;
+}
+
+typedef struct
+{
+    uint32_t file;
+    uint32_t line;
+    uint32_t column;
+    bool has_location;
+} StringListDebugState;
+
+static bool string_list_resize_debug_storage(StringList *list, size_t old_capacity, size_t new_capacity)
+{
+    if (!list || !list->track_debug)
+        return true;
+    if (new_capacity == 0)
+    {
+        free(list->debug_files);
+        free(list->debug_lines);
+        free(list->debug_columns);
+        list->debug_files = NULL;
+        list->debug_lines = NULL;
+        list->debug_columns = NULL;
+        return true;
+    }
+
+    uint32_t *files = (uint32_t *)malloc(new_capacity * sizeof(uint32_t));
+    uint32_t *lines = (uint32_t *)malloc(new_capacity * sizeof(uint32_t));
+    uint32_t *columns = (uint32_t *)malloc(new_capacity * sizeof(uint32_t));
+    if (!files || !lines || !columns)
+    {
+        free(files);
+        free(lines);
+        free(columns);
+        return false;
+    }
+
+    size_t copy = old_capacity;
+    if (copy > new_capacity)
+        copy = new_capacity;
+    if (copy > 0)
+    {
+        if (list->debug_files)
+            memcpy(files, list->debug_files, copy * sizeof(uint32_t));
+        if (list->debug_lines)
+            memcpy(lines, list->debug_lines, copy * sizeof(uint32_t));
+        if (list->debug_columns)
+            memcpy(columns, list->debug_columns, copy * sizeof(uint32_t));
+    }
+    if (new_capacity > copy)
+    {
+        size_t delta = new_capacity - copy;
+        memset(files + copy, 0, delta * sizeof(uint32_t));
+        memset(lines + copy, 0, delta * sizeof(uint32_t));
+        memset(columns + copy, 0, delta * sizeof(uint32_t));
+    }
+
+    free(list->debug_files);
+    free(list->debug_lines);
+    free(list->debug_columns);
+    list->debug_files = files;
+    list->debug_lines = lines;
+    list->debug_columns = columns;
+    return true;
+}
+
+static bool string_list_enable_debug_tracking(StringList *list)
+{
+    if (!list)
+        return false;
+    if (list->track_debug)
+        return true;
+    list->track_debug = true;
+    if (list->capacity == 0)
+        return true;
+    return string_list_resize_debug_storage(list, 0, list->capacity);
+}
+
+static void string_list_set_debug_location(StringList *list, uint32_t file, uint32_t line, uint32_t column)
+{
+    if (!list)
+        return;
+    list->active_debug_file = file;
+    list->active_debug_line = line;
+    list->active_debug_column = column;
+    list->has_active_debug = (file != 0 && line != 0);
+}
+
+static void string_list_clear_debug_location(StringList *list)
+{
+    if (!list)
+        return;
+    list->has_active_debug = false;
+    list->active_debug_file = 0;
+    list->active_debug_line = 0;
+    list->active_debug_column = 0;
+}
+
+static StringListDebugState string_list_capture_debug_state(const StringList *list)
+{
+    StringListDebugState state;
+    if (!list)
+    {
+        state.file = 0;
+        state.line = 0;
+        state.column = 0;
+        state.has_location = false;
+        return state;
+    }
+    state.file = list->active_debug_file;
+    state.line = list->active_debug_line;
+    state.column = list->active_debug_column;
+    state.has_location = list->has_active_debug;
+    return state;
+}
+
+static void string_list_restore_debug_state(StringList *list, const StringListDebugState *state)
+{
+    if (!list || !state)
+        return;
+    if (!state->has_location)
+    {
+        string_list_clear_debug_location(list);
+        return;
+    }
+    string_list_set_debug_location(list, state->file, state->line, state->column);
+}
+
+static uint32_t string_list_get_debug_file(const StringList *list, size_t index)
+{
+    if (!list || !list->track_debug || !list->debug_files || index >= list->count)
+        return 0;
+    return list->debug_files[index];
+}
+
+static uint32_t string_list_get_debug_line(const StringList *list, size_t index)
+{
+    if (!list || !list->track_debug || !list->debug_lines || index >= list->count)
+        return 0;
+    return list->debug_lines[index];
+}
+
+static uint32_t string_list_get_debug_column(const StringList *list, size_t index)
+{
+    if (!list || !list->track_debug || !list->debug_columns || index >= list->count)
+        return 0;
+    return list->debug_columns[index];
 }
 
 static bool string_list_reserve(StringList *list, size_t desired)
@@ -45,7 +219,8 @@ static bool string_list_reserve(StringList *list, size_t desired)
     if (list->capacity >= desired)
         return true;
 
-    size_t new_cap = list->capacity ? list->capacity * 2 : 8;
+    size_t old_cap = list->capacity;
+    size_t new_cap = old_cap ? old_cap * 2 : 8;
     if (new_cap < desired)
         new_cap = desired;
 
@@ -54,6 +229,11 @@ static bool string_list_reserve(StringList *list, size_t desired)
         return false;
 
     list->items = new_items;
+    if (list->track_debug)
+    {
+        if (!string_list_resize_debug_storage(list, old_cap, new_cap))
+            return false;
+    }
     list->capacity = new_cap;
     return true;
 }
@@ -72,7 +252,24 @@ static bool string_list_append_copy(StringList *list, const char *src, size_t le
         memcpy(copy, src, len);
     copy[len] = '\0';
 
-    list->items[list->count++] = copy;
+    size_t index = list->count;
+    list->items[index] = copy;
+    if (list->track_debug && list->debug_files && list->debug_lines && list->debug_columns)
+    {
+        if (list->has_active_debug)
+        {
+            list->debug_files[index] = list->active_debug_file;
+            list->debug_lines[index] = list->active_debug_line;
+            list->debug_columns[index] = list->active_debug_column;
+        }
+        else
+        {
+            list->debug_files[index] = 0;
+            list->debug_lines[index] = 0;
+            list->debug_columns[index] = 0;
+        }
+    }
+    list->count++;
     return true;
 }
 
@@ -143,6 +340,18 @@ static void string_list_remove_range(StringList *list, size_t index, size_t coun
     size_t tail = list->count - (index + count);
     if (tail > 0)
         memmove(&list->items[index], &list->items[index + count], tail * sizeof(char *));
+    if (list->track_debug && list->debug_files && list->debug_lines && list->debug_columns)
+    {
+        if (tail > 0)
+        {
+            memmove(&list->debug_files[index], &list->debug_files[index + count], tail * sizeof(uint32_t));
+            memmove(&list->debug_lines[index], &list->debug_lines[index + count], tail * sizeof(uint32_t));
+            memmove(&list->debug_columns[index], &list->debug_columns[index + count], tail * sizeof(uint32_t));
+        }
+        memset(&list->debug_files[list->count - count], 0, count * sizeof(uint32_t));
+        memset(&list->debug_lines[list->count - count], 0, count * sizeof(uint32_t));
+        memset(&list->debug_columns[list->count - count], 0, count * sizeof(uint32_t));
+    }
 
     list->count -= count;
 }
@@ -150,6 +359,7 @@ static void string_list_remove_range(StringList *list, size_t index, size_t coun
 typedef struct
 {
     StringList lines;
+    StringList debug_files;
 } CcbModule;
 
 typedef struct
@@ -196,7 +406,9 @@ static bool ccb_value_type_is_integer(CCValueType ty);
 static bool ccb_value_type_is_float(CCValueType ty);
 static bool ccb_value_type_is_signed(CCValueType ty);
 static CcbLocal *ccb_local_add(CcbFunctionBuilder *fb, const char *name, Type *type, bool address_only, bool is_param);
+static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr);
 static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr);
+static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt);
 static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt);
 static bool ccb_emit_load_indirect(StringList *body, CCValueType ty);
 static bool ccb_emit_store_indirect(StringList *body, CCValueType ty);
@@ -234,6 +446,7 @@ static void ccb_module_init(CcbModule *mod)
     if (!mod)
         return;
     string_list_init(&mod->lines);
+    string_list_init(&mod->debug_files);
 }
 
 static void ccb_module_free(CcbModule *mod)
@@ -241,6 +454,7 @@ static void ccb_module_free(CcbModule *mod)
     if (!mod)
         return;
     string_list_free(&mod->lines);
+    string_list_free(&mod->debug_files);
 }
 
 static bool ccb_module_append_line(CcbModule *mod, const char *line)
@@ -423,6 +637,7 @@ static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, co
     fb->fn = fn;
     fb->ret_type = map_type_to_cc(fn && fn->ret_type ? fn->ret_type : NULL);
     string_list_init(&fb->body);
+    string_list_enable_debug_tracking(&fb->body);
     fb->locals = NULL;
     fb->locals_count = 0;
     fb->locals_capacity = 0;
@@ -453,6 +668,126 @@ static void ccb_function_builder_free(CcbFunctionBuilder *fb)
     fb->loop_stack = NULL;
     fb->loop_depth = 0;
     fb->loop_capacity = 0;
+}
+
+static char *ccb_dup_absolute_path(const char *path)
+{
+    if (!path || !*path)
+        return NULL;
+#if defined(_WIN32)
+#ifndef _MAX_PATH
+#define _MAX_PATH 32768
+#endif
+    char buffer[_MAX_PATH];
+    if (_fullpath(buffer, path, _MAX_PATH))
+        return xstrdup(buffer);
+#else
+    char *resolved = realpath(path, NULL);
+    if (resolved)
+        return resolved;
+#endif
+    return NULL;
+}
+
+static uint32_t ccb_module_register_debug_file(CcbModule *mod, const SourceBuffer *src)
+{
+    if (!mod || !src || !src->filename || src->filename[0] == '\0')
+        return 0;
+    char *absolute = ccb_dup_absolute_path(src->filename);
+    const char *path = absolute ? absolute : src->filename;
+    for (size_t i = 0; i < mod->debug_files.count; ++i)
+    {
+        const char *existing = mod->debug_files.items[i];
+        if (existing && strcmp(existing, path) == 0)
+        {
+            free(absolute);
+            return (uint32_t)(i + 1);
+        }
+    }
+    bool ok = string_list_append(&mod->debug_files, path);
+    if (absolute)
+        free(absolute);
+    if (!ok)
+        return 0;
+    return (uint32_t)mod->debug_files.count;
+}
+
+static void ccb_set_debug_site(CcbFunctionBuilder *fb, const Node *node)
+{
+    if (!fb)
+        return;
+    if (!node)
+    {
+        string_list_clear_debug_location(&fb->body);
+        return;
+    }
+    uint32_t file_id = ccb_module_register_debug_file(fb->module, node->src);
+    if (file_id == 0)
+    {
+        string_list_clear_debug_location(&fb->body);
+        return;
+    }
+    uint32_t line = (node->line > 0) ? (uint32_t)node->line : 1;
+    uint32_t column = (node->col > 0) ? (uint32_t)node->col : 1;
+    string_list_set_debug_location(&fb->body, file_id, line, column);
+}
+
+static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
+{
+    if (!fb)
+        return 1;
+    StringListDebugState prev = string_list_capture_debug_state(&fb->body);
+    ccb_set_debug_site(fb, expr);
+    int rc = ccb_emit_expr_basic_impl(fb, expr);
+    string_list_restore_debug_state(&fb->body, &prev);
+    return rc;
+}
+
+static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
+{
+    if (!fb)
+        return 1;
+    StringListDebugState prev = string_list_capture_debug_state(&fb->body);
+    ccb_set_debug_site(fb, stmt);
+    int rc = ccb_emit_stmt_basic_impl(fb, stmt);
+    string_list_restore_debug_state(&fb->body, &prev);
+    return rc;
+}
+
+static int ccb_append_function_body(CcbModule *mod, const CcbFunctionBuilder *fb)
+{
+    if (!mod || !fb)
+        return 1;
+    uint32_t current_file = 0;
+    uint32_t current_line = 0;
+    uint32_t current_column = 0;
+
+    for (size_t i = 0; i < fb->body.count; ++i)
+    {
+        uint32_t file = string_list_get_debug_file(&fb->body, i);
+        uint32_t line = string_list_get_debug_line(&fb->body, i);
+        uint32_t column = string_list_get_debug_column(&fb->body, i);
+
+        if (file != 0 && (file != current_file || line != current_line || column != current_column))
+        {
+            if (!ccb_module_appendf(mod, "  .loc %u %u %u", file, line, column))
+                return 1;
+            current_file = file;
+            current_line = line;
+            current_column = column;
+        }
+        else if (file == 0)
+        {
+            current_file = 0;
+            current_line = 0;
+            current_column = 0;
+        }
+
+        if (!ccb_module_append_line(mod, fb->body.items[i]))
+            return 1;
+    }
+
+    return 0;
 }
 
 static int ccb_loop_push(CcbFunctionBuilder *fb, const char *break_label, const char *continue_label, bool is_loop)
@@ -3023,7 +3358,7 @@ static int ccb_emit_global_incdec(CcbFunctionBuilder *fb, const Node *expr, bool
     return 0;
 }
 
-static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
+static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 {
     if (!fb || !expr)
         return 1;
@@ -4820,7 +5155,7 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
     }
 }
 
-static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
+static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
 {
     if (!fb || !stmt)
         return 1;
@@ -5510,8 +5845,9 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
     {
         const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
         const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
-        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s",
-                                backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix))
+        const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
+        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s",
+                    backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix, hidden_suffix))
             return 1;
     }
 
@@ -5600,8 +5936,9 @@ static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const Codeg
     {
         const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
         const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
-        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s",
-                                backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix))
+        const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
+        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s",
+                    backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix, hidden_suffix))
             return 1;
     }
 
@@ -5691,9 +6028,10 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         }
         else
         {
-            const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
-            if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s", backend_name,
-                                    cc_type_name(fb.ret_type), fb.param_count, fb.local_count, varargs_suffix))
+                const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
+                const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
+                if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s", backend_name,
+                            cc_type_name(fb.ret_type), fb.param_count, fb.local_count, varargs_suffix, hidden_suffix))
                 rc = 1;
         }
 
@@ -5727,14 +6065,8 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
 
         if (!rc)
         {
-            for (size_t i = 0; i < fb.body.count; ++i)
-            {
-                if (!ccb_module_append_line(mod, fb.body.items[i]))
-                {
-                    rc = 1;
-                    break;
-                }
-            }
+            if (ccb_append_function_body(mod, &fb))
+                rc = 1;
         }
 
         if (!rc)
@@ -5907,6 +6239,23 @@ static bool ccb_value_type_is_signed(CCValueType ty)
     }
 }
 
+static void ccb_write_quoted(FILE *out, const char *text)
+{
+    if (!out)
+        return;
+    fputc('"', out);
+    if (text)
+    {
+        for (const char *p = text; *p; ++p)
+        {
+            if (*p == '"' || *p == '\\')
+                fputc('\\', out);
+            fputc(*p, out);
+        }
+    }
+    fputc('"', out);
+}
+
 static int write_module_to_file(const char *path, const CcbModule *mod)
 {
     FILE *out = fopen(path, "wb");
@@ -5917,6 +6266,17 @@ static int write_module_to_file(const char *path, const CcbModule *mod)
     }
 
     fprintf(out, "ccbytecode 2\n\n");
+    if (mod && mod->debug_files.count > 0)
+    {
+        for (size_t i = 0; i < mod->debug_files.count; ++i)
+        {
+            const char *path_str = mod->debug_files.items[i];
+            fprintf(out, ".file %zu ", i + 1);
+            ccb_write_quoted(out, path_str ? path_str : "");
+            fputc('\n', out);
+        }
+        fputc('\n', out);
+    }
     for (size_t i = 0; i < mod->lines.count; ++i)
     {
         const char *line = mod->lines.items[i];

@@ -518,7 +518,7 @@ expose fun main() -> i32
     assert(use_constant(45) == 145, "use_constant(45) == 145"); // works fine
     assert(use_constant(const_value as i32) == 655, "use_constant(const_value) == 655"); // throws warning
 
-    constant_test(const_value);
+    constant_test(const_value as i32); // should not modify caller
     assert(const_value == 555, "constant value remains 555 after constant_test");
     
     constant u8* array = Std.Memory.alloc(10) as constant u8*;
