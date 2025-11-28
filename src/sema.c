@@ -5,6 +5,7 @@
 #include <string.h>
 #include <limits.h>
 #include <stdint.h>
+#include <ctype.h>
 
 enum
 {
@@ -29,6 +30,16 @@ typedef struct ImportedFunctionSet
 
 static void analyze_inline_candidates(Node *root);
 static int inline_try_fold_call(Node *call_expr);
+static int template_param_allows(Type *t, TemplateConstraintKind want);
+static int type_is_float(Type *t);
+static int type_is_pointer(Type *t);
+static int type_equal(Type *a, Type *b);
+static void describe_type(const Type *t, char *buf, size_t bufsz);
+static int bind_template_type_pattern(Type *pattern, Type *actual,
+                                      Type **bindings, int binding_count);
+static int check_exposed_function_signature(const Node *fn);
+static void sema_register_function_local(SemaContext *sc, Node *unit_node, Node *fn);
+static int sema_check_function(SemaContext *sc, Node *fn);
 
 static Type *canonicalize_type_deep(Type *ty)
 {
@@ -341,11 +352,12 @@ struct SemaContext
 {
     SymTable *syms;
     struct Scope *scope;
-    const struct Node *unit;
+    Node *unit;
     ImportedFunctionSet *imported_funcs;
     int imported_func_count;
     int imported_func_cap;
     int loop_depth;
+    int switch_depth;
 };
 SemaContext *sema_create(void)
 {
@@ -356,6 +368,7 @@ SemaContext *sema_create(void)
     sc->imported_func_count = 0;
     sc->imported_func_cap = 0;
     sc->loop_depth = 0;
+    sc->switch_depth = 0;
     return sc;
 }
 void sema_destroy(SemaContext *sc)
@@ -627,6 +640,14 @@ static int type_is_int(Type *t)
     t = canonicalize_type_deep(t);
     if (!t)
         return 0;
+    if (t->kind == TY_TEMPLATE_PARAM)
+    {
+        if (template_param_allows(t, TEMPLATE_CONSTRAINT_INTEGRAL))
+            return 1;
+        if (t->template_default_type && t->template_default_type != t)
+            return type_is_int(t->template_default_type);
+        return 0;
+    }
     switch (t->kind)
     {
     case TY_I8:
@@ -642,6 +663,623 @@ static int type_is_int(Type *t)
         return 1;
     default:
         return 0;
+    }
+}
+
+static int template_param_allows(Type *t, TemplateConstraintKind want)
+{
+    t = canonicalize_type_deep(t);
+    if (!t || t->kind != TY_TEMPLATE_PARAM)
+        return 0;
+    TemplateConstraintKind have = t->template_constraint_kind;
+    switch (want)
+    {
+    case TEMPLATE_CONSTRAINT_INTEGRAL:
+        return (have == TEMPLATE_CONSTRAINT_INTEGRAL || have == TEMPLATE_CONSTRAINT_NUMERIC);
+    case TEMPLATE_CONSTRAINT_FLOATING:
+        return (have == TEMPLATE_CONSTRAINT_FLOATING || have == TEMPLATE_CONSTRAINT_NUMERIC);
+    case TEMPLATE_CONSTRAINT_NUMERIC:
+        return (have == TEMPLATE_CONSTRAINT_NUMERIC || have == TEMPLATE_CONSTRAINT_INTEGRAL || have == TEMPLATE_CONSTRAINT_FLOATING);
+    case TEMPLATE_CONSTRAINT_POINTER:
+        return have == TEMPLATE_CONSTRAINT_POINTER;
+    default:
+        return 0;
+    }
+}
+
+static int type_matches_constraint(Type *ty, TemplateConstraintKind constraint)
+{
+    if (constraint == TEMPLATE_CONSTRAINT_NONE)
+        return 1;
+    ty = canonicalize_type_deep(ty);
+    if (!ty)
+        return 0;
+    switch (constraint)
+    {
+    case TEMPLATE_CONSTRAINT_INTEGRAL:
+        return type_is_int(ty);
+    case TEMPLATE_CONSTRAINT_FLOATING:
+        return type_is_float(ty);
+    case TEMPLATE_CONSTRAINT_NUMERIC:
+        return type_is_int(ty) || type_is_float(ty);
+    case TEMPLATE_CONSTRAINT_POINTER:
+        return type_is_pointer(ty);
+    default:
+        return 1;
+    }
+}
+
+typedef struct
+{
+    const Type *orig;
+    Type *inst;
+} TypeSubstCacheEntry;
+
+static Type *instantiate_type_with_bindings(const Type *orig,
+                                            Type **bindings,
+                                            int binding_count,
+                                            TypeSubstCacheEntry **cache,
+                                            int *cache_count,
+                                            int *cache_cap);
+
+static Type *instantiate_type_with_bindings(const Type *orig,
+                                            Type **bindings,
+                                            int binding_count,
+                                            TypeSubstCacheEntry **cache,
+                                            int *cache_count,
+                                            int *cache_cap)
+{
+    if (!orig)
+        return NULL;
+    if (orig->kind == TY_TEMPLATE_PARAM)
+    {
+        int idx = orig->template_param_index;
+        if (idx >= 0 && idx < binding_count && bindings && bindings[idx])
+            return bindings[idx];
+        return (Type *)orig;
+    }
+    if (!bindings || binding_count <= 0)
+        return (Type *)orig;
+    if (orig->kind != TY_PTR && orig->kind != TY_ARRAY && orig->kind != TY_FUNC)
+        return (Type *)orig;
+
+    if (cache && cache_count && cache_cap)
+    {
+        for (int i = 0; i < *cache_count; ++i)
+        {
+            if ((*cache)[i].orig == orig)
+                return (*cache)[i].inst;
+        }
+    }
+
+    Type *result = NULL;
+    switch (orig->kind)
+    {
+    case TY_PTR:
+    {
+        Type *pointee = instantiate_type_with_bindings(orig->pointee, bindings, binding_count, cache, cache_count, cache_cap);
+        if (pointee == orig->pointee)
+            result = (Type *)orig;
+        else
+        {
+            Type *clone = type_ptr(pointee);
+            result = clone;
+        }
+        break;
+    }
+    case TY_ARRAY:
+    {
+        Type *elem = instantiate_type_with_bindings(orig->array.elem, bindings, binding_count, cache, cache_count, cache_cap);
+        if (elem == orig->array.elem)
+            result = (Type *)orig;
+        else
+        {
+            Type *clone = type_array(elem, orig->array.length);
+            clone->array.is_unsized = orig->array.is_unsized;
+            result = clone;
+        }
+        break;
+    }
+    case TY_FUNC:
+    {
+        Type *ret = instantiate_type_with_bindings(orig->func.ret, bindings, binding_count, cache, cache_count, cache_cap);
+        int changed = (ret != orig->func.ret);
+        Type **params = NULL;
+        if (orig->func.param_count > 0)
+        {
+            params = (Type **)xcalloc((size_t)orig->func.param_count, sizeof(Type *));
+            for (int i = 0; i < orig->func.param_count; ++i)
+            {
+                Type *sub = instantiate_type_with_bindings(orig->func.params ? orig->func.params[i] : NULL,
+                                                           bindings, binding_count, cache, cache_count, cache_cap);
+                params[i] = sub;
+                if (sub != (orig->func.params ? orig->func.params[i] : NULL))
+                    changed = 1;
+            }
+        }
+        if (!changed)
+        {
+            free(params);
+            result = (Type *)orig;
+        }
+        else
+        {
+            Type *clone = type_func();
+            clone->func.param_count = orig->func.param_count;
+            clone->func.params = params;
+            clone->func.ret = ret;
+            clone->func.is_varargs = orig->func.is_varargs;
+            clone->func.has_signature = orig->func.has_signature;
+            result = clone;
+            params = NULL;
+        }
+        if (params)
+            free(params);
+        break;
+    }
+    default:
+        result = (Type *)orig;
+        break;
+    }
+
+    if (result && result != orig && cache && cache_count && cache_cap)
+    {
+        if (*cache_count == *cache_cap)
+        {
+            int new_cap = *cache_cap ? (*cache_cap * 2) : 8;
+            TypeSubstCacheEntry *grown = (TypeSubstCacheEntry *)realloc(*cache, (size_t)new_cap * sizeof(TypeSubstCacheEntry));
+            if (!grown)
+            {
+                diag_error("out of memory while caching type instantiations");
+                exit(1);
+            }
+            *cache = grown;
+            *cache_cap = new_cap;
+        }
+        (*cache)[*cache_count].orig = orig;
+        (*cache)[*cache_count].inst = result;
+        (*cache_count)++;
+    }
+
+    return result;
+}
+
+static Node *clone_node_tree_with_bindings(const Node *src,
+                                           Type **bindings,
+                                           int binding_count,
+                                           TypeSubstCacheEntry **cache,
+                                           int *cache_count,
+                                           int *cache_cap)
+{
+    if (!src)
+        return NULL;
+    Node *dst = (Node *)xcalloc(1, sizeof(Node));
+    memcpy(dst, src, sizeof(Node));
+
+    dst->lhs = clone_node_tree_with_bindings(src->lhs, bindings, binding_count, cache, cache_count, cache_cap);
+    dst->rhs = clone_node_tree_with_bindings(src->rhs, bindings, binding_count, cache, cache_count, cache_cap);
+    dst->body = clone_node_tree_with_bindings(src->body, bindings, binding_count, cache, cache_count, cache_cap);
+
+    if (src->arg_count > 0 && src->args)
+    {
+        dst->args = (Node **)xcalloc((size_t)src->arg_count, sizeof(Node *));
+        for (int i = 0; i < src->arg_count; ++i)
+            dst->args[i] = clone_node_tree_with_bindings(src->args[i], bindings, binding_count, cache, cache_count, cache_cap);
+    }
+    else
+    {
+        dst->args = NULL;
+        dst->arg_count = src->arg_count;
+    }
+
+    if (src->call_type_arg_count > 0 && src->call_type_args)
+    {
+        dst->call_type_args = (Type **)xcalloc((size_t)src->call_type_arg_count, sizeof(Type *));
+        for (int i = 0; i < src->call_type_arg_count; ++i)
+            dst->call_type_args[i] = instantiate_type_with_bindings(src->call_type_args[i], bindings, binding_count, cache, cache_count, cache_cap);
+    }
+    else
+    {
+        dst->call_type_args = NULL;
+        dst->call_type_arg_count = 0;
+    }
+
+    if (src->stmt_count > 0 && src->stmts)
+    {
+        dst->stmts = (Node **)xcalloc((size_t)src->stmt_count, sizeof(Node *));
+        for (int i = 0; i < src->stmt_count; ++i)
+            dst->stmts[i] = clone_node_tree_with_bindings(src->stmts[i], bindings, binding_count, cache, cache_count, cache_cap);
+    }
+    else
+    {
+        dst->stmts = NULL;
+        dst->stmt_count = src->stmt_count;
+    }
+
+    if (src->init.count > 0)
+    {
+        if (src->init.elems)
+        {
+            dst->init.elems = (Node **)xcalloc((size_t)src->init.count, sizeof(Node *));
+            for (int i = 0; i < src->init.count; ++i)
+                dst->init.elems[i] = clone_node_tree_with_bindings(src->init.elems[i], bindings, binding_count, cache, cache_count, cache_cap);
+        }
+        if (src->init.designators)
+        {
+            dst->init.designators = (const char **)xcalloc((size_t)src->init.count, sizeof(const char *));
+            for (int i = 0; i < src->init.count; ++i)
+                dst->init.designators[i] = src->init.designators[i];
+        }
+        if (src->init.field_indices)
+        {
+            dst->init.field_indices = (int *)xcalloc((size_t)src->init.count, sizeof(int));
+            memcpy(dst->init.field_indices, src->init.field_indices, (size_t)src->init.count * sizeof(int));
+        }
+    }
+
+    dst->type = instantiate_type_with_bindings(src->type, bindings, binding_count, cache, cache_count, cache_cap);
+    dst->var_type = instantiate_type_with_bindings(src->var_type, bindings, binding_count, cache, cache_count, cache_cap);
+    dst->ret_type = instantiate_type_with_bindings(src->ret_type, bindings, binding_count, cache, cache_count, cache_cap);
+    dst->call_func_type = NULL;
+    dst->call_target = NULL;
+    dst->referenced_function = NULL;
+    dst->inline_expr = NULL;
+
+    return dst;
+}
+
+static Node *instantiate_function_template(const Node *fn,
+                                           char *inst_name,
+                                           Type **bindings,
+                                           int binding_count)
+{
+    if (!fn || fn->kind != ND_FUNC || !inst_name)
+        return NULL;
+    TypeSubstCacheEntry *cache = NULL;
+    int cache_count = 0;
+    int cache_cap = 0;
+
+    Node *clone = (Node *)xcalloc(1, sizeof(Node));
+    memcpy(clone, fn, sizeof(Node));
+    clone->name = inst_name;
+    clone->metadata = fn->metadata;
+    clone->metadata.backend_name = inst_name;
+    clone->generic_param_count = 0;
+    clone->generic_param_names = NULL;
+    clone->generic_param_types = NULL;
+    clone->body = clone_node_tree_with_bindings(fn->body, bindings, binding_count, &cache, &cache_count, &cache_cap);
+    clone->ret_type = instantiate_type_with_bindings(fn->ret_type, bindings, binding_count, &cache, &cache_count, &cache_cap);
+
+    if (fn->param_count > 0 && fn->param_types)
+    {
+        clone->param_types = (Type **)xcalloc((size_t)fn->param_count, sizeof(Type *));
+        for (int i = 0; i < fn->param_count; ++i)
+            clone->param_types[i] = instantiate_type_with_bindings(fn->param_types[i], bindings, binding_count, &cache, &cache_count, &cache_cap);
+    }
+    else
+    {
+        clone->param_types = NULL;
+        clone->param_count = fn->param_count;
+    }
+
+    if (fn->param_names && fn->param_count > 0)
+    {
+        clone->param_names = (const char **)xcalloc((size_t)fn->param_count, sizeof(char *));
+        for (int i = 0; i < fn->param_count; ++i)
+            clone->param_names[i] = fn->param_names[i];
+    }
+    else
+    {
+        clone->param_names = NULL;
+    }
+
+    if (fn->param_const_flags && fn->param_count > 0)
+    {
+        clone->param_const_flags = (unsigned char *)xmalloc((size_t)fn->param_count);
+        memcpy(clone->param_const_flags, fn->param_const_flags, (size_t)fn->param_count);
+    }
+    else
+    {
+        clone->param_const_flags = NULL;
+    }
+
+    clone->call_target = NULL;
+    clone->call_func_type = NULL;
+    clone->referenced_function = NULL;
+    clone->inline_expr = NULL;
+    clone->is_entrypoint = 0;
+
+    free(cache);
+    return clone;
+}
+
+static char *constraint_name(TemplateConstraintKind kind)
+{
+    switch (kind)
+    {
+    case TEMPLATE_CONSTRAINT_INTEGRAL:
+        return "integral";
+    case TEMPLATE_CONSTRAINT_FLOATING:
+        return "floating-point";
+    case TEMPLATE_CONSTRAINT_NUMERIC:
+        return "numeric";
+    case TEMPLATE_CONSTRAINT_POINTER:
+        return "pointer";
+    default:
+        return "unspecified";
+    }
+}
+
+static char *make_template_instance_name(const Symbol *sym, Type **bindings, int binding_count)
+{
+    if (!sym || !sym->name)
+        return NULL;
+    size_t base_len = strlen(sym->name);
+    size_t total = base_len + 8;
+    char **chunks = NULL;
+    if (binding_count > 0)
+    {
+        chunks = (char **)xcalloc((size_t)binding_count, sizeof(char *));
+        for (int i = 0; i < binding_count; ++i)
+        {
+            char raw[128];
+            describe_type(bindings[i], raw, sizeof(raw));
+            size_t raw_len = strlen(raw);
+            char *chunk = (char *)xmalloc(raw_len + 1);
+            for (size_t j = 0; j < raw_len; ++j)
+            {
+                char c = raw[j];
+                if (isalnum((unsigned char)c))
+                    chunk[j] = c;
+                else
+                    chunk[j] = '_';
+            }
+            chunk[raw_len] = '\0';
+            chunks[i] = chunk;
+            total += raw_len + 8;
+        }
+    }
+    char *name = (char *)xmalloc(total + 1);
+    name[0] = '\0';
+    strncat(name, sym->name, total);
+    strncat(name, "__inst", total - strlen(name));
+    for (int i = 0; i < binding_count; ++i)
+    {
+        char idxbuf[32];
+        snprintf(idxbuf, sizeof(idxbuf), "__T%d_", i);
+        strncat(name, idxbuf, total - strlen(name));
+        if (chunks && chunks[i])
+            strncat(name, chunks[i], total - strlen(name));
+    }
+    if (chunks)
+    {
+        for (int i = 0; i < binding_count; ++i)
+            free(chunks[i]);
+        free(chunks);
+    }
+    return name;
+}
+
+static void unit_append_function(Node *unit, Node *fn)
+{
+    if (!unit || unit->kind != ND_UNIT || !fn)
+        return;
+    int new_count = unit->stmt_count + 1;
+    Node **grown = (Node **)realloc(unit->stmts, (size_t)new_count * sizeof(Node *));
+    if (!grown)
+    {
+        diag_error("out of memory while registering instantiated function");
+        exit(1);
+    }
+    unit->stmts = grown;
+    unit->stmts[unit->stmt_count] = fn;
+    unit->stmt_count = new_count;
+}
+
+static const Symbol *sema_instantiate_generic_call(SemaContext *sc,
+                                                   const Symbol *template_sym,
+                                                   Node *call_expr,
+                                                   int *args_checked)
+{
+    if (!sc || !template_sym || !call_expr || !template_sym->ast_node)
+        return NULL;
+    const Node *template_fn = template_sym->ast_node;
+    if (!template_fn || template_fn->kind != ND_FUNC || template_fn->generic_param_count <= 0)
+        return NULL;
+
+    int template_arg_count = template_fn->generic_param_count;
+    Type **bindings = (Type **)xcalloc((size_t)template_arg_count, sizeof(Type *));
+
+    if (call_expr->call_type_arg_count > template_arg_count)
+    {
+        diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                      "function '%s' expects %d template argument(s) but %d provided",
+                      template_sym->name, template_arg_count, call_expr->call_type_arg_count);
+        exit(1);
+    }
+
+    for (int i = 0; i < call_expr->call_type_arg_count && i < template_arg_count; ++i)
+    {
+        Type *explicit_ty = canonicalize_type_deep(call_expr->call_type_args ? call_expr->call_type_args[i] : NULL);
+        if (!explicit_ty)
+        {
+            diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                          "invalid explicit template argument for parameter %d",
+                          i + 1);
+            exit(1);
+        }
+        bindings[i] = explicit_ty;
+    }
+
+    if (!args_checked || !*args_checked)
+    {
+        for (int i = 0; i < call_expr->arg_count; ++i)
+        {
+            if (call_expr->args && call_expr->args[i])
+                check_expr(sc, call_expr->args[i]);
+        }
+        if (args_checked)
+            *args_checked = 1;
+    }
+
+    for (int i = 0; i < template_fn->param_count && i < call_expr->arg_count; ++i)
+    {
+        Type *param_pattern = template_fn->param_types ? template_fn->param_types[i] : NULL;
+        Node *arg_node = (call_expr->args && i < call_expr->arg_count) ? call_expr->args[i] : NULL;
+        if (!param_pattern || !arg_node || !arg_node->type)
+            continue;
+        if (!bind_template_type_pattern(param_pattern, arg_node->type, bindings, template_arg_count))
+        {
+            const char *param_name = (template_fn->param_names && i < template_fn->param_count) ? template_fn->param_names[i] : NULL;
+            char want[64];
+            describe_type(param_pattern, want, sizeof(want));
+            char got[64];
+            describe_type(arg_node->type, got, sizeof(got));
+            diag_error_at(arg_node->src, arg_node->line, arg_node->col,
+                          "cannot match argument type %s to template parameter %s of '%s'",
+                          got, param_name ? param_name : "", template_sym->name);
+            exit(1);
+        }
+    }
+
+    for (int i = 0; i < template_arg_count; ++i)
+    {
+        Type *placeholder = (template_fn->generic_param_types && i < template_fn->generic_param_count)
+                                ? template_fn->generic_param_types[i]
+                                : NULL;
+        if (!bindings[i] && placeholder && placeholder->template_default_type)
+            bindings[i] = canonicalize_type_deep(placeholder->template_default_type);
+        if (!bindings[i])
+        {
+            const char *pname = (template_fn->generic_param_names && i < template_fn->generic_param_count)
+                                    ? template_fn->generic_param_names[i]
+                                    : NULL;
+            diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                          "unable to deduce template parameter '%s' for call to '%s'",
+                          pname ? pname : "T", template_sym->name);
+            exit(1);
+        }
+        TemplateConstraintKind constraint = placeholder ? placeholder->template_constraint_kind : TEMPLATE_CONSTRAINT_NONE;
+        if (constraint != TEMPLATE_CONSTRAINT_NONE && !type_matches_constraint(bindings[i], constraint))
+        {
+            char tybuf[64];
+            describe_type(bindings[i], tybuf, sizeof(tybuf));
+            const char *pname = (template_fn->generic_param_names && i < template_fn->generic_param_count)
+                                    ? template_fn->generic_param_names[i]
+                                    : NULL;
+            diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                          "template parameter '%s' of '%s' requires %s type but argument is %s",
+                          pname ? pname : "T", template_sym->name,
+                          constraint_name(constraint), tybuf);
+            exit(1);
+        }
+    }
+
+    char *inst_name = make_template_instance_name(template_sym, bindings, template_arg_count);
+    if (!inst_name)
+    {
+        diag_error("failed to mangle template instance name for '%s'", template_sym->name);
+        exit(1);
+    }
+
+    const Symbol *existing = symtab_get(sc->syms, inst_name);
+    if (existing && existing->kind == SYM_FUNC)
+    {
+        free(bindings);
+        call_expr->call_name = existing->name;
+        call_expr->call_target = existing->ast_node;
+        call_expr->call_is_indirect = 0;
+        free(inst_name);
+        return existing;
+    }
+
+    Node *inst_fn = instantiate_function_template(template_fn, inst_name, bindings, template_arg_count);
+    unit_append_function(sc->unit, inst_fn);
+    sema_register_function_local(sc, sc->unit, inst_fn);
+    if (check_exposed_function_signature(inst_fn))
+    {
+        diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                      "instantiated template '%s' violates exposure rules", template_sym->name);
+        exit(1);
+    }
+    if (sema_check_function(sc, inst_fn))
+    {
+        diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                      "failed to type-check instantiated template '%s'", template_sym->name);
+        exit(1);
+    }
+
+    const Symbol *inst_sym = symtab_get(sc->syms, inst_fn->name);
+    if (!inst_sym)
+    {
+        diag_error("internal error: missing symbol for instantiated template '%s'", inst_fn->name);
+        exit(1);
+    }
+
+    call_expr->call_name = inst_fn->name;
+    call_expr->call_target = inst_fn;
+    call_expr->call_is_indirect = 0;
+
+    free(bindings);
+    return inst_sym;
+}
+
+static int bind_template_type_pattern(Type *pattern, Type *actual,
+                                      Type **bindings, int binding_count)
+{
+    if (!pattern || !actual || !bindings || binding_count <= 0)
+        return 1;
+    pattern = canonicalize_type_deep(pattern);
+    actual = canonicalize_type_deep(actual);
+    if (!pattern || !actual)
+        return 1;
+    if (pattern->kind == TY_TEMPLATE_PARAM)
+    {
+        int idx = pattern->template_param_index;
+        if (idx < 0 || idx >= binding_count)
+            return 0;
+        if (!bindings[idx])
+        {
+            bindings[idx] = actual;
+            return 1;
+        }
+        return type_equal(bindings[idx], actual);
+    }
+    if (pattern->kind != actual->kind)
+        return 0;
+    switch (pattern->kind)
+    {
+    case TY_PTR:
+        if (!pattern->pointee || !actual->pointee)
+            return 0;
+        return bind_template_type_pattern(pattern->pointee, actual->pointee, bindings, binding_count);
+    case TY_ARRAY:
+        if (pattern->array.length != actual->array.length ||
+            pattern->array.is_unsized != actual->array.is_unsized)
+            return 0;
+        return bind_template_type_pattern(pattern->array.elem, actual->array.elem, bindings, binding_count);
+    case TY_FUNC:
+    {
+        if (!!pattern->func.ret != !!actual->func.ret)
+            return 0;
+        if (pattern->func.param_count != actual->func.param_count)
+            return 0;
+        if (pattern->func.is_varargs != actual->func.is_varargs)
+            return 0;
+        if (pattern->func.ret &&
+            !bind_template_type_pattern(pattern->func.ret, actual->func.ret, bindings, binding_count))
+            return 0;
+        for (int i = 0; i < pattern->func.param_count; ++i)
+        {
+            Type *pp = pattern->func.params ? pattern->func.params[i] : NULL;
+            Type *ap = actual->func.params ? actual->func.params[i] : NULL;
+            if (!bind_template_type_pattern(pp, ap, bindings, binding_count))
+                return 0;
+        }
+        return 1;
+    }
+    default:
+        return type_equal(pattern, actual);
     }
 }
 
@@ -878,6 +1516,12 @@ static void describe_type(const Type *t, char *buf, size_t bufsz)
     case TY_STRUCT:
         snprintf(buf, bufsz, "struct %s", t->struct_name ? t->struct_name : "<anonymous>");
         return;
+    case TY_TEMPLATE_PARAM:
+        if (t->template_param_name && *t->template_param_name)
+            snprintf(buf, bufsz, "%s", t->template_param_name);
+        else
+            snprintf(buf, bufsz, "template_param#%d", t->template_param_index);
+        return;
     default:
         snprintf(buf, bufsz, "type kind %d", t->kind);
         return;
@@ -896,6 +1540,8 @@ static int type_is_exportable(const Type *t)
         return t->array.elem ? type_is_exportable(t->array.elem) : 0;
     if (t->kind == TY_STRUCT)
         return t->is_exposed != 0;
+    if (t->kind == TY_TEMPLATE_PARAM)
+        return 0;
     return 1;
 }
 
@@ -1443,6 +2089,14 @@ static int type_is_float(Type *t)
     t = canonicalize_type_deep(t);
     if (!t)
         return 0;
+    if (t->kind == TY_TEMPLATE_PARAM)
+    {
+        if (template_param_allows(t, TEMPLATE_CONSTRAINT_FLOATING))
+            return 1;
+        if (t->template_default_type && t->template_default_type != t)
+            return type_is_float(t->template_default_type);
+        return 0;
+    }
     switch (t->kind)
     {
     case TY_F32:
@@ -1459,6 +2113,14 @@ static int type_is_pointer(Type *t)
     t = canonicalize_type_deep(t);
     if (!t)
         return 0;
+    if (t->kind == TY_TEMPLATE_PARAM)
+    {
+        if (template_param_allows(t, TEMPLATE_CONSTRAINT_POINTER))
+            return 1;
+        if (t->template_default_type && t->template_default_type != t)
+            return type_is_pointer(t->template_default_type);
+        return 0;
+    }
     if (t->kind == TY_PTR)
         return 1;
     if (t->kind == TY_ARRAY && t->array.is_unsized)
@@ -1547,9 +2209,56 @@ static int type_bit_width(Type *t)
     }
 }
 
+static int node_force_int_literal(Node *n)
+{
+    if (!n)
+        return 0;
+    if (n->kind == ND_INT)
+        return 1;
+    if (n->kind == ND_NEG && n->lhs)
+    {
+        if (!node_force_int_literal(n->lhs))
+            return 0;
+        if (n->lhs->kind != ND_INT)
+            return 0;
+        int64_t val = n->lhs->int_val;
+        ast_free(n->lhs);
+        n->lhs = NULL;
+        if (n->rhs)
+        {
+            ast_free(n->rhs);
+            n->rhs = NULL;
+        }
+        n->kind = ND_INT;
+        n->int_val = -val;
+        return 1;
+    }
+    if (n->kind == ND_CAST && n->lhs && type_is_int(n->type))
+    {
+        if (!node_force_int_literal(n->lhs))
+            return 0;
+        if (n->lhs->kind != ND_INT)
+            return 0;
+        int64_t val = n->lhs->int_val;
+        ast_free(n->lhs);
+        n->lhs = NULL;
+        if (n->rhs)
+        {
+            ast_free(n->rhs);
+            n->rhs = NULL;
+        }
+        n->kind = ND_INT;
+        n->int_val = val;
+        return 1;
+    }
+    return 0;
+}
+
 static int coerce_int_literal_to_type(Node *literal, Type *target, const char *context)
 {
     if (!literal || !target)
+        return 0;
+    if (!node_force_int_literal(literal) && literal->kind != ND_INT)
         return 0;
     if (literal->kind != ND_INT)
         return 0;
@@ -3467,6 +4176,14 @@ static void check_expr(SemaContext *sc, Node *e)
             }
         }
 
+        if (!func_sig && direct_sym && direct_sym->ast_node &&
+            direct_sym->ast_node->kind == ND_FUNC && direct_sym->ast_node->generic_param_count > 0)
+        {
+            const Symbol *inst_sym = sema_instantiate_generic_call(sc, direct_sym, e, &args_checked);
+            if (inst_sym)
+                direct_sym = inst_sym;
+        }
+
         if (!func_sig && direct_sym)
         {
             func_sig = make_function_type_from_sig(&direct_sym->sig);
@@ -3786,6 +4503,171 @@ static void check_expr(SemaContext *sc, Node *e)
         diag_error_at(e->src, e->line, e->col, "ternary branches must have compatible types");
         exit(1);
     }
+    if (e->kind == ND_MATCH)
+    {
+        if (!e->match_stmt.expr)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "match expression missing scrutinee");
+            exit(1);
+        }
+        if (e->match_stmt.arm_count <= 0 || !e->match_stmt.arms)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "match expression requires at least one arm");
+            exit(1);
+        }
+
+        check_expr(sc, e->match_stmt.expr);
+        Type *scrut_type = canonicalize_type_deep(e->match_stmt.expr->type);
+        if (!type_is_int(scrut_type))
+        {
+            diag_error_at(e->match_stmt.expr->src, e->match_stmt.expr->line, e->match_stmt.expr->col,
+                          "match expression scrutinee must be integral");
+            exit(1);
+        }
+
+        int arm_count = e->match_stmt.arm_count;
+        MatchArm *arms = e->match_stmt.arms;
+        int wildcard_index = -1;
+        int value_count = 0;
+        int64_t *pattern_values = (int64_t *)xcalloc((size_t)arm_count, sizeof(int64_t));
+        Type *result_type = NULL;
+
+        for (int i = 0; i < arm_count; ++i)
+        {
+            MatchArm *arm = &arms[i];
+            if (!arm)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "match arm is null");
+                if (pattern_values)
+                    free(pattern_values);
+                exit(1);
+            }
+
+            if (arm->pattern)
+            {
+                check_expr(sc, arm->pattern);
+                if (!type_is_int(arm->pattern->type))
+                {
+                    if (!coerce_int_literal_to_type(arm->pattern, scrut_type, "match arm"))
+                    {
+                        diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
+                                      "match patterns must be integer literals compatible with scrutinee");
+                        if (pattern_values)
+                            free(pattern_values);
+                        exit(1);
+                    }
+                }
+                if (!node_force_int_literal(arm->pattern))
+                {
+                    diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
+                                  "match patterns must be integer constants");
+                    if (pattern_values)
+                        free(pattern_values);
+                    exit(1);
+                }
+                if (arm->pattern->kind != ND_INT)
+                {
+                    diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
+                                  "match patterns must be integer constants");
+                    if (pattern_values)
+                        free(pattern_values);
+                    exit(1);
+                }
+                int64_t val = arm->pattern->int_val;
+                for (int j = 0; j < value_count; ++j)
+                {
+                    if (pattern_values[j] == val)
+                    {
+                        diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
+                                      "duplicate match pattern value '%lld'", (long long)val);
+                        free(pattern_values);
+                        exit(1);
+                    }
+                }
+                pattern_values[value_count++] = val;
+            }
+            else
+            {
+                if (wildcard_index >= 0)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "match expression may contain only one '_' arm");
+                    if (pattern_values)
+                        free(pattern_values);
+                    exit(1);
+                }
+                wildcard_index = i;
+                if (i != arm_count - 1)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "wildcard '_' arm must be the last arm in a match expression");
+                    if (pattern_values)
+                        free(pattern_values);
+                    exit(1);
+                }
+            }
+
+            if (arm->guard)
+            {
+                diag_error_at(arm->guard->src, arm->guard->line, arm->guard->col,
+                              "match guards are not supported yet");
+                if (pattern_values)
+                    free(pattern_values);
+                exit(1);
+            }
+
+            if (!arm->body)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "match arm missing result expression");
+                if (pattern_values)
+                    free(pattern_values);
+                exit(1);
+            }
+
+            check_expr(sc, arm->body);
+            Type *body_type = canonicalize_type_deep(arm->body->type);
+            if (!result_type)
+            {
+                result_type = body_type;
+            }
+            else
+            {
+                if (!type_equal(result_type, body_type))
+                {
+                    if (coerce_int_literal_to_type(arm->body, result_type, "match arm result"))
+                        body_type = canonicalize_type_deep(arm->body->type);
+                }
+                if (!type_equal(result_type, body_type))
+                {
+                    diag_error_at(arm->body->src, arm->body->line, arm->body->col,
+                                  "all match arms must yield the same type");
+                    if (pattern_values)
+                        free(pattern_values);
+                    exit(1);
+                }
+            }
+        }
+
+        if (wildcard_index < 0)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "match expression must include a trailing '_' arm");
+            if (pattern_values)
+                free(pattern_values);
+            exit(1);
+        }
+
+        if (!result_type)
+            result_type = &ty_i32;
+        e->type = result_type;
+        if (pattern_values)
+            free(pattern_values);
+        return;
+    }
     diag_error_at(e->src, e->line, e->col, "unsupported expression: %s",
                   nodekind_name(e->kind));
     exit(1);
@@ -3892,11 +4774,124 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
         }
         sc->loop_depth--;
         return 0;
-    case ND_BREAK:
-        if (sc->loop_depth <= 0)
+    case ND_SWITCH:
+    {
+        if (!stmt->switch_stmt.expr)
         {
             diag_error_at(stmt->src, stmt->line, stmt->col,
-                          "'break' may only appear inside a loop");
+                          "switch statement missing selector expression");
+            return 1;
+        }
+        check_expr(sc, stmt->switch_stmt.expr);
+        Type *cond_type = canonicalize_type_deep(stmt->switch_stmt.expr->type);
+        if (!type_is_int(cond_type))
+        {
+            diag_error_at(stmt->switch_stmt.expr->src, stmt->switch_stmt.expr->line, stmt->switch_stmt.expr->col,
+                          "switch selector must be an integral type");
+            return 1;
+        }
+
+        int case_count = stmt->switch_stmt.case_count;
+        SwitchCase *cases = stmt->switch_stmt.cases;
+        int has_default = 0;
+        int value_used = 0;
+        int64_t *case_values = (case_count > 0) ? (int64_t *)xcalloc((size_t)case_count, sizeof(int64_t)) : NULL;
+
+        for (int i = 0; i < case_count; ++i)
+        {
+            SwitchCase *entry = cases ? &cases[i] : NULL;
+            if (!entry)
+                continue;
+            if (entry->is_default)
+            {
+                if (has_default)
+                {
+                    diag_error_at(stmt->src, stmt->line, stmt->col,
+                                  "switch statement cannot contain multiple 'default' labels");
+                    if (case_values)
+                        free(case_values);
+                    return 1;
+                }
+                has_default = 1;
+                continue;
+            }
+
+            if (!entry->value)
+            {
+                diag_error_at(stmt->src, stmt->line, stmt->col,
+                              "switch case label missing expression");
+                if (case_values)
+                    free(case_values);
+                return 1;
+            }
+
+            check_expr(sc, entry->value);
+            if (!type_is_int(entry->value->type))
+            {
+                if (!coerce_int_literal_to_type(entry->value, cond_type, "switch case"))
+                {
+                    diag_error_at(entry->value->src, entry->value->line, entry->value->col,
+                                  "switch case labels must be integer constants");
+                    if (case_values)
+                        free(case_values);
+                    return 1;
+                }
+            }
+            if (!node_force_int_literal(entry->value))
+            {
+                diag_error_at(entry->value->src, entry->value->line, entry->value->col,
+                              "switch case labels must be integral literals");
+                if (case_values)
+                    free(case_values);
+                return 1;
+            }
+            if (entry->value->kind != ND_INT)
+            {
+                diag_error_at(entry->value->src, entry->value->line, entry->value->col,
+                              "switch case labels must be integral literals");
+                if (case_values)
+                    free(case_values);
+                return 1;
+            }
+
+            int64_t val = entry->value->int_val;
+            for (int j = 0; j < value_used; ++j)
+            {
+                if (case_values && case_values[j] == val)
+                {
+                    diag_error_at(entry->value->src, entry->value->line, entry->value->col,
+                                  "duplicate switch case label '%lld'", (long long)val);
+                    free(case_values);
+                    return 1;
+                }
+            }
+            if (case_values)
+                case_values[value_used++] = val;
+        }
+
+        sc->switch_depth++;
+        int rc = 0;
+        for (int i = 0; i < case_count; ++i)
+        {
+            SwitchCase *entry = cases ? &cases[i] : NULL;
+            if (!entry || !entry->body)
+                continue;
+            if (sema_check_block(sc, entry->body, fn, found_ret, 1))
+            {
+                rc = 1;
+                break;
+            }
+        }
+        sc->switch_depth--;
+        if (case_values)
+            free(case_values);
+        return rc;
+    }
+    case ND_BREAK:
+        if (sc->loop_depth <= 0 && sc->switch_depth <= 0)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "'break' may only appear inside a loop or switch");
             return 1;
         }
         return 0;
@@ -4100,7 +5095,7 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         diag_error("null unit");
         return 1;
     }
-    const Node *previous_unit = sc->unit;
+    Node *previous_unit = sc->unit;
     sc->unit = unit;
     if (unit->kind == ND_FUNC)
     {

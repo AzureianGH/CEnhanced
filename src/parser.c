@@ -45,6 +45,17 @@ struct Parser
     } *aliases;
     int alias_count;
     int alias_cap;
+    struct GenericParam
+    {
+        char *name;
+        int name_len;
+        int index;
+        Type *placeholder;
+        TemplateConstraintKind constraint_kind;
+        Type *default_type;
+    } *generic_params;
+    int generic_param_count;
+    int generic_param_cap;
     // named types: structs and typedef-like entries
     struct NamedType
     {
@@ -80,7 +91,20 @@ struct Parser
     struct ModuleImport *imports;
     int import_count;
     int import_cap;
+    int suppress_access_for_match;
 };
+
+static void parser_push_access_suppression(Parser *ps)
+{
+    if (ps)
+        ps->suppress_access_for_match++;
+}
+
+static void parser_pop_access_suppression(Parser *ps)
+{
+    if (ps && ps->suppress_access_for_match > 0)
+        ps->suppress_access_for_match--;
+}
 
 static int import_alias_matches(const struct ModuleImport *imp, const char *alias, int alias_len)
 {
@@ -167,6 +191,15 @@ static Node *new_node(NodeKind k);
 static Node *parse_expr(Parser *ps);
 static Node *parse_postfix_suffixes(Parser *ps, Node *expr);
 static Type *parse_type_spec(Parser *ps);
+static char *dup_token_text(Token t);
+static int parser_call_type_args_ahead(Parser *ps);
+static Type **parser_parse_call_type_args(Parser *ps, int *out_count);
+static Type *parser_lookup_generic_param(Parser *ps, const Token *tok);
+static TemplateConstraintKind parser_constraint_from_token(const Token *tok);
+static void parser_parse_generic_param_options(Parser *ps, TemplateConstraintKind *constraint_kind_out, Type **default_type_out);
+static struct GenericParam *parser_push_generic_param(Parser *ps, Token name_tok, int index_within_owner, TemplateConstraintKind constraint_kind, Type *default_type);
+static void parser_pop_generic_params(Parser *ps, int count);
+static int is_type_start(Parser *ps, Token t);
 static int attrs_contains(const struct PendingAttr *attrs, int count, const char *name)
 {
     if (!attrs || count <= 0 || !name)
@@ -1109,6 +1142,8 @@ static Node *parse_stmt(Parser *ps);
 static Node *parse_block(Parser *ps);
 static Node *parse_while(Parser *ps);
 static Node *parse_for(Parser *ps);
+static Node *parse_switch(Parser *ps);
+static Node *parse_match_expr(Parser *ps, Token match_tok);
 static void parse_alias_decl(Parser *ps, int is_exposed);
 static Node *parse_unary(Parser *ps);
 static Node *parse_rel(Parser *ps);
@@ -1398,6 +1433,151 @@ static int module_path_followed_by_call(Parser *ps)
     }
 }
 
+static Type *parser_lookup_generic_param(Parser *ps, const Token *tok)
+{
+    if (!ps || !tok || tok->kind != TK_IDENT || ps->generic_param_count <= 0)
+        return NULL;
+    for (int i = ps->generic_param_count - 1; i >= 0; --i)
+    {
+        struct GenericParam *gp = &ps->generic_params[i];
+        if (!gp || !gp->name)
+            continue;
+        if (gp->name_len != tok->length)
+            continue;
+        if (strncmp(gp->name, tok->lexeme, (size_t)tok->length) != 0)
+            continue;
+        if (!gp->placeholder)
+            gp->placeholder = type_template_param(gp->name, gp->index);
+        return gp->placeholder;
+    }
+    return NULL;
+}
+
+static TemplateConstraintKind parser_constraint_from_token(const Token *tok)
+{
+    if (!tok || tok->kind != TK_IDENT || !tok->lexeme)
+        return TEMPLATE_CONSTRAINT_NONE;
+    if (tok->length == 8 && strncmp(tok->lexeme, "integral", 8) == 0)
+        return TEMPLATE_CONSTRAINT_INTEGRAL;
+    if (tok->length == 7 && strncmp(tok->lexeme, "numeric", 7) == 0)
+        return TEMPLATE_CONSTRAINT_NUMERIC;
+    if (tok->length == 8 && strncmp(tok->lexeme, "floating", 8) == 0)
+        return TEMPLATE_CONSTRAINT_FLOATING;
+    if (tok->length == 6 && strncmp(tok->lexeme, "double", 6) == 0)
+        return TEMPLATE_CONSTRAINT_FLOATING;
+    if (tok->length == 7 && strncmp(tok->lexeme, "pointer", 7) == 0)
+        return TEMPLATE_CONSTRAINT_POINTER;
+    if (tok->length == 3 && strncmp(tok->lexeme, "ptr", 3) == 0)
+        return TEMPLATE_CONSTRAINT_POINTER;
+    return TEMPLATE_CONSTRAINT_NONE;
+}
+
+static void parser_parse_generic_param_options(Parser *ps, TemplateConstraintKind *constraint_kind_out, Type **default_type_out)
+{
+    if (!ps)
+        return;
+    if (constraint_kind_out)
+        *constraint_kind_out = TEMPLATE_CONSTRAINT_NONE;
+    if (default_type_out)
+        *default_type_out = NULL;
+
+    Token next = lexer_peek(ps->lx);
+    if (next.kind == TK_COLON)
+    {
+        lexer_next(ps->lx);
+        Token after = lexer_peek(ps->lx);
+        if (after.kind == TK_IDENT)
+        {
+            TemplateConstraintKind parsed_kind = parser_constraint_from_token(&after);
+            if (parsed_kind != TEMPLATE_CONSTRAINT_NONE)
+            {
+                lexer_next(ps->lx);
+                if (constraint_kind_out)
+                    *constraint_kind_out = parsed_kind;
+                Token maybe_assign = lexer_peek(ps->lx);
+                if (maybe_assign.kind == TK_ASSIGN)
+                {
+                    lexer_next(ps->lx);
+                    if (default_type_out)
+                        *default_type_out = parse_type_spec(ps);
+                }
+                return;
+            }
+        }
+        if (after.kind == TK_KW_CONSTANT || is_type_start(ps, after))
+        {
+            if (default_type_out)
+                *default_type_out = parse_type_spec(ps);
+            return;
+        }
+        if (after.kind == TK_IDENT)
+        {
+            diag_error_at(lexer_source(ps->lx), after.line, after.col,
+                          "unknown generic constraint '%.*s'", after.length, after.lexeme);
+            exit(1);
+        }
+        diag_error_at(lexer_source(ps->lx), after.line, after.col,
+                      "expected constraint keyword or type after ':' in generic parameter");
+        exit(1);
+    }
+    if (next.kind == TK_ASSIGN)
+    {
+        lexer_next(ps->lx);
+        if (default_type_out)
+            *default_type_out = parse_type_spec(ps);
+    }
+}
+
+static struct GenericParam *parser_push_generic_param(Parser *ps, Token name_tok, int index_within_owner, TemplateConstraintKind constraint_kind, Type *default_type)
+{
+    if (!ps)
+        return NULL;
+    if (ps->generic_param_count == ps->generic_param_cap)
+    {
+        int new_cap = ps->generic_param_cap ? ps->generic_param_cap * 2 : 4;
+        struct GenericParam *grown = (struct GenericParam *)realloc(ps->generic_params, (size_t)new_cap * sizeof(struct GenericParam));
+        if (!grown)
+        {
+            diag_error("out of memory while tracking generic parameters");
+            exit(1);
+        }
+        ps->generic_params = grown;
+        ps->generic_param_cap = new_cap;
+    }
+    struct GenericParam *gp = &ps->generic_params[ps->generic_param_count++];
+    memset(gp, 0, sizeof(*gp));
+    gp->name = dup_token_text(name_tok);
+    gp->name_len = name_tok.length;
+    gp->index = index_within_owner;
+    gp->constraint_kind = constraint_kind;
+    gp->default_type = default_type;
+    gp->placeholder = type_template_param(gp->name, gp->index);
+    if (gp->placeholder)
+    {
+        gp->placeholder->template_constraint_kind = constraint_kind;
+        gp->placeholder->template_default_type = default_type;
+    }
+    return gp;
+}
+
+static void parser_pop_generic_params(Parser *ps, int count)
+{
+    if (!ps || count <= 0)
+        return;
+    while (count-- > 0 && ps->generic_param_count > 0)
+    {
+        struct GenericParam *gp = &ps->generic_params[ps->generic_param_count - 1];
+        free(gp->name);
+        gp->name = NULL;
+        gp->placeholder = NULL;
+        gp->constraint_kind = TEMPLATE_CONSTRAINT_NONE;
+        gp->default_type = NULL;
+        gp->name_len = 0;
+        gp->index = 0;
+        ps->generic_param_count--;
+    }
+}
+
 static int is_type_start(Parser *ps, Token t)
 {
     switch (t.kind)
@@ -1443,6 +1623,8 @@ static int is_type_start(Parser *ps, Token t)
     if (t.kind == TK_IDENT)
     {
         if (t.length == 7 && strncmp(t.lexeme, "va_list", 7) == 0)
+            return 1;
+        if (parser_lookup_generic_param(ps, &t))
             return 1;
         if (alias_find(ps, t.lexeme, t.length) >= 0 || named_type_find(ps, t.lexeme, t.length) >= 0)
             return 1;
@@ -1815,91 +1997,99 @@ static Type *parse_type_spec(Parser *ps)
             }
             else
             {
-                int ai = alias_find(ps, b.lexeme, b.length);
-                if (ai < 0)
+                Type *generic_param = parser_lookup_generic_param(ps, &b);
+                if (generic_param)
                 {
-                    Type *nt = named_type_get(ps, b.lexeme, b.length);
-                    if (nt)
-                        base = nt;
-                    else
-                    {
-                        diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
-                                      b.length, b.lexeme);
-                        exit(1);
-                    }
+                    base = generic_param;
                 }
-                if (ai >= 0)
+                else
                 {
-                    struct Alias *A = &ps->aliases[ai];
-                    if (A->is_generic)
+                    int ai = alias_find(ps, b.lexeme, b.length);
+                    if (ai < 0)
                     {
-                        Token lt = lexer_next(ps->lx);
-                        if (lt.kind != TK_LT)
+                        Type *nt = named_type_get(ps, b.lexeme, b.length);
+                        if (nt)
+                            base = nt;
+                        else
                         {
-                            diag_error_at(lexer_source(ps->lx), lt.line, lt.col,
-                                          "expected '<' after generic alias '%.*s'", b.length,
-                                          b.lexeme);
+                            diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
+                                          b.length, b.lexeme);
                             exit(1);
                         }
-                        Type *arg = parse_type_spec(ps);
-                        Token gt = lexer_next(ps->lx);
-                        if (gt.kind != TK_GT)
-                        {
-                            diag_error_at(lexer_source(ps->lx), gt.line, gt.col,
-                                          "expected '>' after generic argument");
-                            exit(1);
-                        }
-                        base = make_ptr_chain_dyn(arg, A->gen_ptr_depth);
                     }
-                    else
+                    if (ai >= 0)
                     {
-                        Type *bk = NULL;
-                        switch (A->base_kind)
+                        struct Alias *A = &ps->aliases[ai];
+                        if (A->is_generic)
                         {
-                        case TY_I8:
-                            bk = &ti8;
-                            break;
-                        case TY_U8:
-                            bk = &tu8;
-                            break;
-                        case TY_I16:
-                            bk = &ti16;
-                            break;
-                        case TY_U16:
-                            bk = &tu16;
-                            break;
-                        case TY_I32:
-                            bk = &ti32;
-                            break;
-                        case TY_U32:
-                            bk = &tu32;
-                            break;
-                        case TY_I64:
-                            bk = &ti64;
-                            break;
-                        case TY_U64:
-                            bk = &tu64;
-                            break;
-                        case TY_F32:
-                            bk = &tf32;
-                            break;
-                        case TY_F64:
-                            bk = &tf64;
-                            break;
-                        case TY_F128:
-                            bk = &tf128;
-                            break;
-                        case TY_VOID:
-                            bk = &tv;
-                            break;
-                        case TY_CHAR:
-                            bk = &tch;
-                            break;
-                        default:
-                            diag_error("unsupported alias base kind");
-                            exit(1);
+                            Token lt = lexer_next(ps->lx);
+                            if (lt.kind != TK_LT)
+                            {
+                                diag_error_at(lexer_source(ps->lx), lt.line, lt.col,
+                                              "expected '<' after generic alias '%.*s'", b.length,
+                                              b.lexeme);
+                                exit(1);
+                            }
+                            Type *arg = parse_type_spec(ps);
+                            Token gt = lexer_next(ps->lx);
+                            if (gt.kind != TK_GT)
+                            {
+                                diag_error_at(lexer_source(ps->lx), gt.line, gt.col,
+                                              "expected '>' after generic argument");
+                                exit(1);
+                            }
+                            base = make_ptr_chain_dyn(arg, A->gen_ptr_depth);
                         }
-                        base = make_ptr_chain_dyn(bk, A->ptr_depth);
+                        else
+                        {
+                            Type *bk = NULL;
+                            switch (A->base_kind)
+                            {
+                            case TY_I8:
+                                bk = &ti8;
+                                break;
+                            case TY_U8:
+                                bk = &tu8;
+                                break;
+                            case TY_I16:
+                                bk = &ti16;
+                                break;
+                            case TY_U16:
+                                bk = &tu16;
+                                break;
+                            case TY_I32:
+                                bk = &ti32;
+                                break;
+                            case TY_U32:
+                                bk = &tu32;
+                                break;
+                            case TY_I64:
+                                bk = &ti64;
+                                break;
+                            case TY_U64:
+                                bk = &tu64;
+                                break;
+                            case TY_F32:
+                                bk = &tf32;
+                                break;
+                            case TY_F64:
+                                bk = &tf64;
+                                break;
+                            case TY_F128:
+                                bk = &tf128;
+                                break;
+                            case TY_VOID:
+                                bk = &tv;
+                                break;
+                            case TY_CHAR:
+                                bk = &tch;
+                                break;
+                            default:
+                                diag_error("unsupported alias base kind");
+                                exit(1);
+                            }
+                            base = make_ptr_chain_dyn(bk, A->ptr_depth);
+                        }
                     }
                 }
             }
@@ -2125,6 +2315,10 @@ static Node *parse_primary(Parser *ps)
         n->col = t.col;
         n->src = lexer_source(ps->lx);
         return n;
+    }
+    if (t.kind == TK_KW_MATCH)
+    {
+        return parse_match_expr(ps, t);
     }
     if (t.kind == TK_KW_SIZEOF)
     {
@@ -2392,6 +2586,17 @@ static Node *parse_primary(Parser *ps)
         }
         // Could be a call: ident '(' ... ')'
         Token p = lexer_peek(ps->lx);
+        Type **call_type_args = NULL;
+        int call_type_arg_count = 0;
+        int type_arg_line = 0;
+        int type_arg_col = 0;
+        if (p.kind == TK_LT && parser_call_type_args_ahead(ps))
+        {
+            type_arg_line = p.line;
+            type_arg_col = p.col;
+            call_type_args = parser_parse_call_type_args(ps, &call_type_arg_count);
+            p = lexer_peek(ps->lx);
+        }
         if (p.kind == TK_LPAREN)
         {
             lexer_next(ps->lx); // consume '('
@@ -2428,6 +2633,8 @@ static Node *parse_primary(Parser *ps)
             call->call_name = nm;
             call->args = args;
             call->arg_count = argc;
+            call->call_type_args = call_type_args;
+            call->call_type_arg_count = call_type_arg_count;
             call->line = t.line;
             call->col = t.col;
             call->src = lexer_source(ps->lx);
@@ -2441,6 +2648,12 @@ static Node *parse_primary(Parser *ps)
             target->src = lexer_source(ps->lx);
             call->lhs = target;
             return call;
+        }
+        if (call_type_args)
+        {
+            diag_error_at(lexer_source(ps->lx), type_arg_line, type_arg_col,
+                          "explicit type arguments must be followed by '(' in a call expression");
+            exit(1);
         }
         // variable reference
         Node *v = new_node(ND_VAR);
@@ -2461,12 +2674,146 @@ static Node *parse_primary(Parser *ps)
 // Forward decls for new top-level decls
 static void parse_enum_decl(Parser *ps, int is_exposed);
 static void parse_struct_decl(Parser *ps, int is_exposed);
+static int parser_call_type_args_ahead(Parser *ps)
+{
+    if (!ps)
+        return 0;
+    Token first = lexer_peek(ps->lx);
+    if (first.kind != TK_LT)
+        return 0;
+    int depth = 0;
+    int offset = 0;
+    while (1)
+    {
+        Token tok = lexer_peek_n(ps->lx, offset);
+        if (offset == 0)
+        {
+            if (tok.kind != TK_LT)
+                return 0;
+            depth = 1;
+            offset++;
+            continue;
+        }
+        switch (tok.kind)
+        {
+        case TK_LT:
+            depth++;
+            break;
+        case TK_GT:
+            depth--;
+            break;
+        case TK_SHR:
+            depth -= 2;
+            break;
+        case TK_EOF:
+        case TK_SEMI:
+            return 0;
+        case TK_LPAREN:
+        case TK_RPAREN:
+        case TK_LBRACE:
+        case TK_RBRACE:
+        case TK_LBRACKET:
+        case TK_RBRACKET:
+            // allowed within type expressions
+            break;
+        default:
+            break;
+        }
+        if (depth <= 0)
+        {
+            if (depth < 0)
+                return 0;
+            Token after = lexer_peek_n(ps->lx, offset + 1);
+            return after.kind == TK_LPAREN;
+        }
+        offset++;
+    }
+}
+
+static Type **parser_parse_call_type_args(Parser *ps, int *out_count)
+{
+    if (!ps)
+        return NULL;
+    Token lt = lexer_next(ps->lx);
+    if (lt.kind != TK_LT)
+    {
+        diag_error_at(lexer_source(ps->lx), lt.line, lt.col,
+                      "internal parser error: expected '<' before type arguments");
+        exit(1);
+    }
+    Token next = lexer_peek(ps->lx);
+    if (next.kind == TK_GT)
+    {
+        diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                      "type argument list cannot be empty");
+        exit(1);
+    }
+    Type **args = NULL;
+    int count = 0;
+    int cap = 0;
+    while (1)
+    {
+        Type *arg_ty = parse_type_spec(ps);
+        if (count == cap)
+        {
+            cap = cap ? cap * 2 : 4;
+            Type **grown = (Type **)realloc(args, (size_t)cap * sizeof(Type *));
+            if (!grown)
+            {
+                diag_error("out of memory while parsing type arguments");
+                exit(1);
+            }
+            args = grown;
+        }
+        args[count++] = arg_ty;
+        Token sep = lexer_peek(ps->lx);
+        if (sep.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        if (sep.kind == TK_GT)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
+        diag_error_at(lexer_source(ps->lx), sep.line, sep.col,
+                      "expected ',' or '>' in type argument list");
+        exit(1);
+    }
+    if (out_count)
+        *out_count = count;
+    return args;
+}
 static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
 {
     Node *e = expr;
+    Type **pending_type_args = NULL;
+    int pending_type_arg_count = 0;
+    int pending_type_arg_line = 0;
+    int pending_type_arg_col = 0;
     for (;;)
     {
         Token p = lexer_peek(ps->lx);
+        if (pending_type_args && p.kind != TK_LPAREN)
+        {
+            diag_error_at(lexer_source(ps->lx), pending_type_arg_line, pending_type_arg_col,
+                          "explicit type arguments must be immediately followed by '(' in a call expression");
+            exit(1);
+        }
+        if (p.kind == TK_LT && parser_call_type_args_ahead(ps))
+        {
+            if (pending_type_args)
+            {
+                diag_error_at(lexer_source(ps->lx), p.line, p.col,
+                              "duplicate explicit type argument lists before call");
+                exit(1);
+            }
+            pending_type_arg_line = p.line;
+            pending_type_arg_col = p.col;
+            pending_type_args = parser_parse_call_type_args(ps, &pending_type_arg_count);
+            continue;
+        }
         if (p.kind == TK_PLUSPLUS)
         {
             lexer_next(ps->lx);
@@ -2518,6 +2865,8 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
         }
         if (p.kind == TK_ACCESS || p.kind == TK_DOT)
         {
+            if (p.kind == TK_ACCESS && ps->suppress_access_for_match > 0)
+                break;
             Token op = lexer_next(ps->lx);
             Token field = expect(ps, TK_IDENT, "member name");
             // Check for enum scoped constant: EnumType=>Value
@@ -2600,13 +2949,23 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
             call->args = args;
             call->arg_count = argc;
             call->call_name = call_name;
+            call->call_type_args = pending_type_args;
+            call->call_type_arg_count = pending_type_arg_count;
             call->line = e ? e->line : p.line;
             call->col = e ? e->col : p.col;
             call->src = lexer_source(ps->lx);
             e = call;
+            pending_type_args = NULL;
+            pending_type_arg_count = 0;
             continue;
         }
         break;
+    }
+    if (pending_type_args)
+    {
+        diag_error_at(lexer_source(ps->lx), pending_type_arg_line, pending_type_arg_col,
+                      "explicit type arguments must be followed by '(' in a call expression");
+        exit(1);
     }
     return e;
 }
@@ -3164,6 +3523,10 @@ static Node *parse_stmt(Parser *ps)
     {
         return parse_for(ps);
     }
+    if (t.kind == TK_KW_SWITCH)
+    {
+        return parse_switch(ps);
+    }
     if (t.kind == TK_KW_BREAK)
     {
         lexer_next(ps->lx);
@@ -3281,6 +3644,198 @@ static Node *parse_block(Parser *ps)
     b->col = 0;
     b->src = lexer_source(ps->lx);
     return b;
+}
+
+static Node *parse_switch(Parser *ps)
+{
+    Token kw = expect(ps, TK_KW_SWITCH, "switch");
+    expect(ps, TK_LPAREN, "(");
+    Node *expr = parse_expr(ps);
+    expect(ps, TK_RPAREN, ")");
+    expect(ps, TK_LBRACE, "{");
+
+    SwitchCase *cases = NULL;
+    int case_count = 0;
+    int case_cap = 0;
+    int saw_default = 0;
+
+    while (1)
+    {
+        Token label = lexer_peek(ps->lx);
+        if (label.kind == TK_RBRACE)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
+        if (label.kind != TK_KW_CASE && label.kind != TK_KW_DEFAULT)
+        {
+            diag_error_at(lexer_source(ps->lx), label.line, label.col,
+                          "expected 'case' or 'default' in switch body");
+            exit(1);
+        }
+
+        lexer_next(ps->lx); // consume 'case' or 'default'
+        int is_default = (label.kind == TK_KW_DEFAULT);
+        Node *case_value = NULL;
+        if (is_default)
+        {
+            if (saw_default)
+            {
+                diag_error_at(lexer_source(ps->lx), label.line, label.col,
+                              "multiple 'default' labels in switch");
+                exit(1);
+            }
+            saw_default = 1;
+        }
+        else
+        {
+            case_value = parse_expr(ps);
+        }
+
+        expect(ps, TK_COLON, ":");
+
+        Node **case_stmts = NULL;
+        int stmt_count = 0;
+        int stmt_cap = 0;
+        while (1)
+        {
+            Token look = lexer_peek(ps->lx);
+            if (look.kind == TK_KW_CASE || look.kind == TK_KW_DEFAULT || look.kind == TK_RBRACE)
+                break;
+            Node *stmt = parse_stmt(ps);
+            if (stmt_count == stmt_cap)
+            {
+                stmt_cap = stmt_cap ? stmt_cap * 2 : 4;
+                Node **grown = (Node **)realloc(case_stmts, (size_t)stmt_cap * sizeof(Node *));
+                if (!grown)
+                {
+                    diag_error("out of memory while parsing switch case body");
+                    exit(1);
+                }
+                case_stmts = grown;
+            }
+            case_stmts[stmt_count++] = stmt;
+        }
+
+        Node *body = new_node(ND_BLOCK);
+        body->stmts = case_stmts;
+        body->stmt_count = stmt_count;
+        body->line = label.line;
+        body->col = label.col;
+        body->src = lexer_source(ps->lx);
+
+        if (case_count == case_cap)
+        {
+            case_cap = case_cap ? case_cap * 2 : 4;
+            SwitchCase *grown = (SwitchCase *)realloc(cases, (size_t)case_cap * sizeof(SwitchCase));
+            if (!grown)
+            {
+                diag_error("out of memory while parsing switch cases");
+                exit(1);
+            }
+            cases = grown;
+        }
+
+        SwitchCase *slot = &cases[case_count++];
+        slot->value = case_value;
+        slot->body = body;
+        slot->is_default = is_default;
+    }
+
+    Node *sw = new_node(ND_SWITCH);
+    sw->switch_stmt.expr = expr;
+    sw->switch_stmt.cases = cases;
+    sw->switch_stmt.case_count = case_count;
+    sw->line = kw.line;
+    sw->col = kw.col;
+    sw->src = lexer_source(ps->lx);
+    return sw;
+}
+
+static Node *parse_match_expr(Parser *ps, Token match_tok)
+{
+    expect(ps, TK_LPAREN, "(");
+    Node *subject = parse_expr(ps);
+    expect(ps, TK_RPAREN, ")");
+    expect(ps, TK_LBRACE, "{");
+
+    MatchArm *arms = NULL;
+    int arm_count = 0;
+    int arm_cap = 0;
+
+    while (1)
+    {
+        Token look = lexer_peek(ps->lx);
+        if (look.kind == TK_RBRACE)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
+
+        Node *pattern = NULL;
+        int is_wildcard = 0;
+
+        if (look.kind == TK_IDENT && look.length == 1 && look.lexeme[0] == '_')
+        {
+            lexer_next(ps->lx);
+            is_wildcard = 1;
+        }
+        else
+        {
+            parser_push_access_suppression(ps);
+            pattern = parse_expr(ps);
+            parser_pop_access_suppression(ps);
+        }
+
+        expect(ps, TK_ACCESS, "=>");
+        Node *body = parse_expr(ps);
+
+        if (arm_count == arm_cap)
+        {
+            arm_cap = arm_cap ? arm_cap * 2 : 4;
+            MatchArm *grown = (MatchArm *)realloc(arms, (size_t)arm_cap * sizeof(MatchArm));
+            if (!grown)
+            {
+                diag_error("out of memory while parsing match arms");
+                exit(1);
+            }
+            arms = grown;
+        }
+
+        MatchArm *arm = &arms[arm_count++];
+        arm->pattern = is_wildcard ? NULL : pattern;
+        arm->guard = NULL;
+        arm->body = body;
+        arm->binding_name = NULL;
+
+        Token sep = lexer_peek(ps->lx);
+        if (sep.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        if (sep.kind == TK_RBRACE)
+            continue;
+        diag_error_at(lexer_source(ps->lx), sep.line, sep.col,
+                      "expected ',' or '}' after match arm");
+        exit(1);
+    }
+
+    if (arm_count == 0)
+    {
+        diag_error_at(lexer_source(ps->lx), match_tok.line, match_tok.col,
+                      "match expression requires at least one arm");
+        exit(1);
+    }
+
+    Node *match_node = new_node(ND_MATCH);
+    match_node->match_stmt.expr = subject;
+    match_node->match_stmt.arms = arms;
+    match_node->match_stmt.arm_count = arm_count;
+    match_node->line = match_tok.line;
+    match_node->col = match_tok.col;
+    match_node->src = lexer_source(ps->lx);
+    return match_node;
 }
 
 static Node *parse_while(Parser *ps)
@@ -3416,6 +3971,55 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
 {
     expect(ps, TK_KW_FUN, "fun");
     Token name = expect(ps, TK_IDENT, "identifier");
+    int generic_scope_start = ps->generic_param_count;
+    int local_generic_count = 0;
+    Token maybe_lt = lexer_peek(ps->lx);
+    if (maybe_lt.kind == TK_LT)
+    {
+        lexer_next(ps->lx);
+        while (1)
+        {
+            Token param_tok = expect(ps, TK_IDENT, "generic parameter name");
+            for (int i = ps->generic_param_count - 1; i >= generic_scope_start; --i)
+            {
+                struct GenericParam *existing = &ps->generic_params[i];
+                if (existing->name_len == param_tok.length &&
+                    strncmp(existing->name, param_tok.lexeme, (size_t)param_tok.length) == 0)
+                {
+                    diag_error_at(lexer_source(ps->lx), param_tok.line, param_tok.col,
+                                  "duplicate generic parameter '%.*s' on function '%.*s'",
+                                  param_tok.length, param_tok.lexeme, name.length, name.lexeme);
+                    exit(1);
+                }
+            }
+            TemplateConstraintKind constraint_kind = TEMPLATE_CONSTRAINT_NONE;
+            Type *default_type = NULL;
+            parser_parse_generic_param_options(ps, &constraint_kind, &default_type);
+            parser_push_generic_param(ps, param_tok, local_generic_count, constraint_kind, default_type);
+            local_generic_count++;
+
+            Token sep = lexer_peek(ps->lx);
+            if (sep.kind == TK_COMMA)
+            {
+                lexer_next(ps->lx);
+                continue;
+            }
+            if (sep.kind == TK_GT)
+            {
+                lexer_next(ps->lx);
+                break;
+            }
+            diag_error_at(lexer_source(ps->lx), sep.line, sep.col,
+                          "expected ',' or '>' in generic parameter list");
+            exit(1);
+        }
+        if (local_generic_count == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), maybe_lt.line, maybe_lt.col,
+                          "generic parameter list cannot be empty");
+            exit(1);
+        }
+    }
     expect(ps, TK_LPAREN, "(");
     // parameters: [type ident] *(, type ident) [,...]
     Type **param_types = NULL;
@@ -3514,6 +4118,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
     fn->param_names = param_names;
     fn->param_const_flags = param_const_flags;
     fn->param_count = param_count;
+    fn->generic_param_count = local_generic_count;
     fn->is_varargs = saw_varargs;
     fn->line = name.line;
     fn->col = name.col;
@@ -3540,6 +4145,19 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
         fn->body = parse_block(ps);
         ps->current_function_name = prev_fn;
     }
+    if (local_generic_count > 0)
+    {
+        fn->generic_param_names = (const char **)xcalloc((size_t)local_generic_count, sizeof(const char *));
+        fn->generic_param_types = (Type **)xcalloc((size_t)local_generic_count, sizeof(Type *));
+        for (int i = 0; i < local_generic_count; ++i)
+        {
+            struct GenericParam *gp = &ps->generic_params[generic_scope_start + i];
+            fn->generic_param_names[i] = gp->name;
+            gp->name = NULL;
+            fn->generic_param_types[i] = gp->placeholder;
+        }
+    }
+    parser_pop_generic_params(ps, local_generic_count);
     return fn;
 }
 

@@ -198,6 +198,18 @@ Type *type_char(void) { return &TY_CHAR_SINGLETON; }
 Type *type_bool(void) { return &TY_BOOL_SINGLETON; }
 Type *type_va_list(void) { return &TY_VA_LIST_SINGLETON; }
 
+Type *type_template_param(const char *name, int index)
+{
+    Type *t = (Type *)xcalloc(1, sizeof(Type));
+    t->kind = TY_TEMPLATE_PARAM;
+    if (name)
+        t->template_param_name = xstrdup(name);
+    t->template_param_index = index;
+    t->template_constraint_kind = TEMPLATE_CONSTRAINT_NONE;
+    t->template_default_type = NULL;
+    return t;
+}
+
 Type *type_ptr(Type *to)
 {
     Type *t = (Type *)xcalloc(1, sizeof(Type));
@@ -263,6 +275,16 @@ int type_equals(Type *a, Type *b)
             if (!type_equals(ap, bp))
                 return 0;
         }
+        return 1;
+    }
+    if (a->kind == TY_TEMPLATE_PARAM)
+    {
+        if (a->template_param_index != b->template_param_index)
+            return 0;
+        if (!!a->template_param_name != !!b->template_param_name)
+            return 0;
+        if (a->template_param_name && strcmp(a->template_param_name, b->template_param_name) != 0)
+            return 0;
         return 1;
     }
     return 1;
@@ -380,6 +402,10 @@ const char *node_kind_name(NodeKind kind)
         return "bitwise XOR expression";
     case ND_BITNOT:
         return "bitwise NOT expression";
+    case ND_SWITCH:
+        return "switch statement";
+    case ND_MATCH:
+        return "match expression";
     default:
         return "unknown expression";
     }

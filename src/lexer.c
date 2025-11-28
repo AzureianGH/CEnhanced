@@ -518,8 +518,16 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_IF;
     else if (len == 4 && strncmp(p, "else", 4) == 0)
         k = TK_KW_ELSE;
+    else if (len == 6 && strncmp(p, "switch", 6) == 0)
+        k = TK_KW_SWITCH;
+    else if (len == 4 && strncmp(p, "case", 4) == 0)
+        k = TK_KW_CASE;
+    else if (len == 7 && strncmp(p, "default", 7) == 0)
+        k = TK_KW_DEFAULT;
     else if (len == 5 && strncmp(p, "while", 5) == 0)
         k = TK_KW_WHILE;
+    else if (len == 5 && strncmp(p, "match", 5) == 0)
+        k = TK_KW_MATCH;
     else if (len == 5 && strncmp(p, "break", 5) == 0)
         k = TK_KW_BREAK;
     else if (len == 8 && strncmp(p, "continue", 8) == 0)

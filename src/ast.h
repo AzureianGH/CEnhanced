@@ -49,7 +49,11 @@ typedef enum
     TK_KW_BOOL,
     TK_KW_IF,
     TK_KW_ELSE,
+    TK_KW_SWITCH,
+    TK_KW_CASE,
+    TK_KW_DEFAULT,
     TK_KW_WHILE,
+    TK_KW_MATCH,
     TK_KW_BREAK,
     TK_KW_CONTINUE,
     TK_KW_ENUM,
@@ -139,8 +143,18 @@ typedef enum
     TY_STRUCT,
     TY_ARRAY,
     TY_VA_LIST,
+    TY_TEMPLATE_PARAM,
     TY_IMPORT,
 } TypeKind;
+
+typedef enum
+{
+    TEMPLATE_CONSTRAINT_NONE = 0,
+    TEMPLATE_CONSTRAINT_INTEGRAL,
+    TEMPLATE_CONSTRAINT_FLOATING,
+    TEMPLATE_CONSTRAINT_NUMERIC,
+    TEMPLATE_CONSTRAINT_POINTER,
+} TemplateConstraintKind;
 
 typedef struct Type
 {
@@ -174,6 +188,10 @@ typedef struct Type
     const char *import_module;
     const char *import_type_name;
     struct Type *import_resolved;
+    const char *template_param_name;
+    int template_param_index;
+    TemplateConstraintKind template_constraint_kind;
+    struct Type *template_default_type;
 } Type;
 
 typedef struct ModulePath
@@ -242,6 +260,8 @@ typedef enum
     ND_BITOR,     // |
     ND_BITXOR,    // ^
     ND_BITNOT,    // ~
+    ND_SWITCH,
+    ND_MATCH,
 } NodeKind;
 
 const char *node_kind_name(NodeKind kind);
@@ -253,7 +273,24 @@ typedef struct
     const char *filename;
 } SourceBuffer;
 
-typedef struct Node
+typedef struct Node Node;
+
+typedef struct
+{
+    Node *value;       // NULL when representing 'default'
+    Node *body;        // statement/block to execute for this case
+    int is_default;    // 1 when this entry is the default case
+} SwitchCase;
+
+typedef struct
+{
+    Node *pattern;        // expression pattern to match
+    Node *guard;          // optional guard expression (NULL when unused)
+    Node *body;           // statement/block executed when arm matches
+    const char *binding_name; // optional binding identifier when pattern binds
+} MatchArm;
+
+struct Node
 {
     NodeKind kind;
     struct Node *lhs;
@@ -275,6 +312,9 @@ typedef struct Node
     const char **param_names;
     unsigned char *param_const_flags;
     int param_count;
+    const char **generic_param_names;
+    Type **generic_param_types;
+    int generic_param_count;
     int is_varargs;
     int is_chancecode;
     int is_literal;
@@ -316,6 +356,8 @@ typedef struct Node
     const char *call_name;
     struct Node **args;
     int arg_count;
+    Type **call_type_args;        // explicit template type arguments
+    int call_type_arg_count;
     Type *call_func_type;           // canonicalized function signature when available
     int call_is_indirect;           // 1 for pointer-based calls
     int call_is_varargs;            // 1 when call accepts varargs (used for indirect calls)
@@ -335,6 +377,20 @@ typedef struct Node
     // For ND_BLOCK
     struct Node **stmts;
     int stmt_count;
+    // For ND_SWITCH
+    struct
+    {
+        Node *expr;
+        SwitchCase *cases;
+        int case_count;
+    } switch_stmt;
+    // For ND_MATCH
+    struct
+    {
+        Node *expr;
+        MatchArm *arms;
+        int arm_count;
+    } match_stmt;
     // For ND_VAR reference
     const char *var_ref;
     int is_noreturn;
@@ -361,7 +417,7 @@ typedef struct Node
     int import_count;
     // Declaration visibility flag (used for ND_FUNC and other decl nodes)
     int is_exposed;
-} Node;
+};
 
 typedef struct Lexer Lexer;
 Lexer *lexer_create(SourceBuffer src);
@@ -398,6 +454,7 @@ Type *type_void(void);
 Type *type_char(void);
 Type *type_bool(void);
 Type *type_va_list(void);
+Type *type_template_param(const char *name, int index);
 Type *type_ptr(Type *to);
 Type *type_array(Type *elem, int length);
 Type *type_func(void);
@@ -511,11 +568,12 @@ typedef struct
 {
     SymTable *syms;
     struct Scope *scope;
-    const struct Node *unit;
+    struct Node *unit;
     struct ImportedFunctionSet *imported_funcs;
     int imported_func_count;
     int imported_func_cap;
     int loop_depth;
+    int switch_depth;
 } SemaContext;
 
 SemaContext *sema_create(void);

@@ -28,6 +28,7 @@ add_ce_test(logical_not logical_not.ce 0)
 add_ce_test(global_vars global_vars.ce 12)
 add_ce_test(global_struct global_struct.ce 16)
 add_ce_test(preproc_diagnostics preproc_diagnostics.ce 0)
+add_ce_test(template_generics template_generics.ce 0)
 
 add_test(NAME preproc_static_assert_fail COMMAND ${CHANCEC} ${CMAKE_CURRENT_SOURCE_DIR}/examples/preproc_static_assert_fail.ce)
 set_tests_properties(preproc_static_assert_fail PROPERTIES WILL_FAIL TRUE)

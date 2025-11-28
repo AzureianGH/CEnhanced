@@ -168,6 +168,7 @@ typedef struct
 {
     char break_label[32];
     char continue_label[32];
+    bool is_loop;
 } LoopContext;
 
 typedef struct
@@ -454,9 +455,9 @@ static void ccb_function_builder_free(CcbFunctionBuilder *fb)
     fb->loop_capacity = 0;
 }
 
-static int ccb_loop_push(CcbFunctionBuilder *fb, const char *break_label, const char *continue_label)
+static int ccb_loop_push(CcbFunctionBuilder *fb, const char *break_label, const char *continue_label, bool is_loop)
 {
-    if (!fb || !break_label || !continue_label)
+    if (!fb || !break_label)
         return 0;
     if (fb->loop_depth == fb->loop_capacity)
     {
@@ -470,8 +471,16 @@ static int ccb_loop_push(CcbFunctionBuilder *fb, const char *break_label, const 
     LoopContext *ctx = &fb->loop_stack[fb->loop_depth++];
     strncpy(ctx->break_label, break_label, sizeof(ctx->break_label) - 1);
     ctx->break_label[sizeof(ctx->break_label) - 1] = '\0';
-    strncpy(ctx->continue_label, continue_label, sizeof(ctx->continue_label) - 1);
-    ctx->continue_label[sizeof(ctx->continue_label) - 1] = '\0';
+    if (continue_label)
+    {
+        strncpy(ctx->continue_label, continue_label, sizeof(ctx->continue_label) - 1);
+        ctx->continue_label[sizeof(ctx->continue_label) - 1] = '\0';
+    }
+    else
+    {
+        ctx->continue_label[0] = '\0';
+    }
+    ctx->is_loop = is_loop;
     return 1;
 }
 
@@ -487,6 +496,19 @@ static LoopContext *ccb_loop_top(CcbFunctionBuilder *fb)
     if (!fb || fb->loop_depth == 0)
         return NULL;
     return &fb->loop_stack[fb->loop_depth - 1];
+}
+
+static LoopContext *ccb_continue_target(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return NULL;
+    for (size_t idx = fb->loop_depth; idx-- > 0;)
+    {
+        LoopContext *ctx = &fb->loop_stack[idx];
+        if (ctx->is_loop)
+            return ctx;
+    }
+    return NULL;
 }
 
 static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, const Node *target_fn)
@@ -3861,6 +3883,182 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         return 0;
     }
+    case ND_MATCH:
+    {
+        if (!expr->match_stmt.expr || expr->match_stmt.arm_count <= 0 || !expr->match_stmt.arms)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "match expression requires at least one arm");
+            return 1;
+        }
+
+        if (ccb_emit_expr_basic(fb, expr->match_stmt.expr))
+            return 1;
+
+        CcbLocal *scrutinee = ccb_local_add(fb, NULL, expr->match_stmt.expr->type, false, false);
+        if (!scrutinee)
+            return 1;
+        if (!ccb_emit_store_local(fb, scrutinee))
+            return 1;
+
+        CCValueType scrut_ty = scrutinee->value_type;
+        if (scrut_ty == CC_TYPE_INVALID)
+        {
+            scrut_ty = ccb_type_for_expr(expr->match_stmt.expr);
+            if (scrut_ty == CC_TYPE_INVALID)
+                scrut_ty = CC_TYPE_I32;
+        }
+
+        if (expr->type && expr->type->kind == TY_STRUCT)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "match expression results of struct type are not supported yet");
+            return 1;
+        }
+
+        CcbLocal *result_local = NULL;
+        CCValueType result_ty = CC_TYPE_VOID;
+        if (expr->type && expr->type->kind != TY_VOID)
+        {
+            result_local = ccb_local_add(fb, NULL, expr->type, false, false);
+            if (!result_local)
+                return 1;
+            result_ty = result_local->value_type;
+        }
+
+        int arm_count = expr->match_stmt.arm_count;
+        MatchArm *arms = expr->match_stmt.arms;
+        char **arm_labels = (char **)calloc((size_t)arm_count, sizeof(char *));
+        char **miss_labels = (char **)calloc((size_t)arm_count, sizeof(char *));
+        if (!arm_labels || !miss_labels)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "out of memory while lowering match expression");
+            free(arm_labels);
+            free(miss_labels);
+            return 1;
+        }
+
+        int wildcard_index = -1;
+        for (int i = 0; i < arm_count; ++i)
+        {
+            char label_buf[32];
+            ccb_make_label(fb, label_buf, sizeof(label_buf), "match_arm");
+            arm_labels[i] = xstrdup(label_buf);
+            miss_labels[i] = NULL;
+            if (!arms[i].pattern)
+                wildcard_index = i;
+        }
+        if (wildcard_index < 0)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "match expression missing fallback '_' arm");
+            goto match_fail;
+        }
+
+        for (int i = 0; i < arm_count; ++i)
+        {
+            MatchArm *arm = &arms[i];
+            if (!arm->pattern)
+                continue;
+
+            const char *miss_target = NULL;
+            for (int j = i + 1; j < arm_count; ++j)
+            {
+                if (arms[j].pattern)
+                {
+                    char miss_buf[32];
+                    ccb_make_label(fb, miss_buf, sizeof(miss_buf), "match_next");
+                    miss_labels[i] = xstrdup(miss_buf);
+                    miss_target = miss_labels[i];
+                    break;
+                }
+            }
+            if (!miss_target)
+                miss_target = arm_labels[wildcard_index];
+
+            if (!ccb_emit_load_local(fb, scrutinee))
+                goto match_fail;
+            if (ccb_emit_expr_basic(fb, arm->pattern))
+                goto match_fail;
+            CCValueType pat_ty = ccb_type_for_expr(arm->pattern);
+            if (pat_ty != scrut_ty)
+            {
+                if (ccb_emit_convert_between(fb, pat_ty, scrut_ty, arm->pattern))
+                    goto match_fail;
+            }
+            if (!string_list_appendf(&fb->body, "  compare eq %s", cc_type_name(scrut_ty)))
+                goto match_fail;
+            if (!string_list_appendf(&fb->body, "  branch %s %s", arm_labels[i], miss_target))
+                goto match_fail;
+            if (miss_labels[i])
+            {
+                if (!string_list_appendf(&fb->body, "label %s", miss_labels[i]))
+                    goto match_fail;
+            }
+        }
+
+        char end_label[32];
+        ccb_make_label(fb, end_label, sizeof(end_label), "match_end");
+
+        for (int i = 0; i < arm_count; ++i)
+        {
+            if (!arm_labels[i])
+                continue;
+            if (!string_list_appendf(&fb->body, "label %s", arm_labels[i]))
+                goto match_fail;
+            if (arms[i].body)
+            {
+                if (ccb_emit_expr_basic(fb, arms[i].body))
+                    goto match_fail;
+                if (result_local)
+                {
+                    CCValueType arm_ty = ccb_type_for_expr(arms[i].body);
+                    if (arm_ty != result_ty)
+                    {
+                        if (ccb_emit_convert_between(fb, arm_ty, result_ty, arms[i].body))
+                            goto match_fail;
+                    }
+                    if (!ccb_emit_store_local(fb, result_local))
+                        goto match_fail;
+                }
+                else
+                {
+                    CCValueType arm_ty = ccb_type_for_expr(arms[i].body);
+                    if (!ccb_emit_drop_for_type(&fb->body, arm_ty))
+                        goto match_fail;
+                }
+            }
+            if (!string_list_appendf(&fb->body, "  jump %s", end_label))
+                goto match_fail;
+        }
+
+        if (!string_list_appendf(&fb->body, "label %s", end_label))
+            goto match_fail;
+        if (result_local)
+        {
+            if (!ccb_emit_load_local(fb, result_local))
+                goto match_fail;
+        }
+        for (int i = 0; i < arm_count; ++i)
+        {
+            free(arm_labels[i]);
+            free(miss_labels[i]);
+        }
+        free(arm_labels);
+        free(miss_labels);
+        return 0;
+
+    match_fail:
+        for (int i = 0; i < arm_count; ++i)
+        {
+            free(arm_labels ? arm_labels[i] : NULL);
+            free(miss_labels ? miss_labels[i] : NULL);
+        }
+        free(arm_labels);
+        free(miss_labels);
+        return 1;
+    }
     case ND_DEREF:
     {
         CCValueType elem_ty = CC_TYPE_I32;
@@ -4731,7 +4929,7 @@ static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
             ccb_make_label(fb, post_label, sizeof(post_label), "while_post");
 
         const char *continue_target = has_post ? post_label : cond_label;
-        if (!ccb_loop_push(fb, end_label, continue_target))
+        if (!ccb_loop_push(fb, end_label, continue_target, true))
         {
             diag_error_at(stmt->src, stmt->line, stmt->col,
                           "failed to allocate loop context");
@@ -4797,13 +4995,170 @@ static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
         ccb_loop_pop(fb);
         return rc;
     }
+    case ND_SWITCH:
+    {
+        if (!stmt->switch_stmt.expr)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "switch statement missing selector");
+            return 1;
+        }
+        if (stmt->switch_stmt.case_count <= 0 || !stmt->switch_stmt.cases)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "switch statement requires at least one case");
+            return 1;
+        }
+
+        if (ccb_emit_expr_basic(fb, stmt->switch_stmt.expr))
+            return 1;
+
+        CcbLocal *selector = ccb_local_add(fb, NULL, stmt->switch_stmt.expr->type, false, false);
+        if (!selector)
+            return 1;
+        if (!ccb_emit_store_local(fb, selector))
+            return 1;
+
+        CCValueType selector_ty = selector->value_type;
+        if (selector_ty == CC_TYPE_INVALID)
+        {
+            selector_ty = ccb_type_for_expr(stmt->switch_stmt.expr);
+            if (selector_ty == CC_TYPE_INVALID)
+                selector_ty = CC_TYPE_I32;
+        }
+
+        int case_count = stmt->switch_stmt.case_count;
+        SwitchCase *cases = stmt->switch_stmt.cases;
+        char **case_labels = (char **)calloc((size_t)case_count, sizeof(char *));
+        char **miss_labels = (char **)calloc((size_t)case_count, sizeof(char *));
+        if (!case_labels || !miss_labels)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "out of memory while lowering switch statement");
+            free(case_labels);
+            free(miss_labels);
+            return 1;
+        }
+
+        char end_label[32];
+        ccb_make_label(fb, end_label, sizeof(end_label), "switch_end");
+
+        const char *default_label = NULL;
+        for (int i = 0; i < case_count; ++i)
+        {
+            char label_buf[32];
+            ccb_make_label(fb, label_buf, sizeof(label_buf), "switch_case");
+            case_labels[i] = xstrdup(label_buf);
+            miss_labels[i] = NULL;
+            if (cases[i].is_default)
+                default_label = case_labels[i];
+        }
+        if (!default_label)
+            default_label = end_label;
+
+        for (int i = 0; i < case_count; ++i)
+        {
+            SwitchCase *entry = &cases[i];
+            if (entry->is_default)
+                continue;
+            if (!entry->value)
+            {
+                diag_error_at(stmt->src, stmt->line, stmt->col,
+                              "switch case missing value");
+                goto switch_fail;
+            }
+
+            const char *miss_target = default_label;
+            for (int j = i + 1; j < case_count; ++j)
+            {
+                if (!cases[j].is_default)
+                {
+                    char miss_buf[32];
+                    ccb_make_label(fb, miss_buf, sizeof(miss_buf), "switch_next");
+                    miss_labels[i] = xstrdup(miss_buf);
+                    miss_target = miss_labels[i];
+                    break;
+                }
+            }
+            if (!miss_target)
+                miss_target = end_label;
+
+            if (!ccb_emit_load_local(fb, selector))
+                goto switch_fail;
+            if (ccb_emit_expr_basic(fb, entry->value))
+                goto switch_fail;
+            CCValueType case_ty = ccb_type_for_expr(entry->value);
+            if (case_ty != selector_ty)
+            {
+                if (ccb_emit_convert_between(fb, case_ty, selector_ty, entry->value))
+                    goto switch_fail;
+            }
+            if (!string_list_appendf(&fb->body, "  compare eq %s", cc_type_name(selector_ty)))
+                goto switch_fail;
+            if (!string_list_appendf(&fb->body, "  branch %s %s", case_labels[i], miss_target))
+                goto switch_fail;
+            if (miss_labels[i])
+            {
+                if (!string_list_appendf(&fb->body, "label %s", miss_labels[i]))
+                    goto switch_fail;
+            }
+        }
+
+        if (!ccb_loop_push(fb, end_label, NULL, false))
+            goto switch_fail;
+
+        for (int i = 0; i < case_count; ++i)
+        {
+            if (!case_labels[i])
+                continue;
+            if (!string_list_appendf(&fb->body, "label %s", case_labels[i]))
+            {
+                ccb_loop_pop(fb);
+                goto switch_fail;
+            }
+            if (cases[i].body)
+            {
+                if (ccb_emit_block(fb, cases[i].body, true))
+                {
+                    ccb_loop_pop(fb);
+                    goto switch_fail;
+                }
+            }
+        }
+
+        if (!string_list_appendf(&fb->body, "label %s", end_label))
+        {
+            ccb_loop_pop(fb);
+            goto switch_fail;
+        }
+
+        ccb_loop_pop(fb);
+        for (int i = 0; i < case_count; ++i)
+        {
+            free(case_labels[i]);
+            free(miss_labels[i]);
+        }
+        free(case_labels);
+        free(miss_labels);
+        return 0;
+
+    switch_fail:
+        for (int i = 0; i < case_count; ++i)
+        {
+            free(case_labels ? case_labels[i] : NULL);
+            free(miss_labels ? miss_labels[i] : NULL);
+        }
+        free(case_labels);
+        free(miss_labels);
+        return 1;
+    }
     case ND_BREAK:
     {
         LoopContext *ctx = ccb_loop_top(fb);
         if (!ctx)
         {
             diag_error_at(stmt->src, stmt->line, stmt->col,
-                          "'break' not within a loop");
+                          "'break' not within a loop or switch");
             return 1;
         }
         if (!string_list_appendf(&fb->body, "  jump %s", ctx->break_label))
@@ -4812,8 +5167,8 @@ static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt)
     }
     case ND_CONTINUE:
     {
-        LoopContext *ctx = ccb_loop_top(fb);
-        if (!ctx)
+        LoopContext *ctx = ccb_continue_target(fb);
+        if (!ctx || ctx->continue_label[0] == '\0')
         {
             diag_error_at(stmt->src, stmt->line, stmt->col,
                           "'continue' not within a loop");

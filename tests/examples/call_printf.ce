@@ -543,6 +543,77 @@ expose fun main() -> i32
     assert(alignof(f32) == 4, "alignof(f32) == 4");
     assert(alignof(f64) == 8, "alignof(f64) == 8");
 
+    // test template constraint checks
+    assert(default_max(10, 20) == 20, "default_max(10, 20) == 20");
+    assert(max<i32>(-5, -2) == -2, "default_max(-5, -2) == -2");
+    assert(other(15 as u8, 27 as i16) == 42, "other(15u8, 27i16) == 42");
+
+    i16[4] dot_left = { (-2 as i16), 4, 6, 8 };
+    u8[4] dot_right = { 10, 20, 30, 40 };
+    i64 wide_dot = dot_sum<i16, u8, i64>(dot_left, dot_right, 4);
+    assert(wide_dot == 560, "dot_sum<i16,u8,i64>(dot_left, dot_right, 4) == 560");
+
+    i8[3] small_left = { 1, 2, 3 };
+    i8[3] small_right = { 9, 8, 7 };
+    i32 compact_dot = dot_sum<i8, i8, i32>(small_left, small_right, 3);
+    assert(compact_dot == 46, "dot_sum<i8,i8,i32>(small_left, small_right, 3) == 46");
+
+    i32 switch_selector = 7;
+    i32 switch_bucket = -100;
+    switch (switch_selector)
+    {
+        case 0:
+            switch_bucket = 0;
+            break;
+        case 1:
+        case 2:
+            switch_bucket = 12;
+            break;
+        case 3:
+            switch_bucket = 33;
+            break;
+        default:
+            switch_bucket = 44;
+            break;
+    }
+    assert(switch_bucket == 44, "switch default bucket selected when no case matches");
+
+    i32 switch_fallthrough = -1;
+    switch (1)
+    {
+        case 0:
+            switch_fallthrough = 0;
+            break;
+        case 1:
+            switch_fallthrough = 10;
+        case 2:
+            switch_fallthrough = 20;
+            break;
+        default:
+            switch_fallthrough = -50;
+            break;
+    }
+    assert(switch_fallthrough == 20, "switch fallthrough executes subsequent case when break omitted");
+
+    i32 match_selector = -5;
+    i32 match_bucket = match (match_selector)
+    {
+        -10 => 1000,
+        -5 => 500,
+        0 => 0,
+        _ => 99,
+    };
+    assert(match_bucket == 500, "match chooses exact literal arm");
+
+    match_selector = 123;
+    i32 match_default = match (match_selector)
+    {
+        0 => 0,
+        1 => 1,
+        _ => match_selector / 3,
+    };
+    assert(match_default == 41, "match falls back to wildcard arm");
+
     printf("All tests completed successfully!\n");
 
     ret final_sum; // expect 168
@@ -590,7 +661,32 @@ expose fun structvarargs(i32 count, ...) -> i32
     ret total;
 }
 
+hide fun max<T0: integral>(T0 a, T0 b) -> T0
+{ 
+    if (a > b)
+        ret a;
+    ret b;
+}
 
+hide fun default_max<T0: i32>(T0 a, T0 b) -> T0
+{
+    ret max(a, b);
+}
+
+hide fun other<T0: integral, T1: integral>(T0 a, T1 b) -> i32
+{
+    ret (a as i32) + (b as i32);
+}
+
+hide fun dot_sum<TLeft: integral, TRight: integral, TAccum: i64>(TLeft* left, TRight* right, i32 count) -> TAccum
+{
+    TAccum total = 0;
+    for (i32 i = 0; i < count; i = i + 1)
+    {
+        total = total + ((left[i] as TAccum) * (right[i] as TAccum));
+    }
+    ret total;
+}
 
 hide fun funptr_test(i32 a, i32 b) -> i32
 {
