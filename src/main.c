@@ -33,6 +33,10 @@ extern char **environ;
 #define CHANCECODEC_EXT ""
 #endif
 
+#ifndef STRIP_MAP_PATH_MAX
+#define STRIP_MAP_PATH_MAX 4096
+#endif
+
 typedef enum
 {
   ARCH_NONE = 0,
@@ -40,6 +44,9 @@ typedef enum
   ARCH_ARM64,
   ARCH_BSLASH
 } TargetArch;
+
+typedef struct LoadedLibrary LoadedLibrary;
+typedef struct LoadedLibraryFunction LoadedLibraryFunction;
 
 static const char *default_chancecodec_name =
 #ifdef _WIN32
@@ -51,6 +58,8 @@ static const char *default_chancecodec_name =
 
 static int verbose_use_ansi = 1;
 static const char *target_os_to_option(TargetOS os);
+static char *make_backend_name_from_module(const char *module_full,
+                       const char *fn_name);
 
 static const char *ansi_reset(void)
 {
@@ -288,6 +297,10 @@ static void usage(const char *prog)
           "  -O0|-O1|-O2|-O3   Select optimization level (default -O0)\n");
     fprintf(stderr,
       "  -g                Emit debug symbols in assembler/link stages\n");
+      fprintf(stderr,
+        "  --strip           Remove debug metadata before backend emission\n");
+    fprintf(stderr,
+            "  --strip-hard      Strip metadata and obfuscate all exported symbols\n");
   fprintf(stderr, "  -c [obj] | --no-link [obj]\n");
   fprintf(stderr, "                    Compile only; do not link (emit "
                   "object). Optional obj output path.\n");
@@ -1199,6 +1212,336 @@ static int write_text_file(const char *path, const char *content)
   return 0;
 }
 
+typedef struct
+{
+  char **items;
+  size_t count;
+  size_t capacity;
+} StripSymbolList;
+
+static void strip_symbol_list_destroy(StripSymbolList *list)
+{
+  if (!list)
+    return;
+  for (size_t i = 0; i < list->count; ++i)
+  {
+    free(list->items[i]);
+    list->items[i] = NULL;
+  }
+  free(list->items);
+  list->items = NULL;
+  list->count = 0;
+  list->capacity = 0;
+}
+
+static int strip_symbol_list_reserve(StripSymbolList *list, size_t desired)
+{
+  if (!list)
+    return 0;
+  if (list->capacity >= desired)
+    return 0;
+  size_t new_cap = list->capacity ? list->capacity * 2 : 16;
+  while (new_cap < desired)
+    new_cap *= 2;
+  char **grown = (char **)realloc(list->items, new_cap * sizeof(char *));
+  if (!grown)
+    return ENOMEM;
+  list->items = grown;
+  list->capacity = new_cap;
+  return 0;
+}
+
+static int strip_symbol_list_add(StripSymbolList *list, const char *name)
+{
+  if (!list || !name || !*name)
+    return 0;
+  for (size_t i = 0; i < list->count; ++i)
+  {
+    if (strcmp(list->items[i], name) == 0)
+      return 0;
+  }
+  if (strip_symbol_list_reserve(list, list->count + 1) != 0)
+    return ENOMEM;
+  char *copy = xstrdup(name);
+  if (!copy)
+    return ENOMEM;
+  list->items[list->count++] = copy;
+  return 0;
+}
+
+static int strip_symbol_name_cmp(const void *a, const void *b)
+{
+  const char *const *sa = (const char *const *)a;
+  const char *const *sb = (const char *const *)b;
+  if (!sa || !sb || !*sa || !*sb)
+    return 0;
+  return strcmp(*sa, *sb);
+}
+
+static void strip_symbol_list_sort(StripSymbolList *list)
+{
+  if (!list || list->count <= 1 || !list->items)
+    return;
+  qsort(list->items, list->count, sizeof(char *), strip_symbol_name_cmp);
+}
+
+static const char *node_backend_name(const Node *n)
+{
+  if (!n)
+    return NULL;
+  if (n->metadata.backend_name && *n->metadata.backend_name)
+    return n->metadata.backend_name;
+  if (n->kind == ND_FUNC)
+    return n->name;
+  if (n->kind == ND_VAR_DECL)
+    return n->var_name;
+  return NULL;
+}
+
+static uint32_t hash_strip_symbol_name(const char *name)
+{
+  if (!name)
+    return 0;
+  uint32_t hash = 2166136261u;
+  while (*name)
+  {
+    hash ^= (uint8_t)(*name++);
+    hash *= 16777619u;
+  }
+  return hash;
+}
+
+static int collect_strip_symbols_from_unit(const Node *unit,
+                                           StripSymbolList *symbols)
+{
+  if (!unit || unit->kind != ND_UNIT || !symbols)
+    return 0;
+  const char *module_full_name =
+      (unit->module_path.full_name && unit->module_path.full_name[0])
+          ? unit->module_path.full_name
+          : NULL;
+  for (int i = 0; i < unit->stmt_count; ++i)
+  {
+    const Node *stmt = unit->stmts ? unit->stmts[i] : NULL;
+    if (!stmt)
+      continue;
+    if (stmt->kind == ND_FUNC)
+    {
+      const char *name = node_backend_name(stmt);
+      char *generated = NULL;
+      if (module_full_name &&
+          (!stmt->metadata.backend_name || !stmt->metadata.backend_name[0]) &&
+          name && *name)
+      {
+        generated = make_backend_name_from_module(module_full_name, name);
+        if (generated)
+          name = generated;
+      }
+      if (name && *name)
+      {
+        if (strip_symbol_list_add(symbols, name) != 0)
+        {
+          free(generated);
+          return 1;
+        }
+      }
+      free(generated);
+      continue;
+    }
+    if (stmt->kind == ND_VAR_DECL && stmt->var_is_global)
+    {
+      const char *name = node_backend_name(stmt);
+      char *generated = NULL;
+      if (module_full_name &&
+          (!stmt->metadata.backend_name || !stmt->metadata.backend_name[0]) &&
+          name && *name)
+      {
+        generated = make_backend_name_from_module(module_full_name, name);
+        if (generated)
+          name = generated;
+      }
+      if (name && *name)
+      {
+        if (strip_symbol_list_add(symbols, name) != 0)
+        {
+          free(generated);
+          return 1;
+        }
+      }
+      free(generated);
+    }
+  }
+  return 0;
+}
+
+static int collect_strip_symbols_from_ccb(const char *path,
+                                          StripSymbolList *symbols)
+{
+  if (!path || !symbols)
+    return 0;
+  FILE *f = fopen(path, "rb");
+  if (!f)
+  {
+    fprintf(stderr, "error: failed to open '%s' while preparing --strip-hard map (%s)\n",
+            path, strerror(errno));
+    return 1;
+  }
+  char line[1024];
+  while (fgets(line, sizeof(line), f))
+  {
+    char *p = line;
+    while (*p && isspace((unsigned char)*p))
+      ++p;
+    if (*p == '\0' || *p == ';' || *p == '#')
+      continue;
+    int is_func = 0;
+    int is_global = 0;
+    if (strncmp(p, ".func", 5) == 0 && isspace((unsigned char)p[5]))
+    {
+      is_func = 1;
+      p += 5;
+    }
+    else if (strncmp(p, ".global", 7) == 0 && isspace((unsigned char)p[7]))
+    {
+      is_global = 1;
+      p += 7;
+    }
+    else
+    {
+      continue;
+    }
+    (void)is_func;
+    (void)is_global;
+    while (*p && isspace((unsigned char)*p))
+      ++p;
+    if (*p == '\0')
+      continue;
+    char name_buf[512];
+    size_t ni = 0;
+    while (*p && !isspace((unsigned char)*p) && ni + 1 < sizeof(name_buf))
+      name_buf[ni++] = *p++;
+    name_buf[ni] = '\0';
+    if (!name_buf[0])
+      continue;
+    if (strip_symbol_list_add(symbols, name_buf) != 0)
+    {
+      fclose(f);
+      return 1;
+    }
+  }
+  fclose(f);
+  return 0;
+}
+
+
+static int write_strip_symbol_map(const StripSymbolList *symbols,
+                                  const char *path)
+{
+  if (!symbols || !path || !*path)
+    return 0;
+  FILE *out = fopen(path, "wb");
+  if (!out)
+  {
+    fprintf(stderr, "error: failed to write strip map '%s': %s\n", path,
+            strerror(errno));
+    return 1;
+  }
+  for (size_t i = 0; i < symbols->count; ++i)
+  {
+    const char *sym = symbols->items[i];
+    uint32_t hash = hash_strip_symbol_name(sym);
+    char alias[64];
+    snprintf(alias, sizeof(alias), "_data_cc_%08x_%zu", hash, i);
+    fprintf(out, "%s %s\n", sym ? sym : "", alias);
+  }
+  fclose(out);
+  return 0;
+}
+
+
+static void choose_strip_map_path(char *buffer, size_t bufsz)
+{
+  if (!buffer || bufsz == 0)
+    return;
+  buffer[0] = '\0';
+#ifdef _WIN32
+  const char *tmp = getenv("TEMP");
+  if (!tmp || !*tmp)
+    tmp = getenv("TMP");
+  if (!tmp || !*tmp)
+    tmp = ".";
+  long pid = _getpid();
+  snprintf(buffer, bufsz, "%s%cchancec_strip_%ld.map", tmp, CHANCE_PATH_SEP,
+           pid);
+#else
+  const char *tmp = getenv("TMPDIR");
+  if (!tmp || !*tmp)
+    tmp = "/tmp";
+  long pid = (long)getpid();
+  snprintf(buffer, bufsz, "%s/chancec_strip_%ld.map", tmp, pid);
+#endif
+}
+
+static void build_chancecodec_display_cmd(char *buffer, size_t bufsz,
+                                          const char *cmd, const char *backend,
+                                          int opt_level, int strip_metadata,
+                                          int strip_hard, int obfuscate,
+                                          const char *strip_map_path,
+                                          int debug_symbols,
+                                          const char *target_os_option,
+                                          const char *output_path,
+                                          const char *input_path)
+{
+  if (!buffer || bufsz == 0)
+    return;
+  buffer[0] = '\0';
+  if (!cmd)
+    cmd = "chancecodec";
+  if (!backend)
+    backend = "<unset>";
+  snprintf(buffer, bufsz, "\"%s\" --backend %s", cmd, backend);
+  if (strip_metadata)
+    strncat(buffer, " --strip", bufsz - strlen(buffer) - 1);
+  if (strip_hard)
+    strncat(buffer, " --strip-hard", bufsz - strlen(buffer) - 1);
+  if (obfuscate)
+    strncat(buffer, " --obfuscate", bufsz - strlen(buffer) - 1);
+  if (strip_map_path && *strip_map_path)
+  {
+    char stripmapbuf[STRIP_MAP_PATH_MAX + 32];
+    snprintf(stripmapbuf, sizeof(stripmapbuf), " --option strip-map=%s",
+             strip_map_path);
+    strncat(buffer, stripmapbuf, bufsz - strlen(buffer) - 1);
+  }
+  if (opt_level > 0)
+  {
+    char optbuf[16];
+    snprintf(optbuf, sizeof(optbuf), " -O%d", opt_level);
+    strncat(buffer, optbuf, bufsz - strlen(buffer) - 1);
+  }
+  if (output_path && *output_path)
+  {
+    char outbuf[2048];
+    snprintf(outbuf, sizeof(outbuf), " --output \"%s\"", output_path);
+    strncat(buffer, outbuf, bufsz - strlen(buffer) - 1);
+  }
+  if (target_os_option && *target_os_option)
+  {
+    char targetbuf[128];
+    snprintf(targetbuf, sizeof(targetbuf), " --option target-os=%s",
+             target_os_option);
+    strncat(buffer, targetbuf, bufsz - strlen(buffer) - 1);
+  }
+  if (debug_symbols)
+    strncat(buffer, " --option debug=1", bufsz - strlen(buffer) - 1);
+  if (input_path && *input_path)
+  {
+    char inbuf[2048];
+    snprintf(inbuf, sizeof(inbuf), " \"%s\"", input_path);
+    strncat(buffer, inbuf, bufsz - strlen(buffer) - 1);
+  }
+}
+
 static int handle_new_command(int argc, char **argv)
 {
   if (argc < 2)
@@ -1371,7 +1714,7 @@ typedef struct LibraryModuleData
   size_t ccbin_size;
 } LibraryModuleData;
 
-typedef struct LoadedLibraryFunction
+struct LoadedLibraryFunction
 {
   char *name;
   char *backend_name;
@@ -1383,9 +1726,9 @@ typedef struct LoadedLibraryFunction
   int is_varargs;
   int is_noreturn;
   int is_exposed;
-} LoadedLibraryFunction;
+};
 
-typedef struct LoadedLibrary
+struct LoadedLibrary
 {
   char *path;
   CclibFile file;
@@ -1393,7 +1736,141 @@ typedef struct LoadedLibrary
   int allocated_type_count;
   int allocated_type_cap;
   char **ccbin_temp_paths;
-} LoadedLibrary;
+};
+
+static int collect_strip_symbols_from_cclib_module(const CclibModule *module,
+                                                   StripSymbolList *symbols)
+{
+  if (!module || !symbols)
+    return 0;
+  const char *module_name =
+      (module->module_name && module->module_name[0]) ? module->module_name
+                                                      : NULL;
+  for (uint32_t fi = 0; fi < module->function_count; ++fi)
+  {
+    const CclibFunction *fn = &module->functions[fi];
+    if (!fn->name && !fn->backend_name)
+      continue;
+    const char *name = NULL;
+    char *generated = NULL;
+    if (fn->backend_name && fn->backend_name[0])
+    {
+      name = fn->backend_name;
+    }
+    else if (module_name && module_name[0] && fn->name && fn->name[0])
+    {
+      generated = make_backend_name_from_module(module_name, fn->name);
+      name = generated;
+    }
+    else if (fn->name && fn->name[0])
+    {
+      name = fn->name;
+    }
+    if (name && *name)
+    {
+      if (strip_symbol_list_add(symbols, name) != 0)
+      {
+        free(generated);
+        return 1;
+      }
+    }
+    free(generated);
+  }
+  for (uint32_t gi = 0; gi < module->global_count; ++gi)
+  {
+    const CclibGlobal *glob = &module->globals[gi];
+    if (!glob->name)
+      continue;
+    if (strip_symbol_list_add(symbols, glob->name) != 0)
+      return 1;
+  }
+  return 0;
+}
+
+static int collect_strip_symbols_from_loaded_libraries(const LoadedLibrary *libs,
+                                                       int lib_count,
+                                                       StripSymbolList *symbols)
+{
+  if (!libs || lib_count <= 0 || !symbols)
+    return 0;
+  for (int li = 0; li < lib_count; ++li)
+  {
+    const LoadedLibrary *lib = &libs[li];
+    if (!lib)
+      continue;
+    for (uint32_t mi = 0; mi < lib->file.module_count; ++mi)
+    {
+      if (collect_strip_symbols_from_cclib_module(&lib->file.modules[mi],
+                                                  symbols))
+        return 1;
+    }
+  }
+  return 0;
+}
+
+static int collect_strip_symbols_from_library_functions(
+    const LoadedLibraryFunction *funcs, int func_count,
+    StripSymbolList *symbols)
+{
+  if (!funcs || func_count <= 0 || !symbols)
+    return 0;
+  for (int i = 0; i < func_count; ++i)
+  {
+    const LoadedLibraryFunction *fn = &funcs[i];
+    if (!fn->backend_name)
+      continue;
+    if (strip_symbol_list_add(symbols, fn->backend_name) != 0)
+      return 1;
+  }
+  return 0;
+}
+
+static int build_strip_symbol_map_file(const UnitCompile *units,
+                                       int unit_count,
+                                       const char **ccb_inputs,
+                                       int ccb_count,
+                                       const LoadedLibrary *libraries,
+                                       int library_count,
+                                       const LoadedLibraryFunction *lib_funcs,
+                                       int lib_func_count,
+                                       const char *map_path)
+{
+  if (!map_path || !*map_path)
+    return 0;
+  StripSymbolList symbols = {0};
+  for (int i = 0; i < unit_count; ++i)
+  {
+    if (collect_strip_symbols_from_unit(units[i].unit, &symbols))
+    {
+      strip_symbol_list_destroy(&symbols);
+      return 1;
+    }
+  }
+  for (int ci = 0; ci < ccb_count; ++ci)
+  {
+    if (collect_strip_symbols_from_ccb(ccb_inputs[ci], &symbols))
+    {
+      strip_symbol_list_destroy(&symbols);
+      return 1;
+    }
+  }
+  if (collect_strip_symbols_from_loaded_libraries(libraries, library_count,
+                                                 &symbols))
+  {
+    strip_symbol_list_destroy(&symbols);
+    return 1;
+  }
+  if (collect_strip_symbols_from_library_functions(lib_funcs, lib_func_count,
+                                                   &symbols))
+  {
+    strip_symbol_list_destroy(&symbols);
+    return 1;
+  }
+  strip_symbol_list_sort(&symbols);
+  int rc = write_strip_symbol_map(&symbols, map_path);
+  strip_symbol_list_destroy(&symbols);
+  return rc;
+}
 
 static char *dup_string_or_null(const char *s)
 {
@@ -1401,6 +1878,7 @@ static char *dup_string_or_null(const char *s)
     return NULL;
   return xstrdup(s);
 }
+
 
 static char *format_string(const char *fmt, ...)
 {
@@ -2749,7 +3227,10 @@ static int load_cclib_library_symbols_only(const char *path,
 }
 
 static int run_chancecodec_process(const char *cmd, const char *backend,
-                                   int opt_level, const char *asm_path,
+                                   int opt_level, int strip_metadata,
+                                   int strip_hard, int obfuscate,
+                                   const char *strip_map_path,
+                                   int debug_symbols, const char *asm_path,
                                    const char *ccb_path,
                                    const char *target_os_arg,
                                    int *spawn_errno_out)
@@ -2763,16 +3244,24 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
     return -1;
   }
 #ifdef _WIN32
-  const char *args[12];
+  const char *args[20];
   int idx = 0;
   char optbuf[8];
   char target_option_buf[64];
   const char *target_option_value = NULL;
+  char strip_map_option_buf[STRIP_MAP_PATH_MAX + 16];
+  const char *strip_map_option_value = NULL;
   if (target_os_arg && *target_os_arg)
   {
     snprintf(target_option_buf, sizeof(target_option_buf), "target-os=%s",
              target_os_arg);
     target_option_value = target_option_buf;
+  }
+  if (strip_map_path && *strip_map_path)
+  {
+    snprintf(strip_map_option_buf, sizeof(strip_map_option_buf),
+             "strip-map=%s", strip_map_path);
+    strip_map_option_value = strip_map_option_buf;
   }
   args[idx++] = cmd;
   args[idx++] = "--backend";
@@ -2782,12 +3271,28 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
     snprintf(optbuf, sizeof(optbuf), "-O%d", opt_level);
     args[idx++] = optbuf;
   }
+  if (strip_metadata)
+    args[idx++] = "--strip";
+  if (strip_hard)
+    args[idx++] = "--strip-hard";
+  if (obfuscate)
+    args[idx++] = "--obfuscate";
   args[idx++] = "--output";
   args[idx++] = asm_path;
   if (target_option_value)
   {
     args[idx++] = "--option";
     args[idx++] = target_option_value;
+  }
+  if (strip_map_option_value)
+  {
+    args[idx++] = "--option";
+    args[idx++] = strip_map_option_value;
+  }
+  if (debug_symbols)
+  {
+    args[idx++] = "--option";
+    args[idx++] = "debug=1";
   }
   args[idx++] = ccb_path;
   args[idx] = NULL;
@@ -2800,16 +3305,24 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
   }
   return (int)rc;
 #else
-  char *args[12];
+  char *args[20];
   int idx = 0;
   char optbuf[8];
   char target_option_buf[64];
   char *target_option_value = NULL;
+  char strip_map_option_buf[STRIP_MAP_PATH_MAX + 16];
+  char *strip_map_option_value = NULL;
   if (target_os_arg && *target_os_arg)
   {
     snprintf(target_option_buf, sizeof(target_option_buf), "target-os=%s",
              target_os_arg);
     target_option_value = target_option_buf;
+  }
+  if (strip_map_path && *strip_map_path)
+  {
+    snprintf(strip_map_option_buf, sizeof(strip_map_option_buf),
+             "strip-map=%s", strip_map_path);
+    strip_map_option_value = strip_map_option_buf;
   }
   args[idx++] = (char *)cmd;
   args[idx++] = "--backend";
@@ -2819,12 +3332,28 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
     snprintf(optbuf, sizeof(optbuf), "-O%d", opt_level);
     args[idx++] = optbuf;
   }
+  if (strip_metadata)
+    args[idx++] = "--strip";
+  if (strip_hard)
+    args[idx++] = "--strip-hard";
+  if (obfuscate)
+    args[idx++] = "--obfuscate";
   args[idx++] = "--output";
   args[idx++] = (char *)asm_path;
   if (target_option_value)
   {
     args[idx++] = "--option";
     args[idx++] = target_option_value;
+  }
+  if (strip_map_option_value)
+  {
+    args[idx++] = "--option";
+    args[idx++] = strip_map_option_value;
+  }
+  if (debug_symbols)
+  {
+    args[idx++] = "--option";
+    args[idx++] = "debug=1";
   }
   args[idx++] = (char *)ccb_path;
   args[idx] = NULL;
@@ -2854,6 +3383,9 @@ static int run_chancecodec_process(const char *cmd, const char *backend,
 
 static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
                                       const char *ccbin_path, int opt_level,
+                                      int strip_metadata, int strip_hard,
+                                      int obfuscate,
+                                      const char *strip_map_path,
                                       int *spawn_errno_out)
 {
   if (spawn_errno_out)
@@ -2865,9 +3397,17 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
     return -1;
   }
 #ifdef _WIN32
-  const char *args[8];
+  const char *args[14];
   char optbuf[8];
   int idx = 0;
+  char strip_map_option_buf[STRIP_MAP_PATH_MAX + 16];
+  const char *strip_map_option_value = NULL;
+  if (strip_map_path && *strip_map_path)
+  {
+    snprintf(strip_map_option_buf, sizeof(strip_map_option_buf),
+             "strip-map=%s", strip_map_path);
+    strip_map_option_value = strip_map_option_buf;
+  }
   args[idx++] = cmd;
   if (opt_level > 0)
   {
@@ -2875,6 +3415,17 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
     args[idx++] = optbuf;
   }
   args[idx++] = ccb_path;
+  if (strip_metadata)
+    args[idx++] = "--strip";
+  if (strip_hard)
+    args[idx++] = "--strip-hard";
+  if (obfuscate)
+    args[idx++] = "--obfuscate";
+  if (strip_map_option_value)
+  {
+    args[idx++] = "--option";
+    args[idx++] = strip_map_option_value;
+  }
   args[idx++] = "--emit-ccbin";
   args[idx++] = ccbin_path;
   args[idx] = NULL;
@@ -2887,9 +3438,17 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
   }
   return (int)rc;
 #else
-  char *args[8];
+  char *args[14];
   char optbuf[8];
   int idx = 0;
+  char strip_map_option_buf[STRIP_MAP_PATH_MAX + 16];
+  char *strip_map_option_value = NULL;
+  if (strip_map_path && *strip_map_path)
+  {
+    snprintf(strip_map_option_buf, sizeof(strip_map_option_buf),
+             "strip-map=%s", strip_map_path);
+    strip_map_option_value = strip_map_option_buf;
+  }
   args[idx++] = (char *)cmd;
   if (opt_level > 0)
   {
@@ -2897,6 +3456,17 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
     args[idx++] = optbuf;
   }
   args[idx++] = (char *)ccb_path;
+  if (strip_metadata)
+    args[idx++] = "--strip";
+  if (strip_hard)
+    args[idx++] = "--strip-hard";
+  if (obfuscate)
+    args[idx++] = "--obfuscate";
+  if (strip_map_option_value)
+  {
+    args[idx++] = "--option";
+    args[idx++] = strip_map_option_value;
+  }
   args[idx++] = "--emit-ccbin";
   args[idx++] = (char *)ccbin_path;
   args[idx] = NULL;
@@ -2972,6 +3542,11 @@ int main(int argc, char **argv)
   int m32 = 0;
   int opt_level = 0;
   int debug_symbols = 0;
+  int strip_metadata = 0;
+  int strip_hard = 0;
+  int obfuscate = 0;
+  char strip_map_path[STRIP_MAP_PATH_MAX] = {0};
+  int strip_map_ready = 0;
   AsmSyntax asm_syntax = ASM_INTEL;
   TargetArch target_arch = ARCH_NONE;
   const char *chancecode_backend = NULL;
@@ -3058,6 +3633,24 @@ int main(int argc, char **argv)
     if (strcmp(argv[i], "-g") == 0)
     {
       debug_symbols = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--strip") == 0)
+    {
+      strip_metadata = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--strip-hard") == 0)
+    {
+      strip_metadata = 1;
+      strip_hard = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--obfuscate") == 0)
+    {
+      strip_metadata = 1;
+      strip_hard = 1;
+      obfuscate = 1;
       continue;
     }
     if (strncmp(argv[i], "-O", 2) == 0)
@@ -3324,6 +3917,8 @@ int main(int argc, char **argv)
       return 2;
     }
   }
+  if (strip_metadata)
+    debug_symbols = 0;
   if (stop_after_asm && stop_after_ccb)
   {
     fprintf(stderr, "error: -S and -Sccb cannot be used together\n");
@@ -3575,6 +4170,16 @@ int main(int argc, char **argv)
   }
 
   module_registry_reset();
+  if (strip_hard)
+  {
+    choose_strip_map_path(strip_map_path, sizeof(strip_map_path));
+    if (!strip_map_path[0])
+    {
+      fprintf(stderr, "error: failed to determine path for strip-hard map\n");
+      goto fail;
+    }
+    remove(strip_map_path);
+  }
   int rc = 0;
   if (symbol_ref_cclib_count > 0)
   {
@@ -3756,6 +4361,28 @@ int main(int argc, char **argv)
       }
     }
   }
+  if (!rc && strip_hard)
+  {
+    if (!strip_map_path[0])
+    {
+      fprintf(stderr, "internal error: strip-hard map path unavailable\n");
+      rc = 1;
+      goto cleanup;
+    }
+    int map_rc = build_strip_symbol_map_file(
+      units, ce_count, ccb_inputs, ccb_count, loaded_libraries,
+      loaded_library_count, loaded_library_functions,
+      loaded_library_function_count, strip_map_path);
+    if (map_rc != 0)
+    {
+      fprintf(stderr,
+              "error: failed to build strip-hard symbol map at '%s'\n",
+              strip_map_path);
+      rc = 1;
+      goto cleanup;
+    }
+    strip_map_ready = 1;
+  }
 
   if (compiler_verbose_enabled() && ce_count > 0)
     verbose_section("Codegen CE units");
@@ -3916,9 +4543,10 @@ int main(int argc, char **argv)
             else
             {
               int spawn_errno = 0;
-              int ccbin_rc = run_chancecodec_emit_ccbin(
+                int ccbin_rc = run_chancecodec_emit_ccbin(
                   chancecodec_cmd_to_use, ccb_path, ccbin_path, opt_level,
-                  &spawn_errno);
+                  strip_metadata, strip_hard, obfuscate,
+                  strip_map_ready ? strip_map_path : NULL, &spawn_errno);
               if (ccbin_rc != 0)
               {
                 if (ccbin_rc < 0)
@@ -3998,37 +4626,21 @@ int main(int argc, char **argv)
         else
         {
           char display_cmd[4096];
-          if (opt_level > 0)
-          {
-            if (target_os_option)
-              snprintf(display_cmd, sizeof(display_cmd),
-                       "\"%s\" --backend %s -O%d --output \"%s\" --option "
-                       "target-os=%s \"%s\"",
-                       chancecodec_cmd_to_use, backend, opt_level, asm_path,
-                       target_os_option, ccb_path);
-            else
-              snprintf(display_cmd, sizeof(display_cmd),
-                       "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
-                       chancecodec_cmd_to_use, backend, opt_level, asm_path,
-                       ccb_path);
-          }
-          else
-          {
-            if (target_os_option)
-              snprintf(display_cmd, sizeof(display_cmd),
-                       "\"%s\" --backend %s --output \"%s\" --option "
-                       "target-os=%s \"%s\"",
-                       chancecodec_cmd_to_use, backend, asm_path,
-                       target_os_option, ccb_path);
-            else
-              snprintf(display_cmd, sizeof(display_cmd),
-                       "\"%s\" --backend %s --output \"%s\" \"%s\"",
-                       chancecodec_cmd_to_use, backend, asm_path, ccb_path);
-          }
+          build_chancecodec_display_cmd(display_cmd, sizeof(display_cmd),
+                                        chancecodec_cmd_to_use, backend,
+                                        opt_level, strip_metadata,
+                                        strip_hard, obfuscate,
+                                        strip_map_ready ? strip_map_path
+                                                        : NULL,
+                                        debug_symbols,
+                                        target_os_option, asm_path, ccb_path);
 
-          int spawn_errno = 0;
-          int chance_rc = run_chancecodec_process(
-              chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path,
+            int spawn_errno = 0;
+            int chance_rc = run_chancecodec_process(
+              chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
+              strip_hard, obfuscate,
+              strip_map_ready ? strip_map_path : NULL,
+              debug_symbols, asm_path, ccb_path,
               target_os_option, &spawn_errno);
           if (chance_rc != 0)
           {
@@ -4287,38 +4899,20 @@ int main(int argc, char **argv)
           break;
         }
         char display_cmd[4096];
-        if (opt_level > 0)
-        {
-          if (target_os_option)
-            snprintf(display_cmd, sizeof(display_cmd),
-                     "\"%s\" --backend %s -O%d --output \"%s\" --option "
-                     "target-os=%s \"%s\"",
-                     chancecodec_cmd_to_use, backend, opt_level, asm_path,
-                     target_os_option, ccb_path);
-          else
-            snprintf(display_cmd, sizeof(display_cmd),
-                     "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
-                     chancecodec_cmd_to_use, backend, opt_level, asm_path,
-                     ccb_path);
-        }
-        else
-        {
-          if (target_os_option)
-            snprintf(display_cmd, sizeof(display_cmd),
-                     "\"%s\" --backend %s --output \"%s\" --option "
-                     "target-os=%s \"%s\"",
-                     chancecodec_cmd_to_use, backend, asm_path,
-                     target_os_option, ccb_path);
-          else
-            snprintf(display_cmd, sizeof(display_cmd),
-                     "\"%s\" --backend %s --output \"%s\" \"%s\"",
-                     chancecodec_cmd_to_use, backend, asm_path, ccb_path);
-        }
+        build_chancecodec_display_cmd(display_cmd, sizeof(display_cmd),
+              chancecodec_cmd_to_use, backend,
+              opt_level, strip_metadata,
+              strip_hard, obfuscate,
+              strip_map_ready ? strip_map_path : NULL,
+              debug_symbols,
+              target_os_option, asm_path, ccb_path);
 
         int spawn_errno = 0;
         int chance_rc = run_chancecodec_process(
-            chancecodec_cmd_to_use, backend, opt_level, asm_path, ccb_path,
-            target_os_option, &spawn_errno);
+          chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
+          strip_hard, obfuscate,
+          strip_map_ready ? strip_map_path : NULL, debug_symbols,
+          asm_path, ccb_path, target_os_option, &spawn_errno);
         if (chance_rc != 0)
         {
           if (chance_rc < 0)
@@ -4553,38 +5147,20 @@ int main(int argc, char **argv)
         if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
           target_os_option = target_os_to_option(target_os);
         char display_cmd[4096];
-        if (opt_level > 0)
-        {
-          if (target_os_option)
-            snprintf(display_cmd, sizeof(display_cmd),
-                     "\"%s\" --backend %s -O%d --output \"%s\" --option "
-                     "target-os=%s \"%s\"",
-                     chancecodec_cmd_to_use, backend, opt_level, asm_path,
-                     target_os_option, ccbin_path);
-          else
-            snprintf(display_cmd, sizeof(display_cmd),
-                     "\"%s\" --backend %s -O%d --output \"%s\" \"%s\"",
-                     chancecodec_cmd_to_use, backend, opt_level, asm_path,
-                     ccbin_path);
-        }
-        else
-        {
-          if (target_os_option)
-            snprintf(display_cmd, sizeof(display_cmd),
-                     "\"%s\" --backend %s --output \"%s\" --option "
-                     "target-os=%s \"%s\"",
-                     chancecodec_cmd_to_use, backend, asm_path,
-                     target_os_option, ccbin_path);
-          else
-            snprintf(display_cmd, sizeof(display_cmd),
-                     "\"%s\" --backend %s --output \"%s\" \"%s\"",
-                     chancecodec_cmd_to_use, backend, asm_path, ccbin_path);
-        }
+        build_chancecodec_display_cmd(display_cmd, sizeof(display_cmd),
+              chancecodec_cmd_to_use, backend,
+              opt_level, strip_metadata,
+              strip_hard, obfuscate,
+              strip_map_ready ? strip_map_path : NULL,
+              debug_symbols,
+              target_os_option, asm_path, ccbin_path);
 
         int spawn_errno = 0;
-        int chance_rc = run_chancecodec_process(chancecodec_cmd_to_use, backend,
-                                                opt_level, asm_path, ccbin_path,
-                                                target_os_option, &spawn_errno);
+        int chance_rc = run_chancecodec_process(
+          chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
+          strip_hard, obfuscate,
+          strip_map_ready ? strip_map_path : NULL, debug_symbols,
+          asm_path, ccbin_path, target_os_option, &spawn_errno);
         if (chance_rc != 0)
         {
           if (chance_rc < 0)
@@ -4958,6 +5534,8 @@ cleanup:
   free((void *)obj_inputs);
   free((void *)symbol_ref_ce_inputs);
   free((void *)symbol_ref_cclib_inputs);
+  if (strip_map_ready && strip_map_path[0])
+    remove(strip_map_path);
   return rc;
 fail:
   rc = 2;
