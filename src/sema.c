@@ -1,4 +1,5 @@
 #include "ast.h"
+#include "mangle.h"
 #include "module_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,12 +35,13 @@ static int template_param_allows(Type *t, TemplateConstraintKind want);
 static int type_is_float(Type *t);
 static int type_is_pointer(Type *t);
 static int type_equal(Type *a, Type *b);
-static void describe_type(const Type *t, char *buf, size_t bufsz);
 static int bind_template_type_pattern(Type *pattern, Type *actual,
                                       Type **bindings, int binding_count);
 static int check_exposed_function_signature(const Node *fn);
 static void sema_register_function_local(SemaContext *sc, Node *unit_node, Node *fn);
 static int sema_check_function(SemaContext *sc, Node *fn);
+static void sema_ensure_call_args_checked(SemaContext *sc, Node *call_expr, int *args_checked);
+static const Symbol *sema_resolve_local_overload(SemaContext *sc, const char *name, Node *call_expr, int *args_checked);
 
 static Type *canonicalize_type_deep(Type *ty)
 {
@@ -102,6 +104,60 @@ struct SymTable
     int cap;
 };
 
+static int type_contains_template_param(const Type *t)
+{
+    if (!t)
+        return 0;
+    t = canonicalize_type_deep((Type *)t);
+    if (!t)
+        return 0;
+    if (t->kind == TY_TEMPLATE_PARAM)
+        return 1;
+    switch (t->kind)
+    {
+    case TY_PTR:
+        return type_contains_template_param(t->pointee);
+    case TY_ARRAY:
+        return type_contains_template_param(t->array.elem);
+    case TY_FUNC:
+        if (t->func.ret && type_contains_template_param(t->func.ret))
+            return 1;
+        for (int i = 0; i < t->func.param_count; ++i)
+        {
+            Type *param = t->func.params ? t->func.params[i] : NULL;
+            if (param && type_contains_template_param(param))
+                return 1;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int symbol_is_template_function(const Symbol *sym)
+{
+    if (!sym)
+        return 0;
+    if (sym->ast_node)
+    {
+        const Node *fn = sym->ast_node;
+        if (fn->kind == ND_FUNC && fn->generic_param_count > 0)
+            return 1;
+    }
+    if (sym->sig.param_count > 0)
+    {
+        for (int i = 0; i < sym->sig.param_count; ++i)
+        {
+            Type *param = sym->sig.params ? sym->sig.params[i] : NULL;
+            if (param && type_contains_template_param(param))
+                return 1;
+        }
+    }
+    if (sym->sig.ret && type_contains_template_param(sym->sig.ret))
+        return 1;
+    return 0;
+}
+
 SymTable *symtab_create(void)
 {
     SymTable *s = (SymTable *)xcalloc(1, sizeof(SymTable));
@@ -141,6 +197,17 @@ const Symbol *symtab_get(SymTable *st, const char *name)
     return NULL;
 }
 
+static int symbols_share_body(const Symbol *a, const Symbol *b)
+{
+    if (!a || !b)
+        return 0;
+    if (a->ast_node && b->ast_node && a->ast_node == b->ast_node)
+        return 1;
+    if (a->backend_name && b->backend_name && strcmp(a->backend_name, b->backend_name) == 0)
+        return 1;
+    return 0;
+}
+
 static int symtab_has_symbol_with_prefix(SymTable *st, const char *prefix)
 {
     if (!st || !prefix || !*prefix)
@@ -155,6 +222,65 @@ static int symtab_has_symbol_with_prefix(SymTable *st, const char *prefix)
             return 1;
     }
     return 0;
+}
+
+static void append_mangled_type(char **out_buf, size_t *out_len, size_t *out_cap, const Type *ty)
+{
+    if (!out_buf || !out_len || !out_cap)
+        return;
+    if (!ty)
+    {
+        const char *fallback = "_v";
+        size_t add = strlen(fallback);
+        if (*out_len + add + 1 > *out_cap)
+        {
+            size_t new_cap = (*out_cap ? *out_cap * 2 : 32);
+            while (new_cap < *out_len + add + 1)
+                new_cap *= 2;
+            char *grown = (char *)realloc(*out_buf, new_cap);
+            if (!grown)
+                return;
+            *out_buf = grown;
+            *out_cap = new_cap;
+        }
+        memcpy(*out_buf + *out_len, fallback, add);
+        *out_len += add;
+        (*out_buf)[*out_len] = '\0';
+        return;
+    }
+
+    char tmp[128];
+    describe_type(ty, tmp, sizeof(tmp));
+    size_t need = strlen(tmp) + 2;
+    if (*out_len + need + 1 > *out_cap)
+    {
+        size_t new_cap = (*out_cap ? *out_cap * 2 : 32);
+        while (new_cap < *out_len + need + 1)
+            new_cap *= 2;
+        char *grown = (char *)realloc(*out_buf, new_cap);
+        if (!grown)
+            return;
+        *out_buf = grown;
+        *out_cap = new_cap;
+    }
+    (*out_buf)[(*out_len)++] = '_';
+    for (const char *p = tmp; *p; ++p)
+    {
+        char c = *p;
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+        {
+            (*out_buf)[(*out_len)++] = c;
+        }
+        else if (c >= 'A' && c <= 'Z')
+        {
+            (*out_buf)[(*out_len)++] = (char)(c - 'A' + 'a');
+        }
+        else
+        {
+            (*out_buf)[(*out_len)++] = '_';
+        }
+    }
+    (*out_buf)[*out_len] = '\0';
 }
 
 static ImportedFunctionSet *sema_find_imported_function_set(SemaContext *sc, const char *name)
@@ -311,6 +437,60 @@ Symbol *sema_copy_imported_function_symbols(const SemaContext *sc, int *out_coun
     return list;
 }
 
+static const char *symbol_effective_name(const Symbol *sym)
+{
+    if (!sym)
+        return NULL;
+    if (sym->backend_name && sym->backend_name[0])
+        return sym->backend_name;
+    return sym->name;
+}
+
+static void sema_track_imported_global_usage(SemaContext *sc, const Symbol *sym)
+{
+    if (!sc || !sym || sym->kind != SYM_GLOBAL || !sym->is_extern)
+        return;
+    const char *name = symbol_effective_name(sym);
+    if (!name || !*name)
+        return;
+    for (int i = 0; i < sc->imported_global_count; ++i)
+    {
+        const Symbol *existing = &sc->imported_globals[i];
+        const char *existing_name = symbol_effective_name(existing);
+        if (existing_name && strcmp(existing_name, name) == 0)
+            return;
+    }
+    if (sc->imported_global_count == sc->imported_global_cap)
+    {
+        int new_cap = sc->imported_global_cap ? sc->imported_global_cap * 2 : 4;
+        Symbol *grown = (Symbol *)realloc(sc->imported_globals, (size_t)new_cap * sizeof(Symbol));
+        if (!grown)
+        {
+            diag_error("out of memory while tracking imported globals");
+            exit(1);
+        }
+        sc->imported_globals = grown;
+        sc->imported_global_cap = new_cap;
+    }
+    sc->imported_globals[sc->imported_global_count++] = *sym;
+}
+
+Symbol *sema_copy_imported_global_symbols(const SemaContext *sc, int *out_count)
+{
+    if (out_count)
+        *out_count = 0;
+    if (!sc || sc->imported_global_count <= 0)
+        return NULL;
+
+    Symbol *list = (Symbol *)xcalloc((size_t)sc->imported_global_count, sizeof(Symbol));
+    if (!list)
+        return NULL;
+    memcpy(list, sc->imported_globals, (size_t)sc->imported_global_count * sizeof(Symbol));
+    if (out_count)
+        *out_count = sc->imported_global_count;
+    return list;
+}
+
 static const ImportedFunctionCandidate *sema_get_unique_imported_candidate(SemaContext *sc, const char *name, int emit_error)
 {
     ImportedFunctionSet *set = sema_find_imported_function_set(sc, name);
@@ -356,8 +536,12 @@ struct SemaContext
     ImportedFunctionSet *imported_funcs;
     int imported_func_count;
     int imported_func_cap;
+    Symbol *imported_globals;
+    int imported_global_count;
+    int imported_global_cap;
     int loop_depth;
     int switch_depth;
+    int lambda_counter;
 };
 SemaContext *sema_create(void)
 {
@@ -367,8 +551,12 @@ SemaContext *sema_create(void)
     sc->imported_funcs = NULL;
     sc->imported_func_count = 0;
     sc->imported_func_cap = 0;
+    sc->imported_globals = NULL;
+    sc->imported_global_count = 0;
+    sc->imported_global_cap = 0;
     sc->loop_depth = 0;
     sc->switch_depth = 0;
+    sc->lambda_counter = 0;
     return sc;
 }
 void sema_destroy(SemaContext *sc)
@@ -384,6 +572,7 @@ void sema_destroy(SemaContext *sc)
         }
         free(sc->imported_funcs);
     }
+    free(sc->imported_globals);
     symtab_destroy(sc->syms);
     free(sc);
 }
@@ -454,39 +643,6 @@ static char *make_qualified_name(const ModulePath *mod, const char *name)
     return res;
 }
 
-static char *module_name_to_prefix(const char *module_full)
-{
-    if (!module_full || !*module_full)
-        return NULL;
-    size_t len = strlen(module_full);
-    char *copy = (char *)xmalloc(len + 1);
-    memcpy(copy, module_full, len + 1);
-    for (size_t i = 0; i < len; ++i)
-    {
-        if (copy[i] == '.')
-            copy[i] = '_';
-    }
-    return copy;
-}
-
-static char *module_backend_name(const char *module_full, const char *fn_name)
-{
-    if (!module_full || !*module_full || !fn_name || !*fn_name)
-        return NULL;
-    char *prefix = module_name_to_prefix(module_full);
-    if (!prefix)
-        return NULL;
-    size_t prefix_len = strlen(prefix);
-    size_t fn_len = strlen(fn_name);
-    char *res = (char *)xmalloc(prefix_len + 1 + fn_len + 1);
-    memcpy(res, prefix, prefix_len);
-    res[prefix_len] = '_';
-    memcpy(res + prefix_len + 1, fn_name, fn_len);
-    res[prefix_len + 1 + fn_len] = '\0';
-    free(prefix);
-    return res;
-}
-
 static char *backend_from_qualified(const char *qualified_name)
 {
     if (!qualified_name)
@@ -499,7 +655,7 @@ static char *backend_from_qualified(const char *qualified_name)
     memcpy(module, qualified_name, module_len);
     module[module_len] = '\0';
     const char *fn = dot + 1;
-    char *backend = module_backend_name(module, fn);
+    char *backend = module_backend_name(module, fn, NULL);
     free(module);
     if (!backend)
         return xstrdup(qualified_name);
@@ -1076,6 +1232,135 @@ static void unit_append_function(Node *unit, Node *fn)
     unit->stmt_count = new_count;
 }
 
+static char *sema_make_lambda_name(SemaContext *sc)
+{
+    int index = sc ? sc->lambda_counter++ : 0;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "__lambda_%d", index);
+    return xstrdup(buf);
+}
+
+static Type *sema_make_func_type_from_node(const Node *fn)
+{
+    if (!fn)
+        return NULL;
+    FuncSig sig = {0};
+    sig.ret = fn->ret_type;
+    sig.params = fn->param_types;
+    sig.param_count = fn->param_count;
+    sig.is_varargs = fn->is_varargs;
+    return make_function_type_from_sig(&sig);
+}
+
+static void sema_lower_lambda(SemaContext *sc, Node *lambda)
+{
+    if (!sc || !lambda || lambda->kind != ND_LAMBDA)
+        return;
+    if (!sc->unit || sc->unit->kind != ND_UNIT)
+    {
+        diag_error_at(lambda->src, lambda->line, lambda->col,
+                      "lambda expressions require a translation unit context");
+        exit(1);
+    }
+
+    Node *fn = (Node *)xcalloc(1, sizeof(Node));
+    fn->kind = ND_FUNC;
+    fn->name = sema_make_lambda_name(sc);
+    fn->line = lambda->line;
+    fn->col = lambda->col;
+    fn->src = lambda->src;
+    fn->ret_type = lambda->ret_type;
+    lambda->ret_type = NULL;
+    fn->param_types = lambda->param_types;
+    lambda->param_types = NULL;
+    fn->param_names = lambda->param_names;
+    lambda->param_names = NULL;
+    fn->param_const_flags = lambda->param_const_flags;
+    lambda->param_const_flags = NULL;
+    fn->param_count = lambda->param_count;
+    lambda->param_count = 0;
+    fn->is_varargs = lambda->is_varargs;
+    lambda->is_varargs = 0;
+    fn->body = lambda->body;
+    lambda->body = NULL;
+    fn->is_exposed = 0;
+    fn->is_noreturn = 0;
+    fn->metadata.declared_param_count = -1;
+    fn->metadata.declared_local_count = -1;
+    fn->metadata.backend_name = fn->name ? xstrdup(fn->name) : NULL;
+
+    unit_append_function(sc->unit, fn);
+    sema_register_function_local(sc, sc->unit, fn);
+
+    Type *func_ty = sema_make_func_type_from_node(fn);
+    Type *func_ptr_ty = func_ty ? type_ptr(func_ty) : NULL;
+
+    Node *fn_ref = (Node *)xcalloc(1, sizeof(Node));
+    fn_ref->kind = ND_VAR;
+    fn_ref->var_ref = fn->name ? xstrdup(fn->name) : NULL;
+    fn_ref->var_is_const = 1;
+    fn_ref->var_is_function = 1;
+    fn_ref->referenced_function = fn;
+    fn_ref->type = func_ty;
+    fn_ref->var_type = func_ty;
+    fn_ref->line = lambda->line;
+    fn_ref->col = lambda->col;
+    fn_ref->src = lambda->src;
+
+    lambda->kind = ND_ADDR;
+    lambda->lhs = fn_ref;
+    lambda->rhs = NULL;
+    lambda->type = func_ptr_ty;
+}
+
+static Node *clone_function_var_ref(const Node *var)
+{
+    if (!var || var->kind != ND_VAR)
+        return NULL;
+    Node *clone = (Node *)xcalloc(1, sizeof(Node));
+    clone->kind = ND_VAR;
+    clone->var_ref = var->var_ref ? xstrdup(var->var_ref) : NULL;
+    clone->var_type = var->var_type;
+    clone->type = var->type;
+    clone->var_is_const = var->var_is_const;
+    clone->var_is_global = var->var_is_global;
+    clone->var_is_array = var->var_is_array;
+    clone->var_is_function = var->var_is_function;
+    clone->referenced_function = var->referenced_function;
+    clone->module_ref = var->module_ref;
+    clone->module_ref_parts = var->module_ref_parts;
+    clone->module_type_name = var->module_type_name;
+    clone->module_type_is_enum = var->module_type_is_enum;
+    clone->line = var->line;
+    clone->col = var->col;
+    clone->src = var->src;
+    return clone;
+}
+
+static Node *clone_function_pointer_expr(const Node *expr)
+{
+    if (!expr)
+        return NULL;
+    if (expr->kind == ND_ADDR && expr->lhs && expr->lhs->kind == ND_VAR)
+    {
+        Node *clone = (Node *)xcalloc(1, sizeof(Node));
+        clone->kind = ND_ADDR;
+        clone->lhs = clone_function_var_ref(expr->lhs);
+        clone->type = expr->type;
+        clone->line = expr->line;
+        clone->col = expr->col;
+        clone->src = expr->src;
+        return clone;
+    }
+    if (expr->kind == ND_VAR && expr->var_is_function)
+    {
+        Node *clone = clone_function_var_ref(expr);
+        clone->type = expr->type;
+        return clone;
+    }
+    return NULL;
+}
+
 static const Symbol *sema_instantiate_generic_call(SemaContext *sc,
                                                    const Symbol *template_sym,
                                                    Node *call_expr,
@@ -1332,6 +1617,7 @@ static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, co
     }
 
     ImportedFunctionCandidate *match = NULL;
+    ImportedFunctionCandidate *template_match = NULL;
     for (int ci = 0; ci < set->count; ++ci)
     {
         ImportedFunctionCandidate *cand = &set->candidates[ci];
@@ -1349,6 +1635,35 @@ static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, co
         }
 
         int ok = 1;
+        int is_template = symbol_is_template_function(&cand->symbol);
+        if (is_template)
+        {
+            if (!template_match)
+            {
+                template_match = cand;
+                continue;
+            }
+
+            if (funcsig_equal(&template_match->symbol.sig, &cand->symbol.sig))
+            {
+                const char *mod_a = template_match->module_full ? template_match->module_full : "<unknown>";
+                const char *mod_b = cand->module_full ? cand->module_full : "<unknown>";
+                diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                              "ambiguous call to '%s'; both modules '%s' and '%s' provide identical overloads",
+                              name, mod_a, mod_b);
+                exit(1);
+            }
+            else
+            {
+                const char *mod_a = template_match->module_full ? template_match->module_full : "<unknown>";
+                const char *mod_b = cand->module_full ? cand->module_full : "<unknown>";
+                diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                              "ambiguous call to '%s'; matches found in modules '%s' and '%s'",
+                              name, mod_a, mod_b);
+                exit(1);
+            }
+        }
+
         for (int pi = 0; pi < expected && ok; ++pi)
         {
             if (!sig->params || pi >= sig->param_count)
@@ -1398,6 +1713,9 @@ static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, co
         }
     }
 
+    if (!match && template_match)
+        return template_match;
+
     if (!match)
     {
         diag_error_at(call_expr->src, call_expr->line, call_expr->col,
@@ -1417,115 +1735,89 @@ static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, co
     return match;
 }
 
-static void describe_type(const Type *t, char *buf, size_t bufsz)
+static void sema_ensure_call_args_checked(SemaContext *sc, Node *call_expr, int *args_checked)
 {
-    if (!buf || bufsz == 0)
+    if (!sc || !call_expr)
         return;
-    if (!t)
+    if (args_checked && *args_checked)
+        return;
+    for (int i = 0; i < call_expr->arg_count; ++i)
     {
-        snprintf(buf, bufsz, "i32");
-        return;
+        if (call_expr->args && call_expr->args[i])
+            check_expr(sc, call_expr->args[i]);
     }
-    switch (t->kind)
+    if (args_checked)
+        *args_checked = 1;
+}
+
+static const Symbol *sema_resolve_local_overload(SemaContext *sc,
+                                                 const char *name,
+                                                 Node *call_expr,
+                                                 int *args_checked)
+{
+    if (!sc || !sc->syms || !name || !*name || !call_expr)
+        return NULL;
+
+    sema_ensure_call_args_checked(sc, call_expr, args_checked);
+
+    const Symbol *match = NULL;
+    const Symbol *template_candidate = NULL;
+    int candidate_count = 0;
+
+    for (int i = 0; i < sc->syms->count; ++i)
     {
-    case TY_I8:
-        snprintf(buf, bufsz, "i8");
-        return;
-    case TY_U8:
-        snprintf(buf, bufsz, "u8");
-        return;
-    case TY_I16:
-        snprintf(buf, bufsz, "i16");
-        return;
-    case TY_U16:
-        snprintf(buf, bufsz, "u16");
-        return;
-    case TY_I32:
-        snprintf(buf, bufsz, "i32");
-        return;
-    case TY_U32:
-        snprintf(buf, bufsz, "u32");
-        return;
-    case TY_I64:
-        snprintf(buf, bufsz, "i64");
-        return;
-    case TY_U64:
-        snprintf(buf, bufsz, "u64");
-        return;
-    case TY_F32:
-        snprintf(buf, bufsz, "f32");
-        return;
-    case TY_F64:
-        snprintf(buf, bufsz, "f64");
-        return;
-    case TY_F128:
-        snprintf(buf, bufsz, "f128");
-        return;
-    case TY_VOID:
-        snprintf(buf, bufsz, "void");
-        return;
-    case TY_CHAR:
-        snprintf(buf, bufsz, "char");
-        return;
-    case TY_BOOL:
-        snprintf(buf, bufsz, "bool");
-        return;
-    case TY_VA_LIST:
-        snprintf(buf, bufsz, "va_list");
-        return;
-    case TY_ARRAY:
-        if (!t->array.elem)
+        const Symbol *sym = &sc->syms->items[i];
+        if (!sym || sym->kind != SYM_FUNC || !sym->name)
+            continue;
+        if (strcmp(sym->name, name) != 0)
+            continue;
+
+        if (symbol_is_template_function(sym))
         {
-            snprintf(buf, bufsz, "array[]");
-            return;
+            if (!template_candidate)
+            {
+                template_candidate = sym;
+            }
+            else if (!symbols_share_body(template_candidate, sym))
+            {
+                diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                              "ambiguous call to '%s'; multiple template overloads available",
+                              name);
+                exit(1);
+            }
+            continue;
         }
-        else
+
+        candidate_count++;
+
+        if (!call_arguments_match_signature(call_expr, &sym->sig))
+            continue;
+
+        if (match && match != sym && !symbols_share_body(match, sym))
         {
-            char inner[128];
-            describe_type(t->array.elem, inner, sizeof(inner));
-            if (t->array.is_unsized)
-                snprintf(buf, bufsz, "array[] of %s", inner);
-            else
-                snprintf(buf, bufsz, "array[%d] of %s", t->array.length, inner);
-            return;
+            diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                          "ambiguous call to '%s'; multiple overloads match provided arguments",
+                          name);
+            exit(1);
         }
-    case TY_PTR:
-        if (!t->pointee)
-        {
-            snprintf(buf, bufsz, "ptr");
-            return;
-        }
-        else
-        {
-            char inner[128];
-            describe_type(t->pointee, inner, sizeof(inner));
-            snprintf(buf, bufsz, "ptr to %s", inner);
-            return;
-        }
-    case TY_FUNC:
-    {
-        char ret_buf[128];
-        if (t->func.ret)
-            describe_type(t->func.ret, ret_buf, sizeof(ret_buf));
-        else
-            snprintf(ret_buf, sizeof(ret_buf), "void");
-        snprintf(buf, bufsz, "fun(%d%s) -> %s", t->func.param_count,
-                 t->func.is_varargs ? ", varargs" : "", ret_buf);
-        return;
+
+        match = sym;
     }
-    case TY_STRUCT:
-        snprintf(buf, bufsz, "struct %s", t->struct_name ? t->struct_name : "<anonymous>");
-        return;
-    case TY_TEMPLATE_PARAM:
-        if (t->template_param_name && *t->template_param_name)
-            snprintf(buf, bufsz, "%s", t->template_param_name);
-        else
-            snprintf(buf, bufsz, "template_param#%d", t->template_param_index);
-        return;
-    default:
-        snprintf(buf, bufsz, "type kind %d", t->kind);
-        return;
-    }
+
+    if (match)
+        return match;
+
+    if (template_candidate)
+        return template_candidate;
+
+    if (!candidate_count)
+        return NULL;
+
+    diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                  "no overload of '%s' matches provided arguments", name);
+    exit(1);
+
+    return NULL;
 }
 
 static int type_is_exportable(const Type *t)
@@ -1541,7 +1833,11 @@ static int type_is_exportable(const Type *t)
     if (t->kind == TY_STRUCT)
         return t->is_exposed != 0;
     if (t->kind == TY_TEMPLATE_PARAM)
-        return 0;
+    {
+        if (t->template_default_type)
+            return type_is_exportable(t->template_default_type);
+        return 1;
+    }
     return 1;
 }
 
@@ -1748,6 +2044,12 @@ static void populate_symbol_from_function(Symbol *s, Node *fn)
 
     s->kind = SYM_FUNC;
     s->name = fn->name;
+    if (!fn->metadata.backend_name && !fn->is_entrypoint)
+    {
+        char *generated = append_param_signature(fn->name, fn);
+        if (generated)
+            fn->metadata.backend_name = generated;
+    }
     s->backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
     s->is_extern = 0;
     s->abi = "C";
@@ -1855,9 +2157,9 @@ static void sema_register_function_local(SemaContext *sc, Node *unit_node, Node 
     if (unit_node && unit_node->kind == ND_UNIT)
         module_full = unit_node->module_path.full_name;
 
-    if (module_full && !fn->metadata.backend_name && !fn->is_entrypoint)
+    if (module_full && !fn->metadata.backend_name && !fn->is_entrypoint && !fn->export_name)
     {
-        char *backend = module_backend_name(module_full, fn->name);
+        char *backend = module_backend_name(module_full, fn->name, fn);
         if (backend)
             fn->metadata.backend_name = backend;
     }
@@ -1896,9 +2198,9 @@ static void sema_register_global_local(SemaContext *sc, Node *unit_node, Node *d
     if (unit_node && unit_node->kind == ND_UNIT)
         module_full = unit_node->module_path.full_name;
 
-    if (module_full && !decl->metadata.backend_name)
+    if (module_full && !decl->metadata.backend_name && !decl->export_name)
     {
-        char *backend = module_backend_name(module_full, decl->var_name);
+        char *backend = module_backend_name(module_full, decl->var_name, NULL);
         if (backend)
             decl->metadata.backend_name = backend;
     }
@@ -1955,9 +2257,9 @@ static void sema_register_function_foreign(SemaContext *sc, const Node *unit_nod
     if (!module_full || !*module_full)
         return;
 
-    if (!fn->metadata.backend_name && !fn->is_entrypoint)
+    if (!fn->metadata.backend_name && !fn->is_entrypoint && !fn->export_name)
     {
-        char *backend = module_backend_name(module_full, fn->name);
+        char *backend = module_backend_name(module_full, fn->name, fn);
         if (backend)
             fn->metadata.backend_name = backend;
     }
@@ -1998,9 +2300,9 @@ static void sema_register_global_foreign(SemaContext *sc, const Node *unit_node,
     if (!module_full || !*module_full)
         return;
 
-    if (!decl->metadata.backend_name)
+    if (!decl->metadata.backend_name && !decl->export_name)
     {
-        char *backend = module_backend_name(module_full, decl->var_name);
+        char *backend = module_backend_name(module_full, decl->var_name, NULL);
         if (backend)
             decl->metadata.backend_name = backend;
     }
@@ -2126,6 +2428,15 @@ static int type_is_pointer(Type *t)
     if (t->kind == TY_ARRAY && t->array.is_unsized)
         return 1;
     return 0;
+}
+
+static int type_is_function_pointer(const Type *t)
+{
+    t = canonicalize_type_deep((Type *)t);
+    if (!t || t->kind != TY_PTR || !t->pointee)
+        return 0;
+    Type *pointee = canonicalize_type_deep(t->pointee);
+    return pointee && pointee->kind == TY_FUNC;
 }
 
 static int64_t type_int_min(Type *t)
@@ -2344,6 +2655,30 @@ static int coerce_int_literal_to_type(Node *literal, Type *target, const char *c
     return 1;
 }
 
+static void copy_function_signature(Type *dst, const Type *src)
+{
+    if (!dst || !src || dst == src)
+        return;
+    if (dst->kind != TY_FUNC || src->kind != TY_FUNC)
+        return;
+    if (dst->func.params)
+        free(dst->func.params);
+    dst->func.param_count = src->func.param_count;
+    if (dst->func.param_count > 0)
+    {
+        dst->func.params = (Type **)xcalloc((size_t)dst->func.param_count, sizeof(Type *));
+        for (int i = 0; i < dst->func.param_count; ++i)
+            dst->func.params[i] = src->func.params ? src->func.params[i] : NULL;
+    }
+    else
+    {
+        dst->func.params = NULL;
+    }
+    dst->func.ret = src->func.ret;
+    dst->func.is_varargs = src->func.is_varargs;
+    dst->func.has_signature = src->func.has_signature;
+}
+
 static int can_assign(Type *target, Node *rhs)
 {
     if (!target || !rhs)
@@ -2358,6 +2693,25 @@ static int can_assign(Type *target, Node *rhs)
     }
     if (rhs->type && type_equal(canon_target, rhs->type))
         return 1;
+    if (canon_target->kind == TY_PTR && canon_target->pointee && canon_target->pointee->kind == TY_FUNC)
+    {
+        Type *rhs_ty = canonicalize_type_deep(rhs->type);
+        if (rhs_ty && rhs_ty->kind == TY_PTR && rhs_ty->pointee && rhs_ty->pointee->kind == TY_FUNC)
+        {
+            Type *dst_func = canonicalize_type_deep(canon_target->pointee);
+            Type *src_func = canonicalize_type_deep(rhs_ty->pointee);
+            if (dst_func && src_func && src_func->func.has_signature)
+            {
+                if (!dst_func->func.has_signature)
+                    copy_function_signature(dst_func, src_func);
+                if (type_equals(dst_func, src_func))
+                {
+                    rhs->type = canon_target;
+                    return 1;
+                }
+            }
+        }
+    }
     if (rhs->kind == ND_COND)
     {
         if (!rhs->rhs || !rhs->body)
@@ -2398,8 +2752,17 @@ static int call_arguments_match_signature(Node *call_expr, const FuncSig *sig)
             continue;
         if (!call_expr->args || !call_expr->args[i])
             return 0;
-        if (!can_assign(expected_ty, call_expr->args[i]))
+        Node *arg = call_expr->args[i];
+        Type *saved_type = arg->type;
+        int64_t saved_int = arg->int_val;
+        if (!can_assign(expected_ty, arg))
+        {
+            arg->type = saved_type;
+            arg->int_val = saved_int;
             return 0;
+        }
+        arg->type = saved_type;
+        arg->int_val = saved_int;
     }
     return 1;
 }
@@ -2882,6 +3245,7 @@ static int expr_has_any_cast(const Node *expr)
 static const Node *find_const_storage_origin(Node *expr);
 static const Node *find_const_pointer_origin(Node *expr);
 static const Node *find_pointer_to_const_origin(Node *expr);
+static Type *sema_prepare_assignment_lhs(SemaContext *sc, Node *assign_expr, Node **out_lhs_base);
 
 static const Node *find_const_pointer_origin(Node *expr)
 {
@@ -2891,6 +3255,8 @@ static const Node *find_const_pointer_origin(Node *expr)
     switch (expr->kind)
     {
     case ND_VAR:
+        if (expr->var_is_function)
+            return NULL;
         return expr->var_is_const ? expr : NULL;
     case ND_MEMBER:
         return find_const_storage_origin(expr);
@@ -2938,6 +3304,8 @@ static const Node *find_const_storage_origin(Node *expr)
     switch (expr->kind)
     {
     case ND_VAR:
+        if (expr->var_is_function)
+            return NULL;
         return expr->var_is_const ? expr : NULL;
     case ND_MEMBER:
         if (!expr->lhs)
@@ -2974,6 +3342,8 @@ static const Node *find_pointer_to_const_origin(Node *expr)
     switch (expr->kind)
     {
     case ND_VAR:
+        if (expr->var_is_function)
+            return NULL;
         return expr->var_is_const ? expr : NULL;
     case ND_MEMBER:
         if (!expr->lhs)
@@ -2995,8 +3365,133 @@ static const Node *find_pointer_to_const_origin(Node *expr)
     }
 }
 
+static Type *sema_prepare_assignment_lhs(SemaContext *sc, Node *assign_expr, Node **out_lhs_base)
+{
+    if (!assign_expr || !assign_expr->lhs)
+    {
+        diag_error_at(assign_expr ? assign_expr->src : NULL, assign_expr ? assign_expr->line : 0, assign_expr ? assign_expr->col : 0,
+                      "assignment missing left-hand side");
+        exit(1);
+    }
+
+    Node *lhs_expr = assign_expr->lhs;
+    check_expr(sc, lhs_expr);
+
+    Node *lhs_base = lhs_expr;
+    if (lhs_base->kind == ND_CAST && lhs_base->lhs)
+        lhs_base = lhs_base->lhs;
+
+    if (lhs_base->kind != ND_VAR && lhs_base->kind != ND_INDEX && lhs_base->kind != ND_MEMBER && lhs_base->kind != ND_DEREF)
+    {
+        diag_error_at(assign_expr->src, assign_expr->line, assign_expr->col,
+                      "lvalue required as left operand of assignment");
+        exit(1);
+    }
+
+    const Node *const_origin = NULL;
+    if (lhs_base->kind == ND_VAR)
+    {
+        if (lhs_base->var_is_const)
+        {
+            diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
+                          "cannot assign to constant variable '%s'",
+                          lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
+            exit(1);
+        }
+    }
+    else
+    {
+        const_origin = find_const_storage_origin(lhs_base);
+    }
+    if (!const_origin && (lhs_base->kind == ND_INDEX || lhs_base->kind == ND_DEREF))
+        const_origin = find_pointer_to_const_origin(lhs_base->lhs);
+    if (const_origin)
+    {
+        const char *const_name = const_origin->var_ref ? const_origin->var_ref : "<unnamed>";
+        diag_warning_at(assign_expr->src, assign_expr->line, assign_expr->col,
+                        "assignment modifies data derived from constant '%s' (treating operands as writable)",
+                        const_name);
+    }
+
+    Type *lhs_type = lhs_expr->type;
+    if (!lhs_type)
+    {
+        if (lhs_base->kind == ND_VAR)
+            lhs_type = resolve_variable(sc, lhs_base->var_ref, NULL, NULL, NULL, NULL);
+        else if (lhs_base->kind == ND_MEMBER)
+            lhs_type = lhs_base->type;
+        else if ((lhs_base->kind == ND_INDEX || lhs_base->kind == ND_DEREF) && lhs_base->lhs && lhs_base->lhs->type && lhs_base->lhs->type->kind == TY_PTR)
+            lhs_type = lhs_base->lhs->type->pointee;
+    }
+
+    if (lhs_base->kind == ND_VAR)
+    {
+        if (!lhs_type)
+        {
+            diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
+                          "unknown variable '%s' on left-hand side of assignment",
+                          lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
+            exit(1);
+        }
+        if (lhs_base->var_type && lhs_base->var_type->kind == TY_ARRAY && !lhs_base->var_type->array.is_unsized)
+        {
+            diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
+                          "cannot assign to array variable '%s'",
+                          lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
+            exit(1);
+        }
+    }
+
+    if (out_lhs_base)
+        *out_lhs_base = lhs_base;
+    return lhs_type;
+}
+
 static void check_expr(SemaContext *sc, Node *e)
 {
+    if (!e)
+        return;
+    if (e->kind == ND_LAMBDA)
+    {
+        sema_lower_lambda(sc, e);
+        if (e->kind != ND_LAMBDA)
+        {
+            check_expr(sc, e);
+            return;
+        }
+    }
+    if (e->kind == ND_LAMBDA_CALL)
+    {
+        Node saved = *e;
+        const SourceBuffer *src = e->src;
+        int line = e->line;
+        int col = e->col;
+
+        Node *call_node = (Node *)xcalloc(1, sizeof(Node));
+        *call_node = saved;
+        call_node->kind = ND_CALL;
+
+        memset(e, 0, sizeof(Node));
+        e->kind = ND_SEQ;
+        e->lhs = call_node;
+        e->line = line;
+        e->col = col;
+        e->src = src;
+
+        check_expr(sc, call_node);
+
+        Node *lambda_value = clone_function_pointer_expr(call_node->lhs);
+        if (!lambda_value || !lambda_value->type)
+        {
+            diag_error_at(src, line, col,
+                          "lambda immediate invocation requires an addressable target");
+            exit(1);
+        }
+
+        e->rhs = lambda_value;
+        e->type = lambda_value->type;
+        return;
+    }
     if (e->kind == ND_INT)
     {
         if (!e->type)
@@ -3097,6 +3592,8 @@ static void check_expr(SemaContext *sc, Node *e)
                           orig_name ? orig_name : "<null>");
             exit(1);
         }
+        if (resolved_sym && resolved_sym->kind == SYM_GLOBAL)
+            sema_track_imported_global_usage(sc, resolved_sym);
         Type *canon = canonicalize_type_deep(t);
         e->var_type = canon ? canon : t;
         if (canon && canon->kind == TY_ARRAY)
@@ -3501,6 +3998,7 @@ static void check_expr(SemaContext *sc, Node *e)
                     e->var_is_global = 1;
                     e->var_type = var_ty;
                     e->type = var_ty;
+                    sema_track_imported_global_usage(sc, sym);
                     free(qualified);
                     return;
                 }
@@ -3965,10 +4463,6 @@ static void check_expr(SemaContext *sc, Node *e)
         {
             e->type = elem_type;
         }
-        else if (elem_type && elem_type->kind == TY_CHAR)
-        {
-            e->type = &ty_i32;
-        }
         else
         {
             e->type = elem_type ? elem_type : &ty_i32;
@@ -4004,11 +4498,6 @@ static void check_expr(SemaContext *sc, Node *e)
         {
             e->type = elem_type;
         }
-        else if (elem_type && elem_type->kind == TY_CHAR)
-        {
-            // char* promotes to int for indexing
-            e->type = &ty_i32;
-        }
         else
         {
             // Default: use pointee type
@@ -4018,75 +4507,8 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_ASSIGN)
     {
-        if (!e->lhs)
-        {
-            diag_error_at(e->src, e->line, e->col,
-                          "assignment missing left-hand side");
-            exit(1);
-        }
-        check_expr(sc, e->lhs);
-        Node *lhs_expr = e->lhs;
-        Node *lhs_base = lhs_expr;
-        if (lhs_base->kind == ND_CAST && lhs_base->lhs)
-            lhs_base = lhs_base->lhs;
-        if (lhs_base->kind != ND_VAR && lhs_base->kind != ND_INDEX && lhs_base->kind != ND_MEMBER && lhs_base->kind != ND_DEREF)
-        {
-            diag_error_at(e->src, e->line, e->col,
-                          "lvalue required as left operand of assignment");
-            exit(1);
-        }
-        const Node *const_origin = NULL;
-        if (lhs_base->kind == ND_VAR)
-        {
-            if (lhs_base->var_is_const)
-            {
-                diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
-                              "cannot assign to constant variable '%s'",
-                              lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
-                exit(1);
-            }
-        }
-        else
-        {
-            const_origin = find_const_storage_origin(lhs_base);
-        }
-        if (!const_origin && (lhs_base->kind == ND_INDEX || lhs_base->kind == ND_DEREF))
-            const_origin = find_pointer_to_const_origin(lhs_base->lhs);
-        if (const_origin)
-        {
-            const char *const_name = const_origin->var_ref ? const_origin->var_ref : "<unnamed>";
-            diag_warning_at(e->src, e->line, e->col,
-                            "assignment modifies data derived from constant '%s' (treating operands as writable)",
-                            const_name);
-        }
+        Type *lhs_type = sema_prepare_assignment_lhs(sc, e, NULL);
         check_expr(sc, e->rhs);
-        Type *lhs_type = lhs_expr->type;
-        if (!lhs_type)
-        {
-            if (lhs_base->kind == ND_VAR)
-                lhs_type = resolve_variable(sc, lhs_base->var_ref, NULL, NULL, NULL, NULL);
-            else if (lhs_base->kind == ND_MEMBER)
-                lhs_type = lhs_base->type;
-            else if ((lhs_base->kind == ND_INDEX || lhs_base->kind == ND_DEREF) && lhs_base->lhs && lhs_base->lhs->type && lhs_base->lhs->type->kind == TY_PTR)
-                lhs_type = lhs_base->lhs->type->pointee;
-        }
-        if (lhs_base->kind == ND_VAR)
-        {
-            if (!lhs_type)
-            {
-                diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
-                              "unknown variable '%s' on left-hand side of assignment",
-                              lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
-                exit(1);
-            }
-            if (lhs_base->var_type && lhs_base->var_type->kind == TY_ARRAY && !lhs_base->var_type->array.is_unsized)
-            {
-                diag_error_at(lhs_base->src, lhs_base->line, lhs_base->col,
-                              "cannot assign to array variable '%s'",
-                              lhs_base->var_ref ? lhs_base->var_ref : "<unnamed>");
-                exit(1);
-            }
-        }
         if (lhs_type)
         {
             if (!can_assign(lhs_type, e->rhs))
@@ -4099,6 +4521,93 @@ static void check_expr(SemaContext *sc, Node *e)
             }
             e->rhs->type = lhs_type;
         }
+        e->type = lhs_type ? lhs_type : (e->rhs->type ? e->rhs->type : &ty_i32);
+        return;
+    }
+    if (e->kind == ND_ADD_ASSIGN || e->kind == ND_SUB_ASSIGN || e->kind == ND_MUL_ASSIGN ||
+        e->kind == ND_DIV_ASSIGN || e->kind == ND_MOD_ASSIGN || e->kind == ND_BITAND_ASSIGN ||
+        e->kind == ND_BITOR_ASSIGN || e->kind == ND_BITXOR_ASSIGN || e->kind == ND_SHL_ASSIGN ||
+        e->kind == ND_SHR_ASSIGN)
+    {
+        Type *lhs_type = sema_prepare_assignment_lhs(sc, e, NULL);
+        check_expr(sc, e->rhs);
+        if (lhs_type)
+        {
+            if (!can_assign(lhs_type, e->rhs))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "cannot assign '%d' to '%d' without cast",
+                              e->rhs->type ? e->rhs->type->kind : -1,
+                              lhs_type ? lhs_type->kind : -1);
+                exit(1);
+            }
+            e->rhs->type = lhs_type;
+        }
+
+        Type *canon_lhs = canonicalize_type_deep(lhs_type);
+        int lhs_is_int = canon_lhs ? type_is_int(canon_lhs) : 0;
+        int lhs_is_float = canon_lhs ? type_is_float(canon_lhs) : 0;
+
+        const char *op_text = "+=";
+        int allow_int = 1;
+        int allow_float = 0;
+        switch (e->kind)
+        {
+        case ND_ADD_ASSIGN:
+            op_text = "+=";
+            allow_float = 1;
+            break;
+        case ND_SUB_ASSIGN:
+            op_text = "-=";
+            allow_float = 1;
+            break;
+        case ND_MUL_ASSIGN:
+            op_text = "*=";
+            allow_float = 1;
+            break;
+        case ND_DIV_ASSIGN:
+            op_text = "/=";
+            allow_float = 1;
+            break;
+        case ND_MOD_ASSIGN:
+            op_text = "%=";
+            allow_float = 0;
+            break;
+        case ND_BITAND_ASSIGN:
+            op_text = "&=";
+            allow_float = 0;
+            break;
+        case ND_BITOR_ASSIGN:
+            op_text = "|=";
+            allow_float = 0;
+            break;
+        case ND_BITXOR_ASSIGN:
+            op_text = "^=";
+            allow_float = 0;
+            break;
+        case ND_SHL_ASSIGN:
+            op_text = "<<=";
+            allow_float = 0;
+            break;
+        case ND_SHR_ASSIGN:
+            op_text = ">>=";
+            allow_float = 0;
+            break;
+        default:
+            break;
+        }
+
+        const char *type_desc = (allow_int && allow_float) ? "integer or floating-point"
+                                                           : (allow_float ? "floating-point"
+                                                                          : "integer");
+        int lhs_acceptable = (allow_int && lhs_is_int) || (allow_float && lhs_is_float);
+        if (!lhs_acceptable)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "%s requires %s operands", op_text, type_desc);
+            exit(1);
+        }
+
         e->type = lhs_type ? lhs_type : (e->rhs->type ? e->rhs->type : &ty_i32);
         return;
     }
@@ -4171,9 +4680,24 @@ static void check_expr(SemaContext *sc, Node *e)
             if (resolved_import)
             {
                 direct_sym = &resolved_import->symbol;
-                func_sig = make_function_type_from_sig(&resolved_import->symbol.sig);
+                if (!symbol_is_template_function(direct_sym))
+                    func_sig = make_function_type_from_sig(&resolved_import->symbol.sig);
                 call_is_indirect = 0;
             }
+        }
+
+        if (!func_sig && direct_sym && !symbol_is_template_function(direct_sym))
+        {
+            sema_ensure_call_args_checked(sc, e, &args_checked);
+            if (!call_arguments_match_signature(e, &direct_sym->sig))
+                direct_sym = NULL;
+        }
+
+        if (!func_sig && !direct_sym && resolved_name)
+        {
+            const Symbol *overload = sema_resolve_local_overload(sc, resolved_name, e, &args_checked);
+            if (overload)
+                direct_sym = overload;
         }
 
         if (!func_sig && direct_sym && direct_sym->ast_node &&
@@ -4714,7 +5238,51 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
                           stmt->var_name);
             return 1;
         }
+        int rhs_checked = 0;
+        if (stmt->var_is_inferred)
+        {
+            if (!stmt->rhs)
+            {
+                diag_error_at(stmt->src, stmt->line, stmt->col,
+                              "'var' declarations require an initializer to infer the type");
+                return 1;
+            }
+            if (stmt->rhs->kind == ND_INIT_LIST)
+            {
+                diag_error_at(stmt->rhs->src, stmt->rhs->line, stmt->rhs->col,
+                              "cannot use brace initializer with 'var' declaration; specify the type explicitly");
+                return 1;
+            }
+            check_expr(sc, stmt->rhs);
+            rhs_checked = 1;
+            if (!stmt->rhs->type)
+            {
+                diag_error_at(stmt->rhs->src, stmt->rhs->line, stmt->rhs->col,
+                              "unable to infer type for '%s'",
+                              stmt->var_name ? stmt->var_name : "<unnamed>");
+                return 1;
+            }
+            stmt->var_type = canonicalize_type_deep(stmt->rhs->type);
+            stmt->rhs->type = stmt->var_type;
+        }
         stmt->var_type = canonicalize_type_deep(stmt->var_type);
+        if (stmt->var_type && stmt->var_type->kind == TY_ARRAY && stmt->var_type->array.is_unsized && stmt->rhs && stmt->rhs->kind == ND_INIT_LIST)
+        {
+            int elem_count = stmt->rhs->init.count;
+            if (elem_count <= 0)
+            {
+                diag_error_at(stmt->rhs->src, stmt->rhs->line, stmt->rhs->col,
+                              "unsized arrays require at least one initializer element to determine their length");
+                return 1;
+            }
+            Type *elem_ty = stmt->var_type->array.elem ? stmt->var_type->array.elem : type_i32();
+            stmt->var_type = canonicalize_type_deep(type_array(elem_ty, elem_count));
+        }
+        if (stmt->var_type && stmt->var_type->kind == TY_ARRAY)
+            stmt->var_is_array = stmt->var_type->array.is_unsized ? 0 : 1;
+        else
+            stmt->var_is_array = 0;
+        stmt->var_is_function = type_is_function_pointer(stmt->var_type);
         scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const);
         if (stmt->rhs)
         {
@@ -4724,7 +5292,8 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
             }
             else
             {
-                check_expr(sc, stmt->rhs);
+                if (!rhs_checked)
+                    check_expr(sc, stmt->rhs);
                 if (stmt->var_type && !can_assign(stmt->var_type, stmt->rhs))
                 {
                     diag_error_at(stmt->rhs->src, stmt->rhs->line, stmt->rhs->col,
@@ -4956,7 +5525,17 @@ static int sema_global_initializer_is_const(const Node *expr)
     case ND_CAST:
         return sema_global_initializer_is_const(expr->lhs);
     case ND_INIT_LIST:
-        return expr->init.is_zero;
+        if (expr->init.is_zero)
+            return 1;
+        if (!expr->init.elems || expr->init.count <= 0)
+            return 0;
+        for (int i = 0; i < expr->init.count; ++i)
+        {
+            const Node *elem = expr->init.elems ? expr->init.elems[i] : NULL;
+            if (!elem || !sema_global_initializer_is_const(elem))
+                return 0;
+        }
+        return 1;
     default:
         return 0;
     }
@@ -4990,6 +5569,20 @@ static int sema_check_global_decl(SemaContext *sc, Node *decl)
                       decl->var_name);
         return 1;
     }
+    if (ty->kind == TY_ARRAY && ty->array.is_unsized && decl->rhs && decl->rhs->kind == ND_INIT_LIST)
+    {
+        int elem_count = decl->rhs->init.count;
+        if (elem_count <= 0)
+        {
+            diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                          "unsized arrays require at least one initializer element to determine their length");
+            return 1;
+        }
+        Type *elem_ty = ty->array.elem ? ty->array.elem : type_i32();
+        decl->var_type = canonicalize_type_deep(type_array(elem_ty, elem_count));
+        ty = decl->var_type;
+    }
+
     if (ty->kind == TY_STRUCT)
     {
         if (ty->strct.size_bytes <= 0)
@@ -5003,27 +5596,47 @@ static int sema_check_global_decl(SemaContext *sc, Node *decl)
         if (!decl->rhs)
             return 0;
 
-        if (decl->rhs->kind != ND_INIT_LIST || !decl->rhs->init.is_zero)
+        if (decl->rhs->kind != ND_INIT_LIST)
         {
             diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
-                          "struct global '%s' requires an all-zero initializer",
+                          "struct global '%s' must use an initializer list",
                           decl->var_name);
             return 1;
         }
 
-        decl->rhs->type = ty;
+        check_initializer_for_type(sc, decl->rhs, ty);
+        if (!sema_global_initializer_is_const(decl->rhs))
+        {
+            diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                          "global initializer for '%s' must be a constant expression",
+                          decl->var_name);
+            return 1;
+        }
         return 0;
     }
 
     if (!decl->rhs)
         return 0;
 
+    if (ty->kind == TY_ARRAY && decl->rhs->kind == ND_INIT_LIST)
+    {
+        check_initializer_for_type(sc, decl->rhs, ty);
+        if (!sema_global_initializer_is_const(decl->rhs))
+        {
+            diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
+                          "global initializer for '%s' must be a constant expression",
+                          decl->var_name);
+            return 1;
+        }
+        return 0;
+    }
+
     if (decl->rhs->kind == ND_INIT_LIST)
     {
         if (!decl->rhs->init.is_zero)
         {
             diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
-                          "non-zero initializer lists are not supported for global variables");
+                          "non-zero initializer lists are not supported for this global type");
             return 1;
         }
         decl->rhs->type = ty;

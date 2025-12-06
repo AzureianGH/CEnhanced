@@ -14,6 +14,7 @@ typedef enum
     TK_CHAR_LIT,
     // keywords
     TK_KW_FUN,
+    TK_KW_ACTION,
     TK_KW_RET,
     TK_KW_STACK,
     TK_KW_REG,
@@ -47,6 +48,7 @@ typedef enum
     TK_KW_VOID,
     TK_KW_CHAR,
     TK_KW_BOOL,
+    TK_KW_VAR,
     TK_KW_IF,
     TK_KW_ELSE,
     TK_KW_SWITCH,
@@ -81,17 +83,25 @@ typedef enum
     TK_COMMA,      // ,
     TK_PLUS,       // +
     TK_PLUSPLUS,   // ++
+    TK_PLUSEQ,     // +=
     TK_ANDAND,     // &&
     TK_OROR,       // ||
     TK_AMP,        // &
+    TK_ANDEQ,      // &=
     TK_PIPE,       // |
+    TK_OREQ,       // |=
     TK_CARET,      // ^
+    TK_XOREQ,      // ^=
     TK_TILDE,      // ~
     TK_STAR,       // *
+    TK_STAREQ,     // *=
     TK_SLASH,      // /
+    TK_SLASHEQ,    // /=
     TK_PERCENT,    // %
+    TK_PERCENTEQ,  // %=
     TK_MINUS,      // -
     TK_MINUSMINUS, // --
+    TK_MINUSEQ,    // -=
     TK_ASSIGN,     // =
     TK_EQEQ,       // ==
     TK_BANG,       // !
@@ -102,6 +112,8 @@ typedef enum
     TK_GTE,        // >=
     TK_SHL,        // <<
     TK_SHR,        // >>
+    TK_SHLEQ,      // <<=
+    TK_SHREQ,      // >>=
     TK_QUESTION,   // ?
     TK_COLON,      // :
     TK_ACCESS,     // =>
@@ -221,6 +233,16 @@ typedef enum
     ND_BLOCK,
     ND_VAR_DECL,
     ND_ASSIGN,
+    ND_ADD_ASSIGN,
+    ND_SUB_ASSIGN,
+    ND_MUL_ASSIGN,
+    ND_DIV_ASSIGN,
+    ND_MOD_ASSIGN,
+    ND_BITAND_ASSIGN,
+    ND_BITOR_ASSIGN,
+    ND_BITXOR_ASSIGN,
+    ND_SHL_ASSIGN,
+    ND_SHR_ASSIGN,
     ND_IF,
     ND_INDEX,
     ND_DEREF,
@@ -262,6 +284,9 @@ typedef enum
     ND_BITNOT,    // ~
     ND_SWITCH,
     ND_MATCH,
+    ND_LAMBDA,
+    ND_SEQ,
+    ND_LAMBDA_CALL,
 } NodeKind;
 
 const char *node_kind_name(NodeKind kind);
@@ -277,16 +302,16 @@ typedef struct Node Node;
 
 typedef struct
 {
-    Node *value;       // NULL when representing 'default'
-    Node *body;        // statement/block to execute for this case
-    int is_default;    // 1 when this entry is the default case
+    Node *value;    // NULL when representing 'default'
+    Node *body;     // statement/block to execute for this case
+    int is_default; // 1 when this entry is the default case
 } SwitchCase;
 
 typedef struct
 {
-    Node *pattern;        // expression pattern to match
-    Node *guard;          // optional guard expression (NULL when unused)
-    Node *body;           // statement/block executed when arm matches
+    Node *pattern;            // expression pattern to match
+    Node *guard;              // optional guard expression (NULL when unused)
+    Node *body;               // statement/block executed when arm matches
     const char *binding_name; // optional binding identifier when pattern binds
 } MatchArm;
 
@@ -342,6 +367,7 @@ struct Node
         int declared_local_count; // parsed from .func locals= value, or -1 when unspecified
         char *ret_token;          // parsed from .func ret= value, if provided
     } metadata;
+    char *section_name; // optional custom section for functions/globals
     int wants_inline;
     int inline_candidate;
     int inline_cost;
@@ -356,7 +382,7 @@ struct Node
     const char *call_name;
     struct Node **args;
     int arg_count;
-    Type **call_type_args;        // explicit template type arguments
+    Type **call_type_args; // explicit template type arguments
     int call_type_arg_count;
     Type *call_func_type;           // canonicalized function signature when available
     int call_is_indirect;           // 1 for pointer-based calls
@@ -374,6 +400,7 @@ struct Node
     int module_ref_parts;             // number of module path segments consumed in expression
     const char *module_type_name;     // resolved type name within module, when applicable
     int module_type_is_enum;          // 1 when module_type_name refers to an enum for chained lookups
+    int var_is_inferred;              // set on declarations that use 'var'
     // For ND_BLOCK
     struct Node **stmts;
     int stmt_count;
@@ -417,6 +444,7 @@ struct Node
     int import_count;
     // Declaration visibility flag (used for ND_FUNC and other decl nodes)
     int is_exposed;
+    int export_name; // New export_name field to track the [Export] attribute
 };
 
 typedef struct Lexer Lexer;
@@ -481,6 +509,7 @@ typedef struct
 {
     bool freestanding;
     bool m32;
+    bool debug_symbols;
     bool emit_asm;               // for -S (produces .S from chancecodec)
     bool no_link;                // don't link; emit .ccb only
     AsmSyntax asm_syntax;        // desired assembly flavor when translating via chancecodec
@@ -492,6 +521,8 @@ typedef struct
     int extern_count;
     const struct Symbol *imported_externs;
     int imported_extern_count;
+    const struct Symbol *imported_globals;
+    int imported_global_count;
     int opt_level;
 } CodegenOptions;
 
@@ -572,8 +603,12 @@ typedef struct
     struct ImportedFunctionSet *imported_funcs;
     int imported_func_count;
     int imported_func_cap;
+    Symbol *imported_globals;
+    int imported_global_count;
+    int imported_global_cap;
     int loop_depth;
     int switch_depth;
+    int lambda_counter;
 } SemaContext;
 
 SemaContext *sema_create(void);
@@ -583,5 +618,6 @@ int sema_check_unit(SemaContext *sc, Node *unit);
 void sema_register_foreign_unit_symbols(SemaContext *sc, Node *target_unit, Node *foreign_unit);
 void sema_track_imported_function(SemaContext *sc, const char *name, const char *module_full, const Symbol *symbol);
 Symbol *sema_copy_imported_function_symbols(const SemaContext *sc, int *out_count);
+Symbol *sema_copy_imported_global_symbols(const SemaContext *sc, int *out_count);
 
 #endif // CHANCE_AST_H

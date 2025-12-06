@@ -14,6 +14,7 @@ add_library(chance_core
     src/lexer.c
     src/parser.c
     src/sema.c
+    src/mangle.c
     src/includes.c
     src/preproc.c
     src/codegen_ccb.c

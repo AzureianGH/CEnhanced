@@ -1,0 +1,31 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     './tests/examples/build/SampleTests'
+relocations:
+  - { offset: 0x2B, size: 0x8, addend: 0x0, symName: _LibTest_test_fun_i32, symObjAddr: 0x0, symBinAddr: 0x100006764, symSize: 0x40 }
+  - { offset: 0x40, size: 0x8, addend: 0x0, symName: _LibTest_other_fun, symObjAddr: 0x40, symBinAddr: 0x1000067A4, symSize: 0x78 }
+  - { offset: 0x74, size: 0x8, addend: 0x0, symName: _LibTest_Another_other_test_fun_i32, symObjAddr: 0x0, symBinAddr: 0x10000681C, symSize: 0x40 }
+  - { offset: 0x89, size: 0x8, addend: 0x0, symName: _LibTest_Another_get_info, symObjAddr: 0x40, symBinAddr: 0x10000685C, symSize: 0x30 }
+  - { offset: 0x9E, size: 0x8, addend: 0x0, symName: _LibTest_Another_test_varargs_i32_i32, symObjAddr: 0x70, symBinAddr: 0x10000688C, symSize: 0x16C }
+  - { offset: 0xB3, size: 0x8, addend: 0x0, symName: _LibTest_Another_test_diffvarargs_i32, symObjAddr: 0x1DC, symBinAddr: 0x1000069F8, symSize: 0x1A0 }
+  - { offset: 0xC8, size: 0x8, addend: 0x0, symName: _LibTest_Another_multistructargs_struct_smalltest_struct_smalltest_struct_smalltest, symObjAddr: 0x37C, symBinAddr: 0x100006B98, symSize: 0x7C }
+  - { offset: 0xFC, size: 0x8, addend: 0x0, symName: _Std_String_strcmp_ptr_to_char_ptr_to_char, symObjAddr: 0x0, symBinAddr: 0x100006C14, symSize: 0x388 }
+  - { offset: 0x111, size: 0x8, addend: 0x0, symName: _Std_String_strlen_ptr_to_char, symObjAddr: 0x388, symBinAddr: 0x100006F9C, symSize: 0xD8 }
+  - { offset: 0x126, size: 0x8, addend: 0x0, symName: _Std_String_strcpy_ptr_to_char_ptr_to_char, symObjAddr: 0x460, symBinAddr: 0x100007074, symSize: 0x184 }
+  - { offset: 0x13B, size: 0x8, addend: 0x0, symName: _Std_String_strcat_ptr_to_char_ptr_to_char, symObjAddr: 0x5E4, symBinAddr: 0x1000071F8, symSize: 0x1B8 }
+  - { offset: 0x150, size: 0x8, addend: 0x0, symName: _Std_String_strchr_ptr_to_char_char, symObjAddr: 0x79C, symBinAddr: 0x1000073B0, symSize: 0x19C }
+  - { offset: 0x165, size: 0x8, addend: 0x0, symName: _Std_String_strstr_ptr_to_char_ptr_to_char, symObjAddr: 0x938, symBinAddr: 0x10000754C, symSize: 0x2F4 }
+  - { offset: 0x199, size: 0x8, addend: 0x0, symName: _Std_Memory_memcpy_ptr_to_void_ptr_to_void_i32, symObjAddr: 0x0, symBinAddr: 0x100007840, symSize: 0x11C }
+  - { offset: 0x1AE, size: 0x8, addend: 0x0, symName: _Std_Memory_memset_ptr_to_void_u8_i32, symObjAddr: 0x11C, symBinAddr: 0x10000795C, symSize: 0xDC }
+  - { offset: 0x1C3, size: 0x8, addend: 0x0, symName: _Std_Memory_memcmp_ptr_to_void_ptr_to_void_i32, symObjAddr: 0x1F8, symBinAddr: 0x100007A38, symSize: 0x204 }
+  - { offset: 0x1D8, size: 0x8, addend: 0x0, symName: _Std_Memory_memmove_ptr_to_void_ptr_to_void_i32, symObjAddr: 0x3FC, symBinAddr: 0x100007C3C, symSize: 0x274 }
+  - { offset: 0x1ED, size: 0x8, addend: 0x0, symName: _Std_Memory_memchr_ptr_to_void_u8_i32, symObjAddr: 0x670, symBinAddr: 0x100007EB0, symSize: 0x164 }
+  - { offset: 0x202, size: 0x8, addend: 0x0, symName: _Std_Memory_memrchr_ptr_to_void_u8_i32, symObjAddr: 0x7D4, symBinAddr: 0x100008014, symSize: 0x174 }
+  - { offset: 0x217, size: 0x8, addend: 0x0, symName: _Std_Memory_bzero_ptr_to_void_i32, symObjAddr: 0x948, symBinAddr: 0x100008188, symSize: 0x48 }
+  - { offset: 0x22C, size: 0x8, addend: 0x0, symName: _Std_Memory_bcopy_ptr_to_void_ptr_to_void_i32, symObjAddr: 0x990, symBinAddr: 0x1000081D0, symSize: 0x4C }
+  - { offset: 0x241, size: 0x8, addend: 0x0, symName: _Std_Memory_alloc_i32, symObjAddr: 0x9DC, symBinAddr: 0x10000821C, symSize: 0x3C }
+  - { offset: 0x256, size: 0x8, addend: 0x0, symName: _Std_Memory_dealloc_ptr_to_void, symObjAddr: 0xA18, symBinAddr: 0x100008258, symSize: 0x34 }
+  - { offset: 0x26B, size: 0x8, addend: 0x0, symName: _Std_Memory_realloc_ptr_to_void_i32, symObjAddr: 0xA4C, symBinAddr: 0x10000828C, symSize: 0xCC }
+  - { offset: 0x280, size: 0x8, addend: 0x0, symName: _Std_Memory_cleanalloc_i32_i32, symObjAddr: 0xB18, symBinAddr: 0x100008358, symSize: 0xDC }
+  - { offset: 0x295, size: 0x8, addend: 0x0, symName: _Std_Memory_swap_ptr_to_void_ptr_to_void_i32, symObjAddr: 0xBF4, symBinAddr: 0x100008434, symSize: 0x190 }
+...
