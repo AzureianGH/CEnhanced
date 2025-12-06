@@ -1,5 +1,6 @@
 
 #include "ast.h"
+#include "mangle.h"
 #include "module_registry.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -190,7 +191,9 @@ static Token expect(Parser *ps, TokenKind k, const char *what);
 static Node *new_node(NodeKind k);
 static Node *parse_expr(Parser *ps);
 static Node *parse_postfix_suffixes(Parser *ps, Node *expr);
+static Node *parse_lambda_expr(Parser *ps, Token fun_tok);
 static Type *parse_type_spec(Parser *ps);
+static Node *parse_inferred_var_decl(Parser *ps, int expect_semicolon);
 static char *dup_token_text(Token t);
 static int parser_call_type_args_ahead(Parser *ps);
 static Type **parser_parse_call_type_args(Parser *ps, int *out_count);
@@ -788,9 +791,29 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
             fn->is_entrypoint = 1;
             fn->is_preserve = 1;
         }
+        else if (strcmp(attr->name, "Export") == 0)
+        {
+            fn->export_name = 1;
+        }
         else if (strcmp(attr->name, "Preserve") == 0)
         {
             fn->is_preserve = 1;
+        }
+        else if (strcmp(attr->name, "Section") == 0)
+        {
+            if (!attr->value || !*attr->value)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'Section' attribute requires a string literal argument");
+                exit(1);
+            }
+            if (fn->section_name)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "duplicate 'Section' attribute");
+                exit(1);
+            }
+            fn->section_name = xstrdup(attr->value);
         }
         else if (strcmp(attr->name, "ForceInline") == 0)
         {
@@ -812,6 +835,45 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
                           "unknown attribute '%s'", attr->name);
             exit(1);
         }
+    }
+}
+
+static void apply_global_attributes(Parser *ps, Node *decl, struct PendingAttr *attrs, int attr_count)
+{
+    if (!decl || !attrs || attr_count <= 0)
+        return;
+    for (int i = 0; i < attr_count; ++i)
+    {
+        struct PendingAttr *attr = &attrs[i];
+        if (!attr->name)
+            continue;
+        if (strcmp(attr->name, "Section") == 0)
+        {
+            if (!attr->value || !*attr->value)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'Section' attribute requires a string literal argument");
+                exit(1);
+            }
+            if (decl->section_name)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "duplicate 'Section' attribute");
+                exit(1);
+            }
+            decl->section_name = xstrdup(attr->value);
+            continue;
+        }
+
+        if (strcmp(attr->name, "Export") == 0)
+        {
+            decl->export_name = 1;
+            continue;
+        }
+
+        diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                      "attribute '%s' is not supported on global variables", attr->name);
+        exit(1);
     }
 }
 
@@ -1001,39 +1063,6 @@ static char *join_parts_with_dot(char **parts, int count)
             res[pos++] = '.';
     }
     res[pos] = '\0';
-    return res;
-}
-
-static char *module_name_to_prefix(const char *full_name)
-{
-    if (!full_name || !*full_name)
-        return NULL;
-    size_t len = strlen(full_name);
-    char *copy = (char *)xmalloc(len + 1);
-    memcpy(copy, full_name, len + 1);
-    for (size_t i = 0; i < len; ++i)
-    {
-        if (copy[i] == '.')
-            copy[i] = '_';
-    }
-    return copy;
-}
-
-static char *make_module_backend_name(const char *module_full, const char *fn_name)
-{
-    if (!module_full || !*module_full || !fn_name || !*fn_name)
-        return NULL;
-    char *prefix = module_name_to_prefix(module_full);
-    if (!prefix)
-        return NULL;
-    size_t prefix_len = strlen(prefix);
-    size_t fn_len = strlen(fn_name);
-    char *res = (char *)xmalloc(prefix_len + 1 + fn_len + 1);
-    memcpy(res, prefix, prefix_len);
-    res[prefix_len] = '_';
-    memcpy(res + prefix_len + 1, fn_name, fn_len);
-    res[prefix_len + 1 + fn_len] = '\0';
-    free(prefix);
     return res;
 }
 
@@ -1609,6 +1638,7 @@ static int is_type_start(Parser *ps, Token t)
     case TK_KW_CHAR:
     case TK_KW_BOOL:
     case TK_KW_STACK:
+    case TK_KW_ACTION:
         return 1;
     case TK_KW_FUN:
     {
@@ -1901,6 +1931,11 @@ static Type *parse_type_spec(Parser *ps)
             }
             finalize_funptr_signature(ps, func_ty, &after_star);
         }
+        base = type_ptr(func_ty);
+    }
+    else if (b.kind == TK_KW_ACTION)
+    {
+        Type *func_ty = type_func();
         base = type_ptr(func_ty);
     }
     else if (b.kind == TK_IDENT)
@@ -2279,6 +2314,120 @@ static Node *parse_brace_initializer(Parser *ps)
     return list;
 }
 
+static Node *parse_lambda_expr(Parser *ps, Token fun_tok)
+{
+    if (!ps)
+        return NULL;
+
+    Node *lambda = new_node(ND_LAMBDA);
+    lambda->line = fun_tok.line;
+    lambda->col = fun_tok.col;
+    lambda->src = lexer_source(ps->lx);
+
+    expect(ps, TK_LPAREN, "(");
+
+    Type **param_types = NULL;
+    const char **param_names = NULL;
+    unsigned char *param_const_flags = NULL;
+    int param_count = 0;
+    int param_cap = 0;
+    int saw_varargs = 0;
+
+    while (1)
+    {
+        Token next = lexer_peek(ps->lx);
+        if (next.kind == TK_RPAREN)
+            break;
+
+        if (token_is_varargs(next))
+        {
+            if (saw_varargs)
+            {
+                diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                              "varargs ('...') may only appear once in a parameter list");
+                exit(1);
+            }
+            lexer_next(ps->lx);
+            saw_varargs = 1;
+            break;
+        }
+
+        int param_is_const = 0;
+        Token maybe_const = lexer_peek(ps->lx);
+        if (maybe_const.kind == TK_KW_CONSTANT)
+        {
+            lexer_next(ps->lx);
+            param_is_const = 1;
+        }
+
+        Type *pty = parse_type_spec(ps);
+        Token pn = expect(ps, TK_IDENT, "parameter name");
+
+        if (param_count == param_cap)
+        {
+            param_cap = param_cap ? param_cap * 2 : 4;
+            param_types = (Type **)realloc(param_types, sizeof(Type *) * param_cap);
+            param_names = (const char **)realloc(param_names, sizeof(char *) * param_cap);
+            param_const_flags = (unsigned char *)realloc(param_const_flags, sizeof(unsigned char) * param_cap);
+        }
+
+        param_types[param_count] = pty;
+        char *nm = (char *)xmalloc((size_t)pn.length + 1);
+        memcpy(nm, pn.lexeme, (size_t)pn.length);
+        nm[pn.length] = '\0';
+        param_names[param_count] = nm;
+        if (param_const_flags)
+            param_const_flags[param_count] = (unsigned char)param_is_const;
+        parse_trailing_funptr_signature(ps, pty);
+        param_count++;
+
+        Token delim = lexer_peek(ps->lx);
+        if (delim.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        break;
+    }
+
+    if (saw_varargs)
+    {
+        Token after = lexer_peek(ps->lx);
+        if (after.kind != TK_RPAREN)
+        {
+            diag_error_at(lexer_source(ps->lx), after.line, after.col,
+                          "varargs ('...') must be the final parameter");
+            exit(1);
+        }
+        if (param_count == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), fun_tok.line, fun_tok.col,
+                          "variadic lambdas must have at least one explicit parameter before '...'");
+            exit(1);
+        }
+    }
+
+    expect(ps, TK_RPAREN, ")");
+    expect(ps, TK_ARROW, "->");
+
+    Type *ret_type = parse_type_spec(ps);
+
+    const char *prev_fn = ps->current_function_name;
+    ps->current_function_name = "<lambda>";
+    Node *body = parse_block(ps);
+    ps->current_function_name = prev_fn;
+
+    lambda->param_types = param_types;
+    lambda->param_names = param_names;
+    lambda->param_const_flags = param_const_flags;
+    lambda->param_count = param_count;
+    lambda->is_varargs = saw_varargs;
+    lambda->ret_type = ret_type;
+    lambda->body = body;
+
+    return lambda;
+}
+
 static Node *parse_primary(Parser *ps)
 {
     Token pre = lexer_peek(ps->lx);
@@ -2292,6 +2441,8 @@ static Node *parse_primary(Parser *ps)
     }
 
     Token t = lexer_next(ps->lx);
+    if (t.kind == TK_KW_FUN)
+        return parse_lambda_expr(ps, t);
     if (t.kind == TK_KW_IF)
     {
         expect(ps, TK_LPAREN, "(");
@@ -2863,14 +3014,14 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
             e = cs;
             continue;
         }
-        if (p.kind == TK_ACCESS || p.kind == TK_DOT)
+        if (p.kind == TK_ACCESS || p.kind == TK_DOT || p.kind == TK_ARROW)
         {
             if (p.kind == TK_ACCESS && ps->suppress_access_for_match > 0)
                 break;
             Token op = lexer_next(ps->lx);
             Token field = expect(ps, TK_IDENT, "member name");
             // Check for enum scoped constant: EnumType=>Value
-            if (e->kind == ND_VAR)
+            if (op.kind == TK_ACCESS && e->kind == ND_VAR)
             {
                 const char *base_name = e->var_ref;
                 int base_len = (int)strlen(base_name);
@@ -2904,7 +3055,7 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
             memcpy(nm, field.lexeme, (size_t)field.length);
             nm[field.length] = '\0';
             m->field_name = nm;
-            m->is_pointer_deref = (op.kind == TK_ACCESS);
+            m->is_pointer_deref = (op.kind == TK_ACCESS || op.kind == TK_ARROW);
             m->line = field.line;
             m->col = field.col;
             m->src = lexer_source(ps->lx);
@@ -2954,6 +3105,8 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
             call->line = e ? e->line : p.line;
             call->col = e ? e->col : p.col;
             call->src = lexer_source(ps->lx);
+            if (e && e->kind == ND_LAMBDA)
+                call->kind = ND_LAMBDA_CALL;
             e = call;
             pending_type_args = NULL;
             pending_type_arg_count = 0;
@@ -3390,19 +3543,55 @@ static Node *parse_assign(Parser *ps)
 {
     Node *lhs = parse_cond(ps);
     Token p = lexer_peek(ps->lx);
-    if (p.kind == TK_ASSIGN)
+    NodeKind assign_kind = ND_ASSIGN;
+    switch (p.kind)
     {
-        Token op = lexer_next(ps->lx);
-        Node *rhs = parse_expr(ps);
-        Node *as = new_node(ND_ASSIGN);
-        as->lhs = lhs;
-        as->rhs = rhs;
-        as->line = op.line;
-        as->col = op.col;
-        as->src = lexer_source(ps->lx);
-        return as;
+    case TK_ASSIGN:
+        assign_kind = ND_ASSIGN;
+        break;
+    case TK_PLUSEQ:
+        assign_kind = ND_ADD_ASSIGN;
+        break;
+    case TK_MINUSEQ:
+        assign_kind = ND_SUB_ASSIGN;
+        break;
+    case TK_STAREQ:
+        assign_kind = ND_MUL_ASSIGN;
+        break;
+    case TK_SLASHEQ:
+        assign_kind = ND_DIV_ASSIGN;
+        break;
+    case TK_PERCENTEQ:
+        assign_kind = ND_MOD_ASSIGN;
+        break;
+    case TK_ANDEQ:
+        assign_kind = ND_BITAND_ASSIGN;
+        break;
+    case TK_OREQ:
+        assign_kind = ND_BITOR_ASSIGN;
+        break;
+    case TK_XOREQ:
+        assign_kind = ND_BITXOR_ASSIGN;
+        break;
+    case TK_SHLEQ:
+        assign_kind = ND_SHL_ASSIGN;
+        break;
+    case TK_SHREQ:
+        assign_kind = ND_SHR_ASSIGN;
+        break;
+    default:
+        return lhs;
     }
-    return lhs;
+
+    Token op = lexer_next(ps->lx);
+    Node *rhs = parse_expr(ps);
+    Node *as = new_node(assign_kind);
+    as->lhs = lhs;
+    as->rhs = rhs;
+    as->line = op.line;
+    as->col = op.col;
+    as->src = lexer_source(ps->lx);
+    return as;
 }
 
 static Node *parse_expr(Parser *ps) { return parse_assign(ps); }
@@ -3479,6 +3668,39 @@ static Node *parse_initializer(Parser *ps)
     else if (count == 1 && !designators[0] && elems[0]->kind == ND_INT && elems[0]->int_val == 0)
         init->init.is_zero = 1;
     return init;
+}
+
+static Node *parse_inferred_var_decl(Parser *ps, int expect_semicolon)
+{
+    Token kw = expect(ps, TK_KW_VAR, "var");
+    Token name = expect(ps, TK_IDENT, "identifier");
+
+    Node *decl = new_node(ND_VAR_DECL);
+    char *nm = (char *)xmalloc((size_t)name.length + 1);
+    memcpy(nm, name.lexeme, (size_t)name.length);
+    nm[name.length] = '\0';
+    decl->var_name = nm;
+    decl->var_is_const = 0;
+    decl->var_is_array = 0;
+    decl->var_is_function = 0;
+    decl->var_is_inferred = 1;
+    decl->line = name.line;
+    decl->col = name.col;
+    decl->src = lexer_source(ps->lx);
+
+    Token assign = lexer_peek(ps->lx);
+    if (assign.kind != TK_ASSIGN)
+    {
+        diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                      "'var' declarations require an initializer");
+        exit(1);
+    }
+    lexer_next(ps->lx); // consume '='
+    decl->rhs = parse_initializer(ps);
+
+    if (expect_semicolon)
+        expect(ps, TK_SEMI, ";");
+    return decl;
 }
 
 // (removed duplicate parse_unary definition)
@@ -3570,6 +3792,10 @@ static Node *parse_stmt(Parser *ps)
         r->col = t.col;
         r->src = lexer_source(ps->lx);
         return r;
+    }
+    if (t.kind == TK_KW_VAR)
+    {
+        return parse_inferred_var_decl(ps, 1);
     }
     if (t.kind == TK_KW_CONSTANT || is_type_start(ps, t))
     {
@@ -3899,6 +4125,12 @@ static Node *parse_for(Parser *ps)
             expect(ps, TK_SEMI, ";");
             init = decl;
         }
+        else if (next.kind == TK_KW_VAR)
+        {
+            Node *decl = parse_inferred_var_decl(ps, 0);
+            expect(ps, TK_SEMI, ";");
+            init = decl;
+        }
         else
         {
             Node *e = parse_expr(ps);
@@ -4070,6 +4302,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
         param_names[param_count] = nm;
         if (param_const_flags)
             param_const_flags[param_count] = (unsigned char)param_is_const;
+        parse_trailing_funptr_signature(ps, pty);
         param_count++;
 
         Token delim = lexer_peek(ps->lx);
@@ -4219,7 +4452,9 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
                     param_types =
                         (Type **)realloc(param_types, sizeof(Type *) * param_cap);
                 }
-                param_types[param_count++] = pty;
+                param_types[param_count] = pty;
+                parse_trailing_funptr_signature(ps, pty);
+                param_count++;
                 Token maybe_name = lexer_peek(ps->lx);
                 if (maybe_name.kind == TK_IDENT && !token_is_varargs(maybe_name) &&
                     !is_type_start(ps, maybe_name))
@@ -4335,7 +4570,9 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
                 param_types =
                     (Type **)realloc(param_types, sizeof(Type *) * param_cap);
             }
-            param_types[param_count++] = pty;
+            param_types[param_count] = pty;
+            parse_trailing_funptr_signature(ps, pty);
+            param_count++;
             Token maybe_name = lexer_peek(ps->lx);
             if (maybe_name.kind == TK_IDENT && !token_is_varargs(maybe_name) &&
                 !is_type_start(ps, maybe_name))
@@ -4715,12 +4952,6 @@ Node *parse_unit(Parser *ps)
                 bring_block_done = 1;
             if (extend_seen)
                 extend_block_done = 1;
-            if (attr_count > 0)
-            {
-                diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
-                              "attributes are not supported on global variable declarations");
-                exit(1);
-            }
             if (leading_noreturn)
             {
                 diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
@@ -4754,6 +4985,13 @@ Node *parse_unit(Parser *ps)
             decl->line = name.line;
             decl->col = name.col;
             decl->src = lexer_source(ps->lx);
+
+            if (attr_count > 0)
+            {
+                apply_global_attributes(ps, decl, attrs, attr_count);
+                clear_pending_attrs(attrs, attr_count);
+                attr_count = 0;
+            }
 
             if (!global_seen)
             {
@@ -4850,7 +5088,7 @@ Node *parse_unit(Parser *ps)
         u->import_count = ps->import_count;
     }
 
-    if (ps->module_full_name && fn_count > 0)
+    if (fn_count > 0)
     {
         for (int i = 0; i < decl_count; ++i)
         {
@@ -4859,7 +5097,11 @@ Node *parse_unit(Parser *ps)
                 continue;
             if (fn->metadata.backend_name || fn->is_entrypoint)
                 continue;
-            char *backend = make_module_backend_name(ps->module_full_name, fn->name);
+            char *backend = NULL;
+            if (ps->module_full_name && *ps->module_full_name)
+                backend = module_backend_name(ps->module_full_name, fn->name, fn);
+            if (!backend)
+                backend = append_param_signature(fn->name, fn);
             if (backend)
                 fn->metadata.backend_name = backend;
         }

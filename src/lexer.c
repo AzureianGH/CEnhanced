@@ -456,6 +456,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_STRUCT;
     else if (len == 6 && strncmp(p, "extend", 6) == 0)
         k = TK_KW_EXTEND;
+    else if (len == 6 && strncmp(p, "action", 6) == 0)
+        k = TK_KW_ACTION;
     else if (len == 4 && strncmp(p, "from", 4) == 0)
         k = TK_KW_FROM;
     else if (len == 2 && strncmp(p, "i8", 2) == 0)
@@ -488,6 +490,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_CHAR;
     else if (len == 4 && strncmp(p, "bool", 4) == 0)
         k = TK_KW_BOOL;
+    else if (len == 3 && strncmp(p, "var", 3) == 0)
+        k = TK_KW_VAR;
     else if (len == 4 && strncmp(p, "null", 4) == 0)
         k = TK_KW_NULL;
     else if (len == 8 && strncmp(p, "noreturn", 8) == 0)
@@ -653,39 +657,75 @@ Token lexer_next(Lexer *lx)
     }
     if (c == '+')
     {
-        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '+')
+        if (lx->idx + 1 < lx->src.length)
         {
-            getc2(lx);
-            getc2(lx);
-            return make_tok(lx, TK_PLUSPLUS, lx->src.src + lx->idx - 2, 2);
+            char n = lx->src.src[lx->idx + 1];
+            if (n == '+')
+            {
+                getc2(lx);
+                getc2(lx);
+                return make_tok(lx, TK_PLUSPLUS, lx->src.src + lx->idx - 2, 2);
+            }
+            if (n == '=')
+            {
+                getc2(lx);
+                getc2(lx);
+                return make_tok(lx, TK_PLUSEQ, lx->src.src + lx->idx - 2, 2);
+            }
         }
         getc2(lx);
         return make_tok(lx, TK_PLUS, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '|')
     {
-        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '|')
+        if (lx->idx + 1 < lx->src.length)
         {
-            getc2(lx);
-            getc2(lx);
-            return make_tok(lx, TK_OROR, lx->src.src + lx->idx - 2, 2);
+            char n = lx->src.src[lx->idx + 1];
+            if (n == '|')
+            {
+                getc2(lx);
+                getc2(lx);
+                return make_tok(lx, TK_OROR, lx->src.src + lx->idx - 2, 2);
+            }
+            if (n == '=')
+            {
+                getc2(lx);
+                getc2(lx);
+                return make_tok(lx, TK_OREQ, lx->src.src + lx->idx - 2, 2);
+            }
         }
         getc2(lx);
         return make_tok(lx, TK_PIPE, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '&')
     {
-        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '&')
+        if (lx->idx + 1 < lx->src.length)
         {
-            getc2(lx);
-            getc2(lx);
-            return make_tok(lx, TK_ANDAND, lx->src.src + lx->idx - 2, 2);
+            char n = lx->src.src[lx->idx + 1];
+            if (n == '&')
+            {
+                getc2(lx);
+                getc2(lx);
+                return make_tok(lx, TK_ANDAND, lx->src.src + lx->idx - 2, 2);
+            }
+            if (n == '=')
+            {
+                getc2(lx);
+                getc2(lx);
+                return make_tok(lx, TK_ANDEQ, lx->src.src + lx->idx - 2, 2);
+            }
         }
         getc2(lx);
         return make_tok(lx, TK_AMP, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '^')
     {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '=')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_XOREQ, lx->src.src + lx->idx - 2, 2);
+        }
         getc2(lx);
         return make_tok(lx, TK_CARET, lx->src.src + lx->idx - 1, 1);
     }
@@ -696,17 +736,35 @@ Token lexer_next(Lexer *lx)
     }
     if (c == '*')
     {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '=')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_STAREQ, lx->src.src + lx->idx - 2, 2);
+        }
         getc2(lx);
         return make_tok(lx, TK_STAR, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '/')
     {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '=')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_SLASHEQ, lx->src.src + lx->idx - 2, 2);
+        }
         // we've already handled '//' comments above; single '/' is division
         getc2(lx);
         return make_tok(lx, TK_SLASH, lx->src.src + lx->idx - 1, 1);
     }
     if (c == '%')
     {
+        if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '=')
+        {
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_PERCENTEQ, lx->src.src + lx->idx - 2, 2);
+        }
         getc2(lx);
         return make_tok(lx, TK_PERCENT, lx->src.src + lx->idx - 1, 1);
     }
@@ -725,6 +783,12 @@ Token lexer_next(Lexer *lx)
                 getc2(lx);
                 getc2(lx);
                 return make_tok(lx, TK_MINUSMINUS, lx->src.src + lx->idx - 2, 2);
+            }
+            if (lx->src.src[lx->idx + 1] == '=')
+            {
+                getc2(lx);
+                getc2(lx);
+                return make_tok(lx, TK_MINUSEQ, lx->src.src + lx->idx - 2, 2);
             }
         }
         getc2(lx);
@@ -754,6 +818,13 @@ Token lexer_next(Lexer *lx)
             char n = lx->src.src[lx->idx + 1];
             if (n == '<')
             {
+                if (lx->idx + 2 < lx->src.length && lx->src.src[lx->idx + 2] == '=')
+                {
+                    getc2(lx);
+                    getc2(lx);
+                    getc2(lx);
+                    return make_tok(lx, TK_SHLEQ, lx->src.src + lx->idx - 3, 3);
+                }
                 getc2(lx);
                 getc2(lx);
                 return make_tok(lx, TK_SHL, lx->src.src + lx->idx - 2, 2);
@@ -775,6 +846,13 @@ Token lexer_next(Lexer *lx)
             char n = lx->src.src[lx->idx + 1];
             if (n == '>')
             {
+                if (lx->idx + 2 < lx->src.length && lx->src.src[lx->idx + 2] == '=')
+                {
+                    getc2(lx);
+                    getc2(lx);
+                    getc2(lx);
+                    return make_tok(lx, TK_SHREQ, lx->src.src + lx->idx - 3, 3);
+                }
                 getc2(lx);
                 getc2(lx);
                 return make_tok(lx, TK_SHR, lx->src.src + lx->idx - 2, 2);

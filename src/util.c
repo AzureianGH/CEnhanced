@@ -328,6 +328,26 @@ const char *node_kind_name(NodeKind kind)
         return "variable declaration";
     case ND_ASSIGN:
         return "assignment";
+    case ND_ADD_ASSIGN:
+        return "+= expression";
+    case ND_SUB_ASSIGN:
+        return "-= expression";
+    case ND_MUL_ASSIGN:
+        return "*= expression";
+    case ND_DIV_ASSIGN:
+        return "/= expression";
+    case ND_MOD_ASSIGN:
+        return "%= expression";
+    case ND_BITAND_ASSIGN:
+        return "&= expression";
+    case ND_BITOR_ASSIGN:
+        return "|= expression";
+    case ND_BITXOR_ASSIGN:
+        return "^= expression";
+    case ND_SHL_ASSIGN:
+        return "<<= expression";
+    case ND_SHR_ASSIGN:
+        return ">>= expression";
     case ND_IF:
         return "if statement";
     case ND_INDEX:
@@ -406,6 +426,12 @@ const char *node_kind_name(NodeKind kind)
         return "switch statement";
     case ND_MATCH:
         return "match expression";
+    case ND_LAMBDA:
+        return "lambda expression";
+    case ND_SEQ:
+        return "sequence expression";
+    case ND_LAMBDA_CALL:
+        return "lambda call";
     default:
         return "unknown expression";
     }

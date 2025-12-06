@@ -360,6 +360,7 @@ typedef struct
 {
     StringList lines;
     StringList debug_files;
+    bool emit_debug;
 } CcbModule;
 
 typedef struct
@@ -385,6 +386,7 @@ typedef struct
 {
     CcbModule *module;
     const Node *fn;
+    StringList prologue;
     StringList body;
     CCValueType ret_type;
     CcbLocal *locals;
@@ -405,6 +407,15 @@ static size_t ccb_value_type_size(CCValueType ty);
 static bool ccb_value_type_is_integer(CCValueType ty);
 static bool ccb_value_type_is_float(CCValueType ty);
 static bool ccb_value_type_is_signed(CCValueType ty);
+static bool ccb_eval_const_int64(const Node *expr, int64_t *out_value);
+static bool ccb_eval_const_float64(const Node *expr, double *out_value);
+static bool ccb_store_scalar_bytes(const Type *elem_type, const Node *expr, uint8_t *dst, size_t dst_size);
+static bool ccb_store_constant_value(const Type *type, const Node *expr, uint8_t *dst, size_t dst_size);
+static bool ccb_store_struct_bytes(const Type *struct_type, const Node *expr, uint8_t *dst, size_t dst_size);
+static bool ccb_store_array_bytes(const Type *array_type, const Node *expr, uint8_t *dst, size_t dst_size);
+static bool ccb_flatten_array_initializer(const Type *array_type, const Node *init, uint8_t **out_bytes, size_t *out_size);
+static bool ccb_flatten_struct_initializer(const Type *struct_type, const Node *init, uint8_t **out_bytes, size_t *out_size);
+static char *ccb_encode_bytes_literal(const uint8_t *data, size_t len);
 static CcbLocal *ccb_local_add(CcbFunctionBuilder *fb, const char *name, Type *type, bool address_only, bool is_param);
 static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr);
 static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr);
@@ -425,8 +436,13 @@ static int ccb_emit_array_initializer(CcbFunctionBuilder *fb, const Node *var_de
 static bool type_is_address_only(const Type *ty);
 static int ccb_emit_pointer_offset(CcbFunctionBuilder *fb, int offset, const Node *node);
 static int ccb_emit_struct_copy(CcbFunctionBuilder *fb, const Type *struct_type, CcbLocal *dst_ptr, CcbLocal *src_ptr);
+static bool ccb_append_load_local(StringList *list, const CcbLocal *local);
+static bool ccb_append_store_local(StringList *list, const CcbLocal *local);
+static bool ccb_rewrite_param_loads(StringList *list, int param_index, int local_index);
 static bool ccb_emit_load_local(CcbFunctionBuilder *fb, const CcbLocal *local);
 static bool ccb_emit_store_local(CcbFunctionBuilder *fb, const CcbLocal *local);
+static bool ccb_emit_load_global(StringList *body, const char *name);
+static bool ccb_emit_store_global(StringList *body, const char *name);
 static int ccb_promote_param_to_local(CcbFunctionBuilder *fb, const Node *site, CcbLocal **inout_local);
 static void ccb_scope_enter(CcbFunctionBuilder *fb);
 static void ccb_scope_leave(CcbFunctionBuilder *fb);
@@ -447,6 +463,7 @@ static void ccb_module_init(CcbModule *mod)
         return;
     string_list_init(&mod->lines);
     string_list_init(&mod->debug_files);
+    mod->emit_debug = false;
 }
 
 static void ccb_module_free(CcbModule *mod)
@@ -455,6 +472,7 @@ static void ccb_module_free(CcbModule *mod)
         return;
     string_list_free(&mod->lines);
     string_list_free(&mod->debug_files);
+    mod->emit_debug = false;
 }
 
 static bool ccb_module_append_line(CcbModule *mod, const char *line)
@@ -564,6 +582,21 @@ static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym)
     return ok;
 }
 
+static const char *ccb_effective_global_name(const Node *decl, const char *module_prefix)
+{
+    if (!decl)
+        return NULL;
+
+    if (decl->metadata.backend_name && decl->metadata.backend_name[0])
+        return decl->metadata.backend_name;
+
+    if (decl->export_name)
+        return decl->var_name;
+
+    (void)module_prefix;
+    return decl->var_name;
+}
+
 static int ccb_emit_symbol_list(CcbModule *mod, const Symbol *syms, int count, StringList *emitted, int *any)
 {
     if (!mod || !syms || count <= 0)
@@ -629,15 +662,66 @@ static int ccb_module_emit_externs(CcbModule *mod, const CodegenOptions *opts)
     return 0;
 }
 
-static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, const Node *fn)
+static int ccb_module_emit_imported_globals(CcbModule *mod, const CodegenOptions *opts)
+{
+    if (!mod || !opts || !opts->imported_globals || opts->imported_global_count <= 0)
+        return 0;
+
+    StringList emitted;
+    string_list_init(&emitted);
+    int any = 0;
+
+    for (int i = 0; i < opts->imported_global_count; ++i)
+    {
+        const Symbol *sym = &opts->imported_globals[i];
+        if (!sym || sym->kind != SYM_GLOBAL || !sym->is_extern)
+            continue;
+        const char *name = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
+        if (!name || !*name)
+            continue;
+        if (string_list_contains(&emitted, name))
+            continue;
+        CCValueType cc_ty = map_type_to_cc(sym->var_type);
+        if (cc_ty == CC_TYPE_VOID)
+        {
+            fprintf(stderr, "codegen: imported global '%s' has unsupported type\n", name);
+            string_list_free(&emitted);
+            return 1;
+        }
+        const char *const_suffix = sym->is_const ? " const" : "";
+        if (!ccb_module_appendf(mod, ".global %s type=%s extern%s", name, cc_type_name(cc_ty), const_suffix))
+        {
+            string_list_free(&emitted);
+            return 1;
+        }
+        if (!string_list_append(&emitted, name))
+        {
+            string_list_free(&emitted);
+            return 1;
+        }
+        any = 1;
+    }
+
+    string_list_free(&emitted);
+    if (any)
+    {
+        if (!ccb_module_append_line(mod, ""))
+            return 1;
+    }
+    return 0;
+}
+
+static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, const Node *fn, bool enable_debug)
 {
     if (!fb)
         return;
     fb->module = mod;
     fb->fn = fn;
     fb->ret_type = map_type_to_cc(fn && fn->ret_type ? fn->ret_type : NULL);
+    string_list_init(&fb->prologue);
     string_list_init(&fb->body);
-    string_list_enable_debug_tracking(&fb->body);
+    if (enable_debug)
+        string_list_enable_debug_tracking(&fb->body);
     fb->locals = NULL;
     fb->locals_count = 0;
     fb->locals_capacity = 0;
@@ -654,6 +738,7 @@ static void ccb_function_builder_free(CcbFunctionBuilder *fb)
 {
     if (!fb)
         return;
+    string_list_free(&fb->prologue);
     string_list_free(&fb->body);
     free(fb->locals);
     fb->locals = NULL;
@@ -691,7 +776,7 @@ static char *ccb_dup_absolute_path(const char *path)
 
 static uint32_t ccb_module_register_debug_file(CcbModule *mod, const SourceBuffer *src)
 {
-    if (!mod || !src || !src->filename || src->filename[0] == '\0')
+    if (!mod || !mod->emit_debug || !src || !src->filename || src->filename[0] == '\0')
         return 0;
     char *absolute = ccb_dup_absolute_path(src->filename);
     const char *path = absolute ? absolute : src->filename;
@@ -758,29 +843,37 @@ static int ccb_append_function_body(CcbModule *mod, const CcbFunctionBuilder *fb
 {
     if (!mod || !fb)
         return 1;
+    for (size_t i = 0; i < fb->prologue.count; ++i)
+    {
+        if (!ccb_module_append_line(mod, fb->prologue.items[i]))
+            return 1;
+    }
     uint32_t current_file = 0;
     uint32_t current_line = 0;
     uint32_t current_column = 0;
 
     for (size_t i = 0; i < fb->body.count; ++i)
     {
-        uint32_t file = string_list_get_debug_file(&fb->body, i);
-        uint32_t line = string_list_get_debug_line(&fb->body, i);
-        uint32_t column = string_list_get_debug_column(&fb->body, i);
+        if (mod->emit_debug)
+        {
+            uint32_t file = string_list_get_debug_file(&fb->body, i);
+            uint32_t line = string_list_get_debug_line(&fb->body, i);
+            uint32_t column = string_list_get_debug_column(&fb->body, i);
 
-        if (file != 0 && (file != current_file || line != current_line || column != current_column))
-        {
-            if (!ccb_module_appendf(mod, "  .loc %u %u %u", file, line, column))
-                return 1;
-            current_file = file;
-            current_line = line;
-            current_column = column;
-        }
-        else if (file == 0)
-        {
-            current_file = 0;
-            current_line = 0;
-            current_column = 0;
+            if (file != 0 && (file != current_file || line != current_line || column != current_column))
+            {
+                if (!ccb_module_appendf(mod, "  .loc %u %u %u", file, line, column))
+                    return 1;
+                current_file = file;
+                current_line = line;
+                current_column = column;
+            }
+            else if (file == 0)
+            {
+                current_file = 0;
+                current_line = 0;
+                current_column = 0;
+            }
         }
 
         if (!ccb_module_append_line(mod, fb->body.items[i]))
@@ -1585,16 +1678,23 @@ static int ccb_promote_param_to_local(CcbFunctionBuilder *fb, const Node *site, 
     shadow->value_type = param->value_type;
     shadow->scope_depth = param->scope_depth;
 
-    if (!ccb_emit_load_local(fb, param))
+    if (!ccb_append_load_local(&fb->prologue, param))
     {
         diag_error_at(site ? site->src : NULL, site ? site->line : 0, site ? site->col : 0,
                       "failed to read parameter '%s'", param_name);
         return 1;
     }
-    if (!ccb_emit_store_local(fb, shadow))
+    if (!ccb_append_store_local(&fb->prologue, shadow))
     {
         diag_error_at(site ? site->src : NULL, site ? site->line : 0, site ? site->col : 0,
                       "failed to copy parameter '%s' into local storage", param_name);
+        return 1;
+    }
+
+    if (!ccb_rewrite_param_loads(&fb->body, param->index, shadow->index))
+    {
+        diag_error_at(site ? site->src : NULL, site ? site->line : 0, site ? site->col : 0,
+                      "failed to update prior reads of parameter '%s'", param_name);
         return 1;
     }
 
@@ -1717,6 +1817,19 @@ static CCValueType ccb_type_for_expr(const Node *expr)
         return CC_TYPE_I32;
     case ND_ASSIGN:
         return ccb_type_for_expr(expr->rhs);
+    case ND_ADD_ASSIGN:
+    case ND_SUB_ASSIGN:
+    case ND_MUL_ASSIGN:
+    case ND_DIV_ASSIGN:
+    case ND_MOD_ASSIGN:
+    case ND_BITAND_ASSIGN:
+    case ND_BITOR_ASSIGN:
+    case ND_BITXOR_ASSIGN:
+    case ND_SHL_ASSIGN:
+    case ND_SHR_ASSIGN:
+        if (expr->lhs)
+            return ccb_type_for_expr(expr->lhs);
+        return ccb_type_for_expr(expr->rhs);
     case ND_CALL:
         if (expr->type)
             return map_type_to_cc(expr->type);
@@ -1724,6 +1837,12 @@ static CCValueType ccb_type_for_expr(const Node *expr)
     case ND_CAST:
         if (expr->type)
             return map_type_to_cc(expr->type);
+        if (expr->lhs)
+            return ccb_type_for_expr(expr->lhs);
+        return CC_TYPE_VOID;
+    case ND_SEQ:
+        if (expr->rhs)
+            return ccb_type_for_expr(expr->rhs);
         if (expr->lhs)
             return ccb_type_for_expr(expr->lhs);
         return CC_TYPE_VOID;
@@ -1961,7 +2080,7 @@ static unsigned char *ccb_decode_c_escapes(const char *s, int len, int *out_len)
                 uint32_t v = (ccb_hex_value((unsigned char)s[i]) << 12) |
                              (ccb_hex_value((unsigned char)s[i + 1]) << 8) |
                              (ccb_hex_value((unsigned char)s[i + 2]) << 4) |
-                              ccb_hex_value((unsigned char)s[i + 3]);
+                             ccb_hex_value((unsigned char)s[i + 3]);
                 i += 4;
                 unsigned char tmp[4];
                 int n = ccb_utf8_encode(v, tmp);
@@ -2775,6 +2894,411 @@ static int ccb_emit_member_address(CcbFunctionBuilder *fb, const Node *expr, CCV
     return 0;
 }
 
+static const char *ccb_compound_op_name(NodeKind kind)
+{
+    switch (kind)
+    {
+    case ND_ADD_ASSIGN:
+        return "add";
+    case ND_SUB_ASSIGN:
+        return "sub";
+    case ND_MUL_ASSIGN:
+        return "mul";
+    case ND_DIV_ASSIGN:
+        return "div";
+    case ND_MOD_ASSIGN:
+        return "mod";
+    case ND_BITAND_ASSIGN:
+        return "and";
+    case ND_BITOR_ASSIGN:
+        return "or";
+    case ND_BITXOR_ASSIGN:
+        return "xor";
+    case ND_SHL_ASSIGN:
+        return "shl";
+    case ND_SHR_ASSIGN:
+        return "shr";
+    default:
+        return "add";
+    }
+}
+
+static int ccb_emit_compound_binop_instr(CcbFunctionBuilder *fb, const Node *expr, CCValueType value_ty)
+{
+    if (!fb || !expr)
+        return 1;
+    const char *op = ccb_compound_op_name(expr->kind);
+    bool is_div_or_mod = (expr->kind == ND_DIV_ASSIGN) || (expr->kind == ND_MOD_ASSIGN);
+    bool is_shift_right = (expr->kind == ND_SHR_ASSIGN);
+    bool is_int = ccb_value_type_is_integer(value_ty);
+    bool use_unsigned = (is_div_or_mod || is_shift_right) && is_int && !ccb_value_type_is_signed(value_ty);
+    if (use_unsigned)
+    {
+        if (!string_list_appendf(&fb->body, "  binop %s %s unsigned", op, cc_type_name(value_ty)))
+            return 1;
+    }
+    else
+    {
+        if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(value_ty)))
+            return 1;
+    }
+    return 0;
+}
+
+static int ccb_compound_convert_rhs(CcbFunctionBuilder *fb, const Node *rhs, CCValueType desired_ty)
+{
+    if (!fb || !rhs)
+        return 1;
+    CCValueType rhs_ty = ccb_type_for_expr(rhs);
+    if (rhs_ty == CC_TYPE_INVALID)
+        rhs_ty = desired_ty;
+    if (rhs_ty == desired_ty)
+        return 0;
+    return ccb_emit_convert_between(fb, rhs_ty, desired_ty, rhs);
+}
+
+static int ccb_emit_compound_assign_via_pointer(CcbFunctionBuilder *fb, const Node *expr, CcbLocal *addr_local, CCValueType value_ty, Type *value_type)
+{
+    if (!fb || !expr || !addr_local)
+        return 1;
+
+    ptrdiff_t addr_slot = addr_local ? (ptrdiff_t)(addr_local - fb->locals) : -1;
+
+    if (!ccb_emit_load_local(fb, addr_local))
+        return 1;
+    if (!ccb_emit_load_indirect(&fb->body, value_ty))
+        return 1;
+
+    CcbLocal *lhs_tmp = ccb_local_add(fb, NULL, value_type, false, false);
+    if (!lhs_tmp)
+        return 1;
+    ptrdiff_t lhs_slot = lhs_tmp ? (ptrdiff_t)(lhs_tmp - fb->locals) : -1;
+    if (!ccb_emit_store_local(fb, lhs_tmp))
+        return 1;
+
+    if (ccb_emit_expr_basic(fb, expr->rhs))
+        return 1;
+    if (ccb_compound_convert_rhs(fb, expr->rhs, value_ty))
+        return 1;
+
+    CcbLocal *rhs_tmp = ccb_local_add(fb, NULL, value_type, false, false);
+    if (!rhs_tmp)
+        return 1;
+    ptrdiff_t rhs_slot = rhs_tmp ? (ptrdiff_t)(rhs_tmp - fb->locals) : -1;
+    if (!ccb_emit_store_local(fb, rhs_tmp))
+        return 1;
+
+    if (addr_slot >= 0)
+    {
+        addr_local = ccb_local_from_slot(fb, addr_slot);
+        if (!addr_local)
+            return 1;
+    }
+    if (lhs_slot >= 0)
+    {
+        lhs_tmp = ccb_local_from_slot(fb, lhs_slot);
+        if (!lhs_tmp)
+            return 1;
+    }
+    if (rhs_slot >= 0)
+    {
+        rhs_tmp = ccb_local_from_slot(fb, rhs_slot);
+        if (!rhs_tmp)
+            return 1;
+    }
+
+    if (!ccb_emit_load_local(fb, lhs_tmp))
+        return 1;
+    if (!ccb_emit_load_local(fb, rhs_tmp))
+        return 1;
+    if (ccb_emit_compound_binop_instr(fb, expr, value_ty))
+        return 1;
+
+    if (!ccb_emit_store_local(fb, lhs_tmp))
+        return 1;
+    if (!ccb_emit_load_local(fb, addr_local))
+        return 1;
+    if (!ccb_emit_load_local(fb, lhs_tmp))
+        return 1;
+    if (!ccb_emit_store_indirect(&fb->body, value_ty))
+        return 1;
+    if (!ccb_emit_load_local(fb, lhs_tmp))
+        return 1;
+
+    return 0;
+}
+
+static int ccb_emit_compound_assign_local(CcbFunctionBuilder *fb, const Node *expr, const Node *target, CcbLocal *local)
+{
+    if (!fb || !expr || !target || !local)
+        return 1;
+
+    if (local->is_param)
+    {
+        if (ccb_promote_param_to_local(fb, target, &local))
+            return 1;
+    }
+
+    if (local->is_address_only || type_is_address_only(local->type))
+    {
+        diag_error_at(target->src, target->line, target->col,
+                      "compound assignment not supported on aggregate locals");
+        return 1;
+    }
+
+    ptrdiff_t local_slot = local ? (ptrdiff_t)(local - fb->locals) : -1;
+
+    CCValueType value_ty = ccb_type_for_expr(expr);
+    if (value_ty == CC_TYPE_INVALID)
+        value_ty = local->value_type;
+
+    Type *local_type = local->type ? local->type : (Type *)expr->type;
+
+    CcbLocal *lhs_tmp = ccb_local_add(fb, NULL, local_type, false, false);
+    if (!lhs_tmp)
+        return 1;
+    ptrdiff_t lhs_slot = lhs_tmp ? (ptrdiff_t)(lhs_tmp - fb->locals) : -1;
+
+    if (local_slot >= 0)
+    {
+        local = ccb_local_from_slot(fb, local_slot);
+        if (!local)
+            return 1;
+    }
+    if (lhs_slot >= 0)
+    {
+        lhs_tmp = ccb_local_from_slot(fb, lhs_slot);
+        if (!lhs_tmp)
+            return 1;
+    }
+
+    if (!ccb_emit_load_local(fb, local))
+        return 1;
+    if (!ccb_emit_store_local(fb, lhs_tmp))
+        return 1;
+
+    if (ccb_emit_expr_basic(fb, expr->rhs))
+        return 1;
+    if (ccb_compound_convert_rhs(fb, expr->rhs, value_ty))
+        return 1;
+
+    CcbLocal *rhs_tmp = ccb_local_add(fb, NULL, local_type, false, false);
+    if (!rhs_tmp)
+        return 1;
+    ptrdiff_t rhs_slot = rhs_tmp ? (ptrdiff_t)(rhs_tmp - fb->locals) : -1;
+
+    if (local_slot >= 0)
+    {
+        local = ccb_local_from_slot(fb, local_slot);
+        if (!local)
+            return 1;
+    }
+    if (lhs_slot >= 0)
+    {
+        lhs_tmp = ccb_local_from_slot(fb, lhs_slot);
+        if (!lhs_tmp)
+            return 1;
+    }
+    if (rhs_slot >= 0)
+    {
+        rhs_tmp = ccb_local_from_slot(fb, rhs_slot);
+        if (!rhs_tmp)
+            return 1;
+    }
+
+    if (!ccb_emit_store_local(fb, rhs_tmp))
+        return 1;
+
+    if (!ccb_emit_load_local(fb, lhs_tmp))
+        return 1;
+    if (!ccb_emit_load_local(fb, rhs_tmp))
+        return 1;
+    if (ccb_emit_compound_binop_instr(fb, expr, value_ty))
+        return 1;
+
+    if (!ccb_emit_store_local(fb, local))
+        return 1;
+    if (!ccb_emit_load_local(fb, local))
+        return 1;
+
+    return 0;
+}
+
+static int ccb_emit_compound_assign_global(CcbFunctionBuilder *fb, const Node *expr, const Node *target)
+{
+    if (!fb || !expr || !target || !target->var_ref)
+        return 1;
+
+    CCValueType value_ty = ccb_type_for_expr(expr);
+    Type *target_type = target->type ? target->type : target->var_type;
+    if (type_is_address_only(target_type))
+    {
+        diag_error_at(target->src, target->line, target->col,
+                      "compound assignment not supported on aggregate globals");
+        return 1;
+    }
+    if (value_ty == CC_TYPE_INVALID)
+        value_ty = map_type_to_cc(target_type);
+
+    CcbLocal *lhs_tmp = ccb_local_add(fb, NULL, target_type, false, false);
+    if (!lhs_tmp)
+        return 1;
+    ptrdiff_t lhs_slot = lhs_tmp ? (ptrdiff_t)(lhs_tmp - fb->locals) : -1;
+
+    if (!ccb_emit_load_global(&fb->body, target->var_ref))
+        return 1;
+    if (lhs_slot >= 0)
+    {
+        lhs_tmp = ccb_local_from_slot(fb, lhs_slot);
+        if (!lhs_tmp)
+            return 1;
+    }
+    if (!ccb_emit_store_local(fb, lhs_tmp))
+        return 1;
+
+    if (ccb_emit_expr_basic(fb, expr->rhs))
+        return 1;
+    if (ccb_compound_convert_rhs(fb, expr->rhs, value_ty))
+        return 1;
+
+    CcbLocal *rhs_tmp = ccb_local_add(fb, NULL, target_type, false, false);
+    if (!rhs_tmp)
+        return 1;
+    ptrdiff_t rhs_slot = rhs_tmp ? (ptrdiff_t)(rhs_tmp - fb->locals) : -1;
+
+    if (lhs_slot >= 0)
+    {
+        lhs_tmp = ccb_local_from_slot(fb, lhs_slot);
+        if (!lhs_tmp)
+            return 1;
+    }
+    if (rhs_slot >= 0)
+    {
+        rhs_tmp = ccb_local_from_slot(fb, rhs_slot);
+        if (!rhs_tmp)
+            return 1;
+    }
+
+    if (!ccb_emit_store_local(fb, rhs_tmp))
+        return 1;
+
+    if (!ccb_emit_load_local(fb, lhs_tmp))
+        return 1;
+    if (!ccb_emit_load_local(fb, rhs_tmp))
+        return 1;
+    if (ccb_emit_compound_binop_instr(fb, expr, value_ty))
+        return 1;
+
+    if (!ccb_emit_store_global(&fb->body, target->var_ref))
+        return 1;
+    if (!ccb_emit_load_global(&fb->body, target->var_ref))
+        return 1;
+
+    return 0;
+}
+
+static int ccb_emit_compound_assign(CcbFunctionBuilder *fb, const Node *expr)
+{
+    if (!fb || !expr || !expr->lhs || !expr->rhs)
+    {
+        diag_error_at(expr ? expr->src : NULL, expr ? expr->line : 0, expr ? expr->col : 0,
+                      "compound assignment missing operand");
+        return 1;
+    }
+
+    const Node *target = expr->lhs;
+    switch (target->kind)
+    {
+    case ND_VAR:
+    {
+        if (!target->var_ref)
+        {
+            diag_error_at(target->src, target->line, target->col,
+                          "assignment target missing name");
+            return 1;
+        }
+        CcbLocal *local = ccb_local_lookup(fb, target->var_ref);
+        if (!local)
+        {
+            if (target->var_is_global)
+                return ccb_emit_compound_assign_global(fb, expr, target);
+            diag_error_at(target->src, target->line, target->col,
+                          "unknown local '%s'", target->var_ref);
+            return 1;
+        }
+        return ccb_emit_compound_assign_local(fb, expr, target, local);
+    }
+    case ND_INDEX:
+    {
+        CCValueType elem_ty = CC_TYPE_I32;
+        const Type *elem_type = NULL;
+        if (ccb_emit_index_address(fb, target, &elem_ty, &elem_type))
+            return 1;
+        if (type_is_address_only(elem_type))
+        {
+            diag_error_at(target->src, target->line, target->col,
+                          "compound assignment not supported on this element type");
+            return 1;
+        }
+        Type *ptr_ty = type_ptr(elem_type ? (Type *)elem_type : (Type *)expr->type);
+        CcbLocal *addr_local = ccb_local_add(fb, NULL, ptr_ty, false, false);
+        if (!addr_local)
+            return 1;
+        if (!ccb_emit_store_local(fb, addr_local))
+            return 1;
+        Type *value_type = elem_type ? (Type *)elem_type : (Type *)expr->type;
+        return ccb_emit_compound_assign_via_pointer(fb, expr, addr_local, elem_ty, value_type);
+    }
+    case ND_DEREF:
+    {
+        CCValueType elem_ty = CC_TYPE_I32;
+        const Type *elem_type = NULL;
+        if (ccb_emit_deref_address(fb, target, &elem_ty, &elem_type))
+            return 1;
+        if (type_is_address_only(elem_type))
+        {
+            diag_error_at(target->src, target->line, target->col,
+                          "compound assignment not supported on this pointee type");
+            return 1;
+        }
+        Type *ptr_ty = type_ptr(elem_type ? (Type *)elem_type : (Type *)expr->type);
+        CcbLocal *addr_local = ccb_local_add(fb, NULL, ptr_ty, false, false);
+        if (!addr_local)
+            return 1;
+        if (!ccb_emit_store_local(fb, addr_local))
+            return 1;
+        Type *value_type = elem_type ? (Type *)elem_type : (Type *)expr->type;
+        return ccb_emit_compound_assign_via_pointer(fb, expr, addr_local, elem_ty, value_type);
+    }
+    case ND_MEMBER:
+    {
+        CCValueType field_ty = CC_TYPE_I32;
+        const Type *field_type = NULL;
+        if (ccb_emit_member_address(fb, target, &field_ty, &field_type))
+            return 1;
+        if (type_is_address_only(field_type))
+        {
+            diag_error_at(target->src, target->line, target->col,
+                          "compound assignment not supported on this field type");
+            return 1;
+        }
+        Type *ptr_ty = type_ptr(field_type ? (Type *)field_type : (Type *)expr->type);
+        CcbLocal *addr_local = ccb_local_add(fb, NULL, ptr_ty, false, false);
+        if (!addr_local)
+            return 1;
+        if (!ccb_emit_store_local(fb, addr_local))
+            return 1;
+        Type *value_type = field_type ? (Type *)field_type : (Type *)expr->type;
+        return ccb_emit_compound_assign_via_pointer(fb, expr, addr_local, field_ty, value_type);
+    }
+    default:
+        diag_error_at(target->src, target->line, target->col,
+                      "assignment target %s not supported",
+                      node_kind_name(target->kind));
+        return 1;
+    }
+}
+
 static bool type_is_address_only(const Type *ty)
 {
     if (!ty)
@@ -3235,22 +3759,79 @@ static int ccb_emit_array_initializer(CcbFunctionBuilder *fb, const Node *var_de
     return 0;
 }
 
-static bool ccb_emit_load_local(CcbFunctionBuilder *fb, const CcbLocal *local)
+static bool ccb_append_load_local(StringList *list, const CcbLocal *local)
 {
-    if (!fb || !local)
+    if (!list || !local)
         return false;
     if (local->is_param)
-        return string_list_appendf(&fb->body, "  load_param %d", local->index);
-    return string_list_appendf(&fb->body, "  load_local %d", local->index);
+        return string_list_appendf(list, "  load_param %d", local->index);
+    return string_list_appendf(list, "  load_local %d", local->index);
+}
+
+static bool ccb_append_store_local(StringList *list, const CcbLocal *local)
+{
+    if (!list || !local)
+        return false;
+    if (local->is_param)
+        return false;
+    return string_list_appendf(list, "  store_local %d", local->index);
+}
+
+static bool ccb_emit_load_local(CcbFunctionBuilder *fb, const CcbLocal *local)
+{
+    if (!fb)
+        return false;
+    return ccb_append_load_local(&fb->body, local);
 }
 
 static bool ccb_emit_store_local(CcbFunctionBuilder *fb, const CcbLocal *local)
 {
-    if (!fb || !local)
+    if (!fb)
         return false;
-    if (local->is_param)
+    return ccb_append_store_local(&fb->body, local);
+}
+
+static bool ccb_rewrite_param_loads(StringList *list, int param_index, int local_index)
+{
+    if (!list)
         return false;
-    return string_list_appendf(&fb->body, "  store_local %d", local->index);
+    const char *keyword = "load_param";
+    size_t keyword_len = strlen(keyword);
+    for (size_t i = 0; i < list->count; ++i)
+    {
+        char *line = list->items[i];
+        if (!line)
+            continue;
+
+        const char *trim = line;
+        while (*trim == ' ' || *trim == '\t')
+            ++trim;
+        if (strncmp(trim, keyword, keyword_len) != 0)
+            continue;
+
+        const char *cursor = trim + keyword_len;
+        while (*cursor == ' ' || *cursor == '\t')
+            ++cursor;
+
+        char *endptr = NULL;
+        long found = strtol(cursor, &endptr, 10);
+        if (endptr == cursor)
+            continue;
+        if ((int)found != param_index)
+            continue;
+
+        size_t indent_len = (size_t)(trim - line);
+        int needed = snprintf(NULL, 0, "%.*sload_local %d", (int)indent_len, line, local_index);
+        if (needed < 0)
+            return false;
+        char *replacement = (char *)malloc((size_t)needed + 1);
+        if (!replacement)
+            return false;
+        snprintf(replacement, (size_t)needed + 1, "%.*sload_local %d", (int)indent_len, line, local_index);
+        free(list->items[i]);
+        list->items[i] = replacement;
+    }
+    return true;
 }
 
 static bool ccb_emit_load_global(StringList *body, const char *name)
@@ -3356,6 +3937,114 @@ static int ccb_emit_global_incdec(CcbFunctionBuilder *fb, const Node *expr, bool
     }
 
     return 0;
+}
+
+static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool force_indirect)
+{
+    if (!fb || !expr)
+        return 1;
+
+    const int is_indirect = force_indirect ? 1 : expr->call_is_indirect;
+
+    if (!is_indirect && compiler_verbose_enabled())
+    {
+        const char *call_name = expr->call_name && *expr->call_name ? expr->call_name
+                                                                    : (expr->call_target && expr->call_target->name
+                                                                           ? expr->call_target->name
+                                                                           : "<call>");
+        if (expr->call_target)
+        {
+            const char *status = expr->call_target->inline_candidate ? "inline candidate" : "will emit call";
+            compiler_verbose_logf("codegen", "evaluating call '%s' (%s)", call_name, status);
+        }
+        else
+        {
+            compiler_verbose_logf("codegen", "evaluating call '%s' (no direct target metadata)", call_name);
+        }
+    }
+
+    if (!is_indirect && expr->call_target && expr->call_target->inline_candidate)
+    {
+        int inline_rc = ccb_emit_inline_call(fb, expr, expr->call_target);
+        if (inline_rc == 0)
+            return 0;
+        if (inline_rc == 1)
+            return 1;
+    }
+
+    CCValueType *arg_types = NULL;
+    if (expr->arg_count > 0)
+        arg_types = (CCValueType *)xcalloc((size_t)expr->arg_count, sizeof(CCValueType));
+
+    int rc = 0;
+    for (int i = 0; i < expr->arg_count; ++i)
+    {
+        const Node *arg = expr->args ? expr->args[i] : NULL;
+        if (ccb_emit_expr_basic(fb, arg))
+        {
+            rc = 1;
+            break;
+        }
+        if (arg_types)
+            arg_types[i] = ccb_type_for_expr(arg);
+    }
+
+    if (!rc && is_indirect)
+    {
+        if (!expr->lhs)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "indirect call missing target expression");
+            rc = 1;
+        }
+        else if (ccb_emit_expr_basic(fb, expr->lhs))
+        {
+            rc = 1;
+        }
+        else
+        {
+            CCValueType target_ty = ccb_type_for_expr(expr->lhs);
+            if (target_ty != CC_TYPE_PTR)
+            {
+                if (ccb_emit_convert_between(fb, target_ty, CC_TYPE_PTR, expr->lhs))
+                    rc = 1;
+            }
+        }
+    }
+
+    if (!rc)
+    {
+        CCValueType ret_ty = ccb_type_for_expr(expr);
+        const char *ret_name = cc_type_name(ret_ty);
+        char *arg_text = NULL;
+        if (!ccb_format_type_list(arg_types, (size_t)expr->arg_count, &arg_text))
+        {
+            rc = 1;
+        }
+        else if (is_indirect)
+        {
+            const char *suffix = expr->call_is_varargs ? " varargs" : "";
+            if (!string_list_appendf(&fb->body, "  call_indirect %s %s%s", ret_name, arg_text, suffix))
+                rc = 1;
+        }
+        else
+        {
+            if (!expr->call_name || !*expr->call_name)
+            {
+                diag_error_at(expr->src, expr->line, expr->col,
+                              "function call missing symbol name");
+                rc = 1;
+            }
+            else if (!string_list_appendf(&fb->body, "  call %s %s %s", expr->call_name, ret_name, arg_text))
+            {
+                rc = 1;
+            }
+        }
+        free(arg_text);
+    }
+
+    free(arg_types);
+    return rc;
 }
 
 static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
@@ -3785,7 +4474,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 return 1;
             if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
                 return 1;
-            if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(CC_TYPE_I64)))
+            if (!string_list_appendf(&fb->body, "  binop %s i64", op))
                 return 1;
             if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
                 return 1;
@@ -3867,6 +4556,16 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
         if (!ccb_emit_store_local(fb, temp))
             return 1;
+
+        // Adding a temporary can reallocate the locals array; refresh the pointer
+        local = ccb_local_lookup(fb, target->var_ref);
+        if (!local)
+        {
+            diag_error_at(target->src, target->line, target->col,
+                          "lost track of local '%s' after temp allocation",
+                          target->var_ref);
+            return 1;
+        }
 
         if (!ccb_emit_load_local(fb, local))
             return 1;
@@ -4092,16 +4791,20 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         if (!string_list_appendf(&fb->body, "  branch %s %s", true_label, false_label))
             return 1;
 
+        CCValueType land_result_ty = map_type_to_cc(expr->type);
+        if (land_result_ty == CC_TYPE_VOID || land_result_ty == CC_TYPE_INVALID)
+            land_result_ty = CC_TYPE_I32;
+
         if (!string_list_appendf(&fb->body, "label %s", true_label))
             return 1;
-        if (!ccb_emit_const(&fb->body, CC_TYPE_I32, 1))
+        if (!ccb_emit_const(&fb->body, land_result_ty, 1))
             return 1;
         if (!string_list_appendf(&fb->body, "  jump %s", end_label))
             return 1;
 
         if (!string_list_appendf(&fb->body, "label %s", false_label))
             return 1;
-        if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+        if (!ccb_emit_const_zero(&fb->body, land_result_ty))
             return 1;
 
         if (!string_list_appendf(&fb->body, "label %s", end_label))
@@ -4140,16 +4843,20 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         if (!string_list_appendf(&fb->body, "  branch %s %s", true_label, false_label))
             return 1;
 
+        CCValueType lor_result_ty = map_type_to_cc(expr->type);
+        if (lor_result_ty == CC_TYPE_VOID || lor_result_ty == CC_TYPE_INVALID)
+            lor_result_ty = CC_TYPE_I32;
+
         if (!string_list_appendf(&fb->body, "label %s", true_label))
             return 1;
-        if (!ccb_emit_const(&fb->body, CC_TYPE_I32, 1))
+        if (!ccb_emit_const(&fb->body, lor_result_ty, 1))
             return 1;
         if (!string_list_appendf(&fb->body, "  jump %s", end_label))
             return 1;
 
         if (!string_list_appendf(&fb->body, "label %s", false_label))
             return 1;
-        if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+        if (!ccb_emit_const_zero(&fb->body, lor_result_ty))
             return 1;
 
         if (!string_list_appendf(&fb->body, "label %s", end_label))
@@ -4475,6 +5182,21 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         }
         return 0;
     }
+    case ND_SEQ:
+    {
+        if (expr->lhs)
+        {
+            if (ccb_emit_expr_basic(fb, expr->lhs))
+                return 1;
+            CCValueType lhs_ty = ccb_type_for_expr(expr->lhs);
+            if (!ccb_emit_drop_for_type(&fb->body, lhs_ty))
+                return 1;
+        }
+
+        if (expr->rhs)
+            return ccb_emit_expr_basic(fb, expr->rhs);
+        return 0;
+    }
     case ND_SIZEOF:
     case ND_ALIGNOF:
     case ND_OFFSETOF:
@@ -4572,7 +5294,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         {
             if (expr->var_is_global)
             {
-                int is_array_addr = (expr->var_type && expr->var_type->kind == TY_ARRAY && !expr->var_type->array.is_unsized);
+                int is_array_addr = expr->var_is_array ||
+                                    (expr->var_type && expr->var_type->kind == TY_ARRAY);
                 if (type_is_address_only(expr->type) || is_array_addr)
                 {
                     if (!ccb_emit_addr_global(&fb->body, expr->var_ref))
@@ -4594,109 +5317,18 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         return 0;
     }
     case ND_CALL:
-    {
-        const int is_indirect = expr->call_is_indirect;
-
-        if (!is_indirect && compiler_verbose_enabled())
-        {
-            const char *call_name = expr->call_name && *expr->call_name ? expr->call_name
-                                                                        : (expr->call_target && expr->call_target->name
-                                                                               ? expr->call_target->name
-                                                                               : "<call>");
-            if (expr->call_target)
-            {
-                const char *status = expr->call_target->inline_candidate ? "inline candidate" : "will emit call";
-                compiler_verbose_logf("codegen", "evaluating call '%s' (%s)", call_name, status);
-            }
-            else
-            {
-                compiler_verbose_logf("codegen", "evaluating call '%s' (no direct target metadata)", call_name);
-            }
-        }
-
-        if (!is_indirect && expr->call_target && expr->call_target->inline_candidate)
-        {
-            int inline_rc = ccb_emit_inline_call(fb, expr, expr->call_target);
-            if (inline_rc == 0)
-                return 0;
-            if (inline_rc == 1)
-                return 1;
-        }
-
-        CCValueType *arg_types = NULL;
-        if (expr->arg_count > 0)
-            arg_types = (CCValueType *)xcalloc((size_t)expr->arg_count, sizeof(CCValueType));
-
-        int rc = 0;
-        for (int i = 0; i < expr->arg_count; ++i)
-        {
-            const Node *arg = expr->args ? expr->args[i] : NULL;
-            if (ccb_emit_expr_basic(fb, arg))
-            {
-                rc = 1;
-                break;
-            }
-            if (arg_types)
-                arg_types[i] = ccb_type_for_expr(arg);
-        }
-
-        if (!rc && is_indirect)
-        {
-            if (!expr->lhs)
-            {
-                diag_error_at(expr->src, expr->line, expr->col,
-                              "indirect call missing target expression");
-                rc = 1;
-            }
-            else if (ccb_emit_expr_basic(fb, expr->lhs))
-            {
-                rc = 1;
-            }
-            else
-            {
-                CCValueType target_ty = ccb_type_for_expr(expr->lhs);
-                if (target_ty != CC_TYPE_PTR)
-                {
-                    if (ccb_emit_convert_between(fb, target_ty, CC_TYPE_PTR, expr->lhs))
-                        rc = 1;
-                }
-            }
-        }
-
-        if (!rc)
-        {
-            CCValueType ret_ty = ccb_type_for_expr(expr);
-            const char *ret_name = cc_type_name(ret_ty);
-            char *arg_text = NULL;
-            if (!ccb_format_type_list(arg_types, (size_t)expr->arg_count, &arg_text))
-            {
-                rc = 1;
-            }
-            else if (is_indirect)
-            {
-                const char *suffix = expr->call_is_varargs ? " varargs" : "";
-                if (!string_list_appendf(&fb->body, "  call_indirect %s %s%s", ret_name, arg_text, suffix))
-                    rc = 1;
-            }
-            else
-            {
-                if (!expr->call_name || !*expr->call_name)
-                {
-                    diag_error_at(expr->src, expr->line, expr->col,
-                                  "function call missing symbol name");
-                    rc = 1;
-                }
-                else if (!string_list_appendf(&fb->body, "  call %s %s %s", expr->call_name, ret_name, arg_text))
-                {
-                    rc = 1;
-                }
-            }
-            free(arg_text);
-        }
-
-        free(arg_types);
-        return rc;
-    }
+        return ccb_emit_call_like(fb, expr, false);
+    case ND_ADD_ASSIGN:
+    case ND_SUB_ASSIGN:
+    case ND_MUL_ASSIGN:
+    case ND_DIV_ASSIGN:
+    case ND_MOD_ASSIGN:
+    case ND_BITAND_ASSIGN:
+    case ND_BITOR_ASSIGN:
+    case ND_BITXOR_ASSIGN:
+    case ND_SHL_ASSIGN:
+    case ND_SHR_ASSIGN:
+        return ccb_emit_compound_assign(fb, expr);
     case ND_ASSIGN:
     {
         if (!expr->lhs || !expr->rhs)
@@ -5188,6 +5820,15 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
                 return 1;
         }
         return 0;
+    case ND_SEQ:
+    {
+        if (ccb_emit_expr_basic(fb, stmt))
+            return 1;
+        CCValueType seq_ty = ccb_type_for_expr(stmt);
+        if (!ccb_emit_drop_for_type(&fb->body, seq_ty))
+            return 1;
+        return 0;
+    }
     case ND_IF:
     {
         if (!stmt->lhs || !stmt->rhs)
@@ -5769,13 +6410,26 @@ static int ccb_module_append_global(CcbModule *mod, const Node *decl)
     if (!mod || !decl || decl->kind != ND_VAR_DECL || !decl->var_is_global)
         return 1;
 
-    const char *name = decl->metadata.backend_name ? decl->metadata.backend_name : decl->var_name;
+    int status = 1;
+    char *section_literal = NULL;
+    if (decl->section_name && decl->section_name[0])
+    {
+        section_literal = ccb_encode_bytes_literal((const uint8_t *)decl->section_name,
+                                                   strlen(decl->section_name));
+        if (!section_literal)
+            return 1;
+    }
+
+    const char *name = ccb_effective_global_name(decl, NULL);
     if (!name || !*name)
     {
         diag_error_at(decl->src, decl->line, decl->col,
                       "global variable missing backend name");
-        return 1;
+        goto cleanup;
     }
+
+    const char *const_attr = decl->var_is_const ? " const" : "";
+    const char *hidden_attr = decl->is_exposed ? "" : " hidden";
 
     if (decl->var_type && type_is_address_only(decl->var_type))
     {
@@ -5784,15 +6438,91 @@ static int ccb_module_append_global(CcbModule *mod, const Node *decl)
         {
             diag_error_at(decl->src, decl->line, decl->col,
                           "global '%s' has unknown size", decl->var_name);
-            return 1;
+            goto cleanup;
         }
 
         int align_bytes = 8;
-        if (!ccb_module_appendf(mod, ".global %s type=%s size=%d align=%d%s",
-                                name, cc_type_name(CC_TYPE_U8), size_bytes, align_bytes,
-                                decl->var_is_const ? " const" : ""))
-            return 1;
-        return 0;
+        const Node *init = decl->rhs;
+        if (decl->var_type->kind == TY_ARRAY && init && init->kind == ND_INIT_LIST && !init->init.is_zero)
+        {
+            uint8_t *bytes = NULL;
+            size_t byte_len = 0;
+            if (!ccb_flatten_array_initializer(decl->var_type, init, &bytes, &byte_len) || !bytes)
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "failed to encode initializer for global '%s'", decl->var_name);
+                free(bytes);
+                goto cleanup;
+            }
+            if ((size_t)size_bytes != byte_len)
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "initializer size mismatch for global '%s'", decl->var_name);
+                free(bytes);
+                goto cleanup;
+            }
+            char *literal = ccb_encode_bytes_literal(bytes, byte_len);
+            free(bytes);
+            if (!literal)
+                goto cleanup;
+            bool ok = section_literal
+                          ? ccb_module_appendf(mod, ".global %s type=%s size=%zu align=%d data=%s section=%s%s%s",
+                                               name, cc_type_name(CC_TYPE_U8), byte_len, align_bytes, literal,
+                                               section_literal, const_attr, hidden_attr)
+                          : ccb_module_appendf(mod, ".global %s type=%s size=%zu align=%d data=%s%s%s",
+                                               name, cc_type_name(CC_TYPE_U8), byte_len, align_bytes, literal,
+                                               const_attr, hidden_attr);
+            free(literal);
+            if (!ok)
+                goto cleanup;
+        }
+        else if (decl->var_type->kind == TY_STRUCT && init && init->kind == ND_INIT_LIST && !init->init.is_zero)
+        {
+            uint8_t *bytes = NULL;
+            size_t byte_len = 0;
+            if (!ccb_flatten_struct_initializer(decl->var_type, init, &bytes, &byte_len) || !bytes)
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "failed to encode initializer for global '%s'", decl->var_name);
+                free(bytes);
+                goto cleanup;
+            }
+            if ((size_t)size_bytes != byte_len)
+            {
+                diag_error_at(init->src, init->line, init->col,
+                              "initializer size mismatch for global '%s'", decl->var_name);
+                free(bytes);
+                goto cleanup;
+            }
+            char *literal = ccb_encode_bytes_literal(bytes, byte_len);
+            free(bytes);
+            if (!literal)
+                goto cleanup;
+            bool ok = section_literal
+                          ? ccb_module_appendf(mod, ".global %s type=%s size=%zu align=%d data=%s section=%s%s%s",
+                                               name, cc_type_name(CC_TYPE_U8), byte_len, align_bytes, literal,
+                                               section_literal, const_attr, hidden_attr)
+                          : ccb_module_appendf(mod, ".global %s type=%s size=%zu align=%d data=%s%s%s",
+                                               name, cc_type_name(CC_TYPE_U8), byte_len, align_bytes, literal,
+                                               const_attr, hidden_attr);
+            free(literal);
+            if (!ok)
+                goto cleanup;
+        }
+        else
+        {
+            bool ok = section_literal
+                          ? ccb_module_appendf(mod, ".global %s type=%s size=%d align=%d section=%s%s%s",
+                                               name, cc_type_name(CC_TYPE_U8), size_bytes, align_bytes,
+                                               section_literal, const_attr, hidden_attr)
+                          : ccb_module_appendf(mod, ".global %s type=%s size=%d align=%d%s%s",
+                                               name, cc_type_name(CC_TYPE_U8), size_bytes, align_bytes,
+                                               const_attr, hidden_attr);
+            if (!ok)
+                goto cleanup;
+        }
+        status = 0;
+        goto cleanup;
     }
 
     CCValueType cc_ty = map_type_to_cc(decl->var_type);
@@ -5800,7 +6530,7 @@ static int ccb_module_append_global(CcbModule *mod, const Node *decl)
     {
         diag_error_at(decl->src, decl->line, decl->col,
                       "global '%s' cannot have void storage", decl->var_name);
-        return 1;
+        goto cleanup;
     }
 
     char init_buf[128];
@@ -5808,14 +6538,22 @@ static int ccb_module_append_global(CcbModule *mod, const Node *decl)
     {
         diag_error_at(decl->src, decl->line, decl->col,
                       "unsupported initializer for global '%s'", decl->var_name);
-        return 1;
+        goto cleanup;
     }
 
-    const char *const_attr = decl->var_is_const ? " const" : "";
-    if (!ccb_module_appendf(mod, ".global %s type=%s init=%s%s", name, cc_type_name(cc_ty), init_buf, const_attr))
-        return 1;
+    bool ok = section_literal
+                  ? ccb_module_appendf(mod, ".global %s type=%s init=%s section=%s%s%s",
+                                       name, cc_type_name(cc_ty), init_buf, section_literal, const_attr, hidden_attr)
+                  : ccb_module_appendf(mod, ".global %s type=%s init=%s%s%s",
+                                       name, cc_type_name(cc_ty), init_buf, const_attr, hidden_attr);
+    if (!ok)
+        goto cleanup;
 
-    return 0;
+    status = 0;
+
+cleanup:
+    free(section_literal);
+    return status;
 }
 
 static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const CodegenOptions *opts)
@@ -5825,6 +6563,8 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
         return 1;
 
     const char *backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+    if (fn->export_name)
+        backend_name = fn->name;
     const char *ret_name = cc_type_name(map_type_to_cc(fn->ret_type));
     int declared_params = (fn->metadata.declared_param_count >= 0)
                               ? fn->metadata.declared_param_count
@@ -5836,6 +6576,13 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
                              ? (size_t)fn->metadata.declared_local_count
                              : 0;
 
+    if (fn->section_name && fn->metadata.func_line)
+    {
+        diag_error_at(fn->src, fn->line, fn->col,
+                      "'Section' attribute is not supported when '.func' metadata overrides are present");
+        return 1;
+    }
+
     if (fn->metadata.func_line)
     {
         if (!ccb_module_append_line(mod, fn->metadata.func_line))
@@ -5846,8 +6593,23 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
         const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
         const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
         const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
-        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s",
-                    backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix, hidden_suffix))
+        char *section_literal = NULL;
+        if (fn->section_name && fn->section_name[0])
+        {
+            section_literal = ccb_encode_bytes_literal((const uint8_t *)fn->section_name,
+                                                       strlen(fn->section_name));
+            if (!section_literal)
+                return 1;
+        }
+        bool ok = section_literal
+                      ? ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu section=%s%s%s%s",
+                                           backend_name, ret_name, param_count, local_count, section_literal,
+                                           varargs_suffix, force_inline_suffix, hidden_suffix)
+                      : ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s",
+                                           backend_name, ret_name, param_count, local_count,
+                                           varargs_suffix, force_inline_suffix, hidden_suffix);
+        free(section_literal);
+        if (!ok)
             return 1;
     }
 
@@ -5916,6 +6678,8 @@ static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const Codeg
     }
 
     const char *backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+    if (fn->export_name)
+        backend_name = fn->name;
     const char *ret_name = cc_type_name(map_type_to_cc(fn->ret_type));
     int declared_params = (fn->metadata.declared_param_count >= 0)
                               ? fn->metadata.declared_param_count
@@ -5938,7 +6702,7 @@ static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const Codeg
         const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
         const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
         if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s",
-                    backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix, hidden_suffix))
+                                backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix, hidden_suffix))
             return 1;
     }
 
@@ -6007,7 +6771,8 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         return ccb_function_emit_literal(mod, fn, opts);
 
     CcbFunctionBuilder fb;
-    ccb_function_builder_init(&fb, mod, fn);
+    bool enable_debug = mod && mod->emit_debug;
+    ccb_function_builder_init(&fb, mod, fn, enable_debug);
     ccb_function_builder_register_params(&fb);
 
     int rc;
@@ -6020,6 +6785,8 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
     if (!rc)
     {
         const char *backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+        if (fn->export_name)
+            backend_name = fn->name;
 
         if (fn->metadata.func_line)
         {
@@ -6028,10 +6795,10 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         }
         else
         {
-                const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
-                const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
-                if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s", backend_name,
-                            cc_type_name(fb.ret_type), fb.param_count, fb.local_count, varargs_suffix, hidden_suffix))
+            const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
+            const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
+            if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s", backend_name,
+                                    cc_type_name(fb.ret_type), fb.param_count, fb.local_count, varargs_suffix, hidden_suffix))
                 rc = 1;
         }
 
@@ -6239,6 +7006,341 @@ static bool ccb_value_type_is_signed(CCValueType ty)
     }
 }
 
+static bool ccb_eval_const_int64(const Node *expr, int64_t *out_value)
+{
+    if (!expr || !out_value)
+        return false;
+    switch (expr->kind)
+    {
+    case ND_INT:
+        *out_value = expr->int_val;
+        return true;
+    case ND_NULL:
+        *out_value = 0;
+        return true;
+    case ND_NEG:
+        if (!ccb_eval_const_int64(expr->lhs, out_value))
+            return false;
+        *out_value = -*out_value;
+        return true;
+    case ND_CAST:
+        return ccb_eval_const_int64(expr->lhs, out_value);
+    default:
+        return false;
+    }
+}
+
+static bool ccb_eval_const_float64(const Node *expr, double *out_value)
+{
+    if (!expr || !out_value)
+        return false;
+    switch (expr->kind)
+    {
+    case ND_FLOAT:
+        *out_value = expr->float_val;
+        return true;
+    case ND_INT:
+        *out_value = (double)expr->int_val;
+        return true;
+    case ND_NULL:
+        *out_value = 0.0;
+        return true;
+    case ND_NEG:
+        if (!ccb_eval_const_float64(expr->lhs, out_value))
+            return false;
+        *out_value = -*out_value;
+        return true;
+    case ND_CAST:
+        return ccb_eval_const_float64(expr->lhs, out_value);
+    default:
+        return false;
+    }
+}
+
+static bool ccb_store_scalar_bytes(const Type *elem_type, const Node *expr, uint8_t *dst, size_t dst_size)
+{
+    if (!elem_type || !expr || !dst || dst_size == 0)
+        return false;
+
+    switch (elem_type->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+    case TY_I16:
+    case TY_U16:
+    case TY_I32:
+    case TY_U32:
+    case TY_I64:
+    case TY_U64:
+    case TY_CHAR:
+    case TY_BOOL:
+    case TY_PTR:
+    {
+        int64_t value = 0;
+        if (!ccb_eval_const_int64(expr, &value))
+            return false;
+        uint64_t bits = (uint64_t)value;
+        for (size_t i = 0; i < dst_size; ++i)
+        {
+            dst[i] = (uint8_t)(bits & 0xFFu);
+            bits >>= 8;
+        }
+        return true;
+    }
+    case TY_F32:
+    {
+        double dv = 0.0;
+        if (!ccb_eval_const_float64(expr, &dv))
+            return false;
+        float fv = (float)dv;
+        uint32_t bits = 0;
+        memcpy(&bits, &fv, sizeof(bits));
+        for (size_t i = 0; i < dst_size && i < sizeof(bits); ++i)
+        {
+            dst[i] = (uint8_t)(bits & 0xFFu);
+            bits >>= 8;
+        }
+        return true;
+    }
+    case TY_F64:
+    {
+        double dv = 0.0;
+        if (!ccb_eval_const_float64(expr, &dv))
+            return false;
+        uint64_t bits = 0;
+        memcpy(&bits, &dv, sizeof(bits));
+        for (size_t i = 0; i < dst_size && i < sizeof(bits); ++i)
+        {
+            dst[i] = (uint8_t)(bits & 0xFFu);
+            bits >>= 8;
+        }
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+static bool ccb_store_constant_value(const Type *type, const Node *expr, uint8_t *dst, size_t dst_size)
+{
+    if (!type)
+        return false;
+    size_t type_size = ccb_type_size_bytes(type);
+    if (type_size == 0)
+        return true;
+    if (!dst || dst_size < type_size)
+        return false;
+
+    memset(dst, 0, type_size);
+
+    if (!expr)
+        return true;
+    if (expr->kind == ND_INIT_LIST && (expr->init.is_zero || expr->init.count == 0))
+        return true;
+
+    switch (type->kind)
+    {
+    case TY_STRUCT:
+        return ccb_store_struct_bytes(type, expr, dst, type_size);
+    case TY_ARRAY:
+        return ccb_store_array_bytes(type, expr, dst, type_size);
+    default:
+        return ccb_store_scalar_bytes(type, expr, dst, type_size);
+    }
+}
+
+static bool ccb_store_struct_bytes(const Type *struct_type, const Node *expr, uint8_t *dst, size_t dst_size)
+{
+    if (!struct_type || struct_type->kind != TY_STRUCT || !dst)
+        return false;
+
+    size_t struct_size = ccb_type_size_bytes(struct_type);
+    if (struct_size == 0)
+        return true;
+    if (dst_size < struct_size)
+        return false;
+
+    if (!expr || expr->kind != ND_INIT_LIST || expr->init.is_zero || expr->init.count == 0)
+        return true;
+
+    int field_count = struct_type->strct.field_count;
+    const int *offsets = struct_type->strct.field_offsets;
+    Type *const *field_types = struct_type->strct.field_types;
+    if (!field_types || !offsets)
+        return false;
+
+    for (int i = 0; i < expr->init.count; ++i)
+    {
+        const Node *value = (expr->init.elems && i < expr->init.count) ? expr->init.elems[i] : NULL;
+        if (!value)
+            return false;
+        int field_index = expr->init.field_indices ? expr->init.field_indices[i] : i;
+        if (field_index < 0 || field_index >= field_count)
+            return false;
+        const Type *field_type = field_types[field_index];
+        if (!field_type)
+            return false;
+        size_t field_size = ccb_type_size_bytes(field_type);
+        size_t field_offset = (size_t)offsets[field_index];
+        if (field_offset + field_size > struct_size)
+            return false;
+        if (!ccb_store_constant_value(field_type, value, dst + field_offset, field_size))
+            return false;
+    }
+
+    return true;
+}
+
+static bool ccb_store_array_bytes(const Type *array_type, const Node *expr, uint8_t *dst, size_t dst_size)
+{
+    if (!array_type || array_type->kind != TY_ARRAY || array_type->array.is_unsized || !dst)
+        return false;
+
+    size_t total_size = ccb_type_size_bytes(array_type);
+    if (total_size == 0)
+        return true;
+    if (dst_size < total_size)
+        return false;
+
+    if (!expr || expr->kind != ND_INIT_LIST || expr->init.is_zero || expr->init.count == 0)
+        return true;
+
+    const Type *elem_type = array_type->array.elem;
+    size_t elem_size = ccb_type_size_bytes(elem_type);
+
+    int limit = expr->init.count;
+    if (array_type->array.length >= 0 && limit > array_type->array.length)
+        limit = array_type->array.length;
+
+    for (int i = 0; i < limit; ++i)
+    {
+        const Node *value = (expr->init.elems && i < expr->init.count) ? expr->init.elems[i] : NULL;
+        if (!value)
+            return false;
+        if (!ccb_store_constant_value(elem_type, value, dst + (size_t)i * elem_size, elem_size))
+            return false;
+    }
+
+    return true;
+}
+
+static bool ccb_flatten_array_initializer(const Type *array_type, const Node *init, uint8_t **out_bytes, size_t *out_size)
+{
+    if (!array_type || array_type->kind != TY_ARRAY || array_type->array.is_unsized || !out_bytes || !out_size)
+        return false;
+
+    if (array_type->array.length <= 0)
+        return false;
+
+    size_t elem_size = ccb_type_size_bytes(array_type->array.elem);
+    if (elem_size == 0)
+        return false;
+    size_t total_size = elem_size * (size_t)array_type->array.length;
+
+    uint8_t *buffer = (uint8_t *)calloc(total_size, 1);
+    if (!buffer)
+        return false;
+
+    if (init && init->kind == ND_INIT_LIST && !init->init.is_zero)
+    {
+        int limit = init->init.count;
+        if (array_type->array.length >= 0 && limit > array_type->array.length)
+            limit = array_type->array.length;
+        for (int i = 0; i < limit; ++i)
+        {
+            const Node *elem = (init->init.elems && i < init->init.count) ? init->init.elems[i] : NULL;
+            if (!elem || !ccb_store_scalar_bytes(array_type->array.elem, elem, buffer + (size_t)i * elem_size, elem_size))
+            {
+                free(buffer);
+                return false;
+            }
+        }
+    }
+
+    *out_bytes = buffer;
+    *out_size = total_size;
+    return true;
+}
+
+static bool ccb_flatten_struct_initializer(const Type *struct_type, const Node *init, uint8_t **out_bytes, size_t *out_size)
+{
+    if (!struct_type || struct_type->kind != TY_STRUCT || !out_bytes || !out_size)
+        return false;
+
+    size_t total_size = ccb_type_size_bytes(struct_type);
+    if (total_size == 0)
+        return false;
+
+    uint8_t *buffer = (uint8_t *)calloc(total_size, 1);
+    if (!buffer)
+        return false;
+
+    if (!ccb_store_constant_value(struct_type, init, buffer, total_size))
+    {
+        free(buffer);
+        return false;
+    }
+
+    *out_bytes = buffer;
+    *out_size = total_size;
+    return true;
+}
+
+static char *ccb_encode_bytes_literal(const uint8_t *data, size_t len)
+{
+    if (!data)
+        len = 0;
+    size_t capacity = len * 4 + 3;
+    char *out = (char *)malloc(capacity);
+    if (!out)
+        return NULL;
+
+    char *cursor = out;
+    *cursor++ = '"';
+    for (size_t i = 0; i < len; ++i)
+    {
+        uint8_t byte = data[i];
+        switch (byte)
+        {
+        case '\\':
+        case '"':
+            *cursor++ = '\\';
+            *cursor++ = (char)byte;
+            break;
+        case '\n':
+            *cursor++ = '\\';
+            *cursor++ = 'n';
+            break;
+        case '\r':
+            *cursor++ = '\\';
+            *cursor++ = 'r';
+            break;
+        case '\t':
+            *cursor++ = '\\';
+            *cursor++ = 't';
+            break;
+        case '\0':
+            *cursor++ = '\\';
+            *cursor++ = '0';
+            break;
+        default:
+            if (isprint((int)byte))
+            {
+                *cursor++ = (char)byte;
+            }
+            else
+            {
+                snprintf(cursor, 5, "\\x%02X", byte);
+                cursor += 4;
+            }
+            break;
+        }
+    }
+    *cursor++ = '"';
+    *cursor = '\0';
+    return out;
+}
+
 static void ccb_write_quoted(FILE *out, const char *text)
 {
     if (!out)
@@ -6265,8 +7367,8 @@ static int write_module_to_file(const char *path, const CcbModule *mod)
         return 1;
     }
 
-    fprintf(out, "ccbytecode 2\n\n");
-    if (mod && mod->debug_files.count > 0)
+    fprintf(out, "ccbytecode 3\n\n");
+    if (mod && mod->emit_debug && mod->debug_files.count > 0)
     {
         for (size_t i = 0; i < mod->debug_files.count; ++i)
         {
@@ -6353,10 +7455,14 @@ int codegen_ccb_write_module(const Node *unit, const CodegenOptions *opts)
 
     CcbModule mod;
     ccb_module_init(&mod);
+    if (opts)
+        mod.emit_debug = opts->debug_symbols;
 
     int rc = 0;
     if (!rc)
         rc = ccb_module_emit_externs(&mod, opts);
+    if (!rc)
+        rc = ccb_module_emit_imported_globals(&mod, opts);
 
     if (!rc)
     {

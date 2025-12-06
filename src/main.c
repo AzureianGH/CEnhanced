@@ -1,6 +1,7 @@
 #include "ast.h"
 #include "cclib.h"
 #include "includes.h"
+#include "mangle.h"
 #include "module_registry.h"
 #include "preproc.h"
 #include <ctype.h>
@@ -59,7 +60,7 @@ static const char *default_chancecodec_name =
 static int verbose_use_ansi = 1;
 static const char *target_os_to_option(TargetOS os);
 static char *make_backend_name_from_module(const char *module_full,
-                       const char *fn_name);
+                                           const char *fn_name);
 
 static const char *ansi_reset(void)
 {
@@ -191,14 +192,15 @@ static void verbose_print_config(
     const char *output_path, int opt_level, TargetArch target_arch,
     TargetOS target_os, int stop_after_ccb, int stop_after_asm, int no_link,
     int emit_library, int freestanding, AsmSyntax asm_syntax,
-  int include_dir_count, int ce_count, int ccb_count, int cclib_count,
-  int obj_count, int symbol_ref_ce_count, int symbol_ref_cclib_count,
-  const char *chancecodec_cmd, int chancecodec_has_override,
-  int needs_chancecodec, const char *chancecode_backend,
-  int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
+    int include_dir_count, int ce_count, int ccb_count, int cclib_count,
+    int obj_count, int symbol_ref_ce_count, int symbol_ref_cclib_count,
+    const char *host_cc_cmd, int host_cc_has_override,
+    const char *chancecodec_cmd, int chancecodec_has_override,
+    int needs_chancecodec, const char *chancecode_backend,
+    int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
 {
   if (!compiler_verbose_enabled())
-      return;
+    return;
   verbose_section("Configuration");
   verbose_table_row("Output", output_path ? output_path : "(default)");
   char opt_buf[16];
@@ -238,6 +240,9 @@ static void verbose_print_config(
   verbose_table_row("Symbol-ref CCLib inputs", count_buf);
   verbose_table_row("ChanceCode backend",
                     chancecode_backend ? chancecode_backend : "(auto)");
+  verbose_table_row("Host CC",
+                    (host_cc_cmd && *host_cc_cmd) ? host_cc_cmd : "cc");
+  verbose_table_row("Host CC override", bool_str(host_cc_has_override));
   if (needs_chancecodec)
   {
     verbose_table_row("Chancecodec cmd",
@@ -289,21 +294,22 @@ static void usage(const char *prog)
   fprintf(stderr, "       %s new <template> [name]\n", prog);
   fprintf(stderr, "Options:\n");
   fprintf(stderr,
-          "  -o <file>         Output executable path (default a.exe)\n");
+          "  -o <file>         Output executable path (default a.exe) or object when using -c\n");
   fprintf(stderr, "  -S                Emit pseudo-asm alongside exe (.S)\n");
   fprintf(stderr,
           "  -Sccb             Stop after emitting Chance bytecode (.ccb)\n");
   fprintf(stderr,
           "  -O0|-O1|-O2|-O3   Select optimization level (default -O0)\n");
-    fprintf(stderr,
-      "  -g                Emit debug symbols in assembler/link stages\n");
-      fprintf(stderr,
-        "  --strip           Remove debug metadata before backend emission\n");
-    fprintf(stderr,
-            "  --strip-hard      Strip metadata and obfuscate all exported symbols\n");
+  fprintf(stderr,
+          "  -g                Emit debug symbols in assembler/link stages\n");
+  fprintf(stderr,
+          "  --strip           Remove debug metadata before backend emission\n");
+  fprintf(stderr,
+          "  --strip-hard      Strip metadata and obfuscate all exported symbols\n");
   fprintf(stderr, "  -c [obj] | --no-link [obj]\n");
   fprintf(stderr, "                    Compile only; do not link (emit "
-                  "object). Optional obj output path.\n");
+                  "object). Optional obj output path or use -o.\n");
+  fprintf(stderr, "                    Repeat '-c <src> -o <obj>' to emit multiple object files in one run.\n");
   fprintf(stderr, "  --freestanding    Freestanding mode (no default libs)\n");
   fprintf(stderr, "  -m32|-m64         Target bitness (currently -m64 only)\n");
   fprintf(stderr, "  -x86              Select x86-64 backend for "
@@ -318,8 +324,9 @@ static void usage(const char *prog)
   fprintf(stderr, "  --chancecodec <path>\n");
   fprintf(stderr, "                    Override ChanceCode CLI executable path "
                   "(default: auto-detect or PATH)\n");
-    fprintf(stderr,
-      "  -sr:<path>       Load .ce/.cclib for symbols only (no codegen)\n");
+  fprintf(stderr, "  --cc <path>       Override host C compiler used for asm/link (default cc)\n");
+  fprintf(stderr,
+          "  -sr:<path>       Load .ce/.cclib for symbols only (no codegen)\n");
   fprintf(stderr,
           "  -I <dir>          Add include search directory for #include <>\n");
   fprintf(stderr, "  -Nno-formatting  Disable formatting guidance notes\n");
@@ -382,6 +389,16 @@ static int ends_with_icase(const char *s, const char *suf)
   }
   return 1;
 #endif
+}
+
+static int is_ce_source_arg(const char *path)
+{
+  return path && (ends_with_icase(path, ".ce") || ends_with_icase(path, ".ceproj"));
+}
+
+static int is_object_file_arg(const char *path)
+{
+  return path && (ends_with_icase(path, ".o") || ends_with_icase(path, ".obj"));
 }
 
 static void split_path(const char *path, char *dir, size_t dsz,
@@ -645,6 +662,39 @@ static const char *target_os_to_option(TargetOS os)
   }
 }
 
+static const char *arm64_backend_name_for_os(TargetOS os)
+{
+  switch (os)
+  {
+  case OS_MACOS:
+    return "arm64-macos";
+  case OS_LINUX:
+    return "arm64-elf";
+  default:
+    return NULL;
+  }
+}
+
+static int host_cc_is_aarch64_elf_gcc(const char *cc_cmd)
+{
+  if (!cc_cmd)
+    return 0;
+  return strstr(cc_cmd, "aarch64-elf-gcc") != NULL;
+}
+
+static void append_arm64_arch_flag(char *cmd, size_t cmd_cap, TargetOS target_os,
+                                   const char *host_cc_cmd)
+{
+  if (!cmd || cmd_cap == 0)
+    return;
+  const char *flag = NULL;
+  if (host_cc_is_aarch64_elf_gcc(host_cc_cmd) || target_os == OS_LINUX)
+    flag = " -march=armv8-a";
+  else
+    flag = " -arch arm64";
+  strncat(cmd, flag, cmd_cap - strlen(cmd) - 1);
+}
+
 static int equals_icase(const char *a, const char *b)
 {
   if (!a || !b)
@@ -749,6 +799,7 @@ typedef struct
   char ***owned_items;
   int *owned_count;
   int *owned_cap;
+  char ***parallel_strings;
 } ProjectInputList;
 
 static int push_input_entry(const char *value, ProjectInputList list,
@@ -768,6 +819,21 @@ static int push_input_entry(const char *value, ProjectInputList list,
       fprintf(stderr,
               "error: out of memory while growing project input list\n");
       return -1;
+    }
+    if (list.parallel_strings)
+    {
+      char **parallel = *list.parallel_strings;
+      char **new_parallel =
+          (char **)realloc(parallel, sizeof(char *) * (size_t)new_cap);
+      if (!new_parallel)
+      {
+        fprintf(stderr,
+                "error: out of memory while growing parallel input metadata\n");
+        return -1;
+      }
+      for (int idx = *list.cap; idx < new_cap; ++idx)
+        new_parallel[idx] = NULL;
+      *list.parallel_strings = new_parallel;
     }
     *list.items = new_arr;
     arr = new_arr;
@@ -799,6 +865,8 @@ static int push_input_entry(const char *value, ProjectInputList list,
     stored = dup;
   }
   arr[*list.count] = stored;
+  if (list.parallel_strings && *list.parallel_strings)
+    (*list.parallel_strings)[*list.count] = NULL;
   (*list.count)++;
   return 0;
 }
@@ -1015,8 +1083,14 @@ static int parse_ceproj_file(
         if (chancecode_backend)
           *chancecode_backend = "x86-gas";
       }
-      else if (equals_icase(value_buf, "arm64") ||
-               equals_icase(value_buf, "arm64-macos"))
+      else if (equals_icase(value_buf, "arm64"))
+      {
+        if (target_arch)
+          *target_arch = ARCH_ARM64;
+        if (chancecode_backend)
+          *chancecode_backend = NULL;
+      }
+      else if (equals_icase(value_buf, "arm64-macos"))
       {
         if (target_arch)
           *target_arch = ARCH_ARM64;
@@ -1024,6 +1098,16 @@ static int parse_ceproj_file(
           *chancecode_backend = "arm64-macos";
         if (target_os)
           *target_os = OS_MACOS;
+      }
+      else if (equals_icase(value_buf, "arm64-elf") ||
+               equals_icase(value_buf, "arm64-linux"))
+      {
+        if (target_arch)
+          *target_arch = ARCH_ARM64;
+        if (chancecode_backend)
+          *chancecode_backend = "arm64-elf";
+        if (target_os)
+          *target_os = OS_LINUX;
       }
       else if (equals_icase(value_buf, "bslash") || equals_icase(value_buf, "bslash"))
       {
@@ -1327,13 +1411,16 @@ static int collect_strip_symbols_from_unit(const Node *unit,
       continue;
     if (stmt->kind == ND_FUNC)
     {
-      const char *name = node_backend_name(stmt);
+      const Node *fn = stmt;
+      const char *name = node_backend_name(fn);
       char *generated = NULL;
-      if (module_full_name &&
-          (!stmt->metadata.backend_name || !stmt->metadata.backend_name[0]) &&
-          name && *name)
+      if ((!fn->metadata.backend_name || !fn->metadata.backend_name[0]) &&
+          fn->name && *fn->name)
       {
-        generated = make_backend_name_from_module(module_full_name, name);
+        if (module_full_name && *module_full_name)
+          generated = module_backend_name(module_full_name, fn->name, fn);
+        else
+          generated = append_param_signature(fn->name, fn);
         if (generated)
           name = generated;
       }
@@ -1352,11 +1439,11 @@ static int collect_strip_symbols_from_unit(const Node *unit,
     {
       const char *name = node_backend_name(stmt);
       char *generated = NULL;
-      if (module_full_name &&
+      if (module_full_name && *module_full_name && !stmt->export_name &&
           (!stmt->metadata.backend_name || !stmt->metadata.backend_name[0]) &&
-          name && *name)
+          stmt->var_name && *stmt->var_name)
       {
-        generated = make_backend_name_from_module(module_full_name, name);
+        generated = module_backend_name(module_full_name, stmt->var_name, NULL);
         if (generated)
           name = generated;
       }
@@ -1433,7 +1520,6 @@ static int collect_strip_symbols_from_ccb(const char *path,
   return 0;
 }
 
-
 static int write_strip_symbol_map(const StripSymbolList *symbols,
                                   const char *path)
 {
@@ -1457,7 +1543,6 @@ static int write_strip_symbol_map(const StripSymbolList *symbols,
   fclose(out);
   return 0;
 }
-
 
 static void choose_strip_map_path(char *buffer, size_t bufsz)
 {
@@ -1855,7 +1940,7 @@ static int build_strip_symbol_map_file(const UnitCompile *units,
     }
   }
   if (collect_strip_symbols_from_loaded_libraries(libraries, library_count,
-                                                 &symbols))
+                                                  &symbols))
   {
     strip_symbol_list_destroy(&symbols);
     return 1;
@@ -1878,7 +1963,6 @@ static char *dup_string_or_null(const char *s)
     return NULL;
   return xstrdup(s);
 }
-
 
 static char *format_string(const char *fmt, ...)
 {
@@ -3533,6 +3617,7 @@ int main(int argc, char **argv)
 #else
   const char *out = "a";
 #endif
+  const char *pending_output = NULL;
   int output_overridden = 0;
   int stop_after_asm = 0;
   int stop_after_ccb = 0;
@@ -3547,10 +3632,12 @@ int main(int argc, char **argv)
   int obfuscate = 0;
   char strip_map_path[STRIP_MAP_PATH_MAX] = {0};
   int strip_map_ready = 0;
+  int pending_ce_output_index = -1;
   AsmSyntax asm_syntax = ASM_INTEL;
   TargetArch target_arch = ARCH_NONE;
   const char *chancecode_backend = NULL;
   const char *chancecodec_cmd_override = NULL;
+  const char *host_cc_cmd_override = NULL;
 #ifdef _WIN32
   TargetOS target_os = OS_WINDOWS;
 #elif defined(__APPLE__)
@@ -3561,6 +3648,7 @@ int main(int argc, char **argv)
   // Separate CHance and object inputs
   const char **ce_inputs = NULL;
   int ce_count = 0, ce_cap = 0;
+  char **ce_obj_outputs = NULL;
   const char **ccb_inputs = NULL;
   int ccb_count = 0, ccb_cap = 0;
   const char **cclib_inputs = NULL;
@@ -3598,6 +3686,10 @@ int main(int argc, char **argv)
   int loaded_library_function_cap = 0;
   char *project_output_alloc = NULL;
 
+  ProjectInputList ce_cli_list = {&ce_inputs, &ce_count, &ce_cap,
+                                  &owned_ce_inputs, &owned_ce_count,
+                                  &owned_ce_cap, &ce_obj_outputs};
+
   for (int i = 1; i < argc; i++)
   {
     if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
@@ -3614,10 +3706,37 @@ int main(int argc, char **argv)
       printf("chancec: Created by Nathan Hornby (AzureianGH)\n");
       return 0;
     }
-    if (strcmp(argv[i], "-o") == 0 && i + 1 < argc)
+    if (strcmp(argv[i], "-o") == 0)
     {
-      out = argv[++i];
-      output_overridden = 1;
+      if (i + 1 >= argc)
+      {
+        fprintf(stderr, "error: -o expects an output path\n");
+        return 2;
+      }
+      const char *dest = argv[++i];
+      if (pending_ce_output_index >= 0 && no_link)
+      {
+        if (!ce_obj_outputs)
+        {
+          fprintf(stderr, "error: internal state mismatch for -o handling\n");
+          goto fail;
+        }
+        char *dup = xstrdup(dest);
+        if (!dup)
+        {
+          fprintf(stderr, "error: out of memory while assigning -o path\n");
+          goto fail;
+        }
+        if (ce_obj_outputs[pending_ce_output_index])
+          free(ce_obj_outputs[pending_ce_output_index]);
+        ce_obj_outputs[pending_ce_output_index] = dup;
+        pending_ce_output_index = -1;
+      }
+      else
+      {
+        pending_output = dest;
+        output_overridden = 1;
+      }
       continue;
     }
     if (strcmp(argv[i], "-S") == 0)
@@ -3673,22 +3792,39 @@ int main(int argc, char **argv)
       opt_level = level;
       continue;
     }
-    if ((strcmp(argv[i], "-c") == 0) || (strcmp(argv[i], "--no-link") == 0))
+    if (strcmp(argv[i], "--no-link") == 0)
     {
       no_link = 1;
-      // Accept optional object filename immediately following
       if (i + 1 < argc && argv[i + 1][0] != '-')
       {
         const char *cand = argv[i + 1];
-        size_t clen = strlen(cand);
-        if (clen >= 2)
+        if (is_object_file_arg(cand))
         {
-          const char *dot = strrchr(cand, '.');
-          if (dot && (_stricmp(dot, ".o") == 0 || _stricmp(dot, ".obj") == 0))
-          {
-            obj_override = cand;
-            i++;
-          }
+          obj_override = cand;
+          i++;
+        }
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "-c") == 0)
+    {
+      no_link = 1;
+      if (i + 1 < argc && argv[i + 1][0] != '-')
+      {
+        const char *cand = argv[i + 1];
+        if (is_ce_source_arg(cand))
+        {
+          if (push_input_entry(cand, ce_cli_list, 0) != 0)
+            goto fail;
+          pending_ce_output_index = ce_count - 1;
+          i++;
+          continue;
+        }
+        if (is_object_file_arg(cand))
+        {
+          obj_override = cand;
+          i++;
+          continue;
         }
       }
       continue;
@@ -3714,6 +3850,16 @@ int main(int argc, char **argv)
       chancecodec_cmd_override = argv[++i];
       continue;
     }
+    if (strcmp(argv[i], "--cc") == 0)
+    {
+      if (i + 1 >= argc)
+      {
+        fprintf(stderr, "error: --cc expects a compiler path\n");
+        return 2;
+      }
+      host_cc_cmd_override = argv[++i];
+      continue;
+    }
     if (strcmp(argv[i], "--library") == 0)
     {
       emit_library = 1;
@@ -3733,8 +3879,7 @@ int main(int argc, char **argv)
     if (strcmp(argv[i], "-arm64") == 0)
     {
       target_arch = ARCH_ARM64;
-      chancecode_backend = "arm64-macos";
-      target_os = OS_MACOS;
+      chancecode_backend = NULL;
       continue;
     }
     if (strcmp(argv[i], "-bslash") == 0)
@@ -3850,16 +3995,20 @@ int main(int argc, char **argv)
     {
       ProjectInputList ce_list = {&ce_inputs, &ce_count,
                                   &ce_cap, &owned_ce_inputs,
-                                  &owned_ce_count, &owned_ce_cap};
+                                  &owned_ce_count, &owned_ce_cap,
+                                  &ce_obj_outputs};
       ProjectInputList ccb_list = {&ccb_inputs, &ccb_count,
                                    &ccb_cap, &owned_ccb_inputs,
-                                   &owned_ccb_count, &owned_ccb_cap};
+                                   &owned_ccb_count, &owned_ccb_cap,
+                                   NULL};
       ProjectInputList cclib_list = {&cclib_inputs, &cclib_count,
                                      &cclib_cap, &owned_cclib_inputs,
-                                     &owned_cclib_count, &owned_cclib_cap};
+                                     &owned_cclib_count, &owned_cclib_cap,
+                                     NULL};
       ProjectInputList obj_list = {&obj_inputs, &obj_count,
                                    &obj_cap, &owned_obj_inputs,
-                                   &owned_obj_count, &owned_obj_cap};
+                                   &owned_obj_count, &owned_obj_cap,
+                                   NULL};
       int perr = parse_ceproj_file(
           arg, ce_list, ccb_list, cclib_list, obj_list, &include_dirs,
           &include_dir_count, &output_overridden, &out, &project_output_alloc,
@@ -3871,13 +4020,9 @@ int main(int argc, char **argv)
     }
     if (ends_with_icase(arg, ".ce"))
     {
-      if (ce_count == ce_cap)
-      {
-        ce_cap = ce_cap ? ce_cap * 2 : 8;
-        ce_inputs =
-            (const char **)realloc((void *)ce_inputs, sizeof(char *) * ce_cap);
-      }
-      ce_inputs[ce_count++] = arg;
+      if (push_input_entry(arg, ce_cli_list, 0) != 0)
+        goto fail;
+      pending_ce_output_index = -1;
     }
     else if (ends_with_icase(arg, ".ccb"))
     {
@@ -3916,6 +4061,13 @@ int main(int argc, char **argv)
               arg);
       return 2;
     }
+  }
+  if (pending_output)
+  {
+    if (no_link)
+      obj_override = pending_output;
+    else
+      out = pending_output;
   }
   if (strip_metadata)
     debug_symbols = 0;
@@ -4004,6 +4156,22 @@ int main(int argc, char **argv)
     return 2;
   }
 
+  char host_cc_override_buf[1024] = {0};
+  const char *host_cc_cmd_to_use = "cc";
+  int host_cc_has_override = 0;
+  if (host_cc_cmd_override && *host_cc_cmd_override)
+  {
+    strip_wrapping_quotes(host_cc_cmd_override, host_cc_override_buf,
+                          sizeof(host_cc_override_buf));
+    if (!host_cc_override_buf[0])
+    {
+      fprintf(stderr, "error: --cc path is empty after trimming quotes/whitespace\n");
+      return 2;
+    }
+    host_cc_cmd_to_use = host_cc_override_buf;
+    host_cc_has_override = 1;
+  }
+
   char chancecodec_exec_buf[1024] = {0};
   char chancecodec_override_buf[1024] = {0};
   const char *chancecodec_cmd_to_use = NULL;
@@ -4044,7 +4212,8 @@ int main(int argc, char **argv)
                          stop_after_asm, no_link, emit_library, freestanding,
                          asm_syntax, include_dir_count, ce_count, ccb_count,
                          cclib_count, obj_count, symbol_ref_ce_count,
-                         symbol_ref_cclib_count, chancecodec_cmd_to_use,
+                         symbol_ref_cclib_count, host_cc_cmd_to_use,
+                         host_cc_has_override, chancecodec_cmd_to_use,
                          chancecodec_has_override, needs_chancecodec,
                          chancecode_backend, chancecodec_uses_fallback,
                          compiler_verbose_enabled(),
@@ -4370,9 +4539,9 @@ int main(int argc, char **argv)
       goto cleanup;
     }
     int map_rc = build_strip_symbol_map_file(
-      units, ce_count, ccb_inputs, ccb_count, loaded_libraries,
-      loaded_library_count, loaded_library_functions,
-      loaded_library_function_count, strip_map_path);
+        units, ce_count, ccb_inputs, ccb_count, loaded_libraries,
+        loaded_library_count, loaded_library_functions,
+        loaded_library_function_count, strip_map_path);
     if (map_rc != 0)
     {
       fprintf(stderr,
@@ -4424,9 +4593,18 @@ int main(int argc, char **argv)
       int obj_is_temp = 0;
       int need_obj = (!stop_after_ccb && !stop_after_asm) &&
                      (no_link || multi_link || target_arch != ARCH_NONE);
+      const char *explicit_obj =
+          (ce_obj_outputs && fi < ce_count) ? ce_obj_outputs[fi] : NULL;
+      if (explicit_obj && *explicit_obj)
+        need_obj = 1;
       if (need_obj)
       {
-        if (no_link && obj_override)
+        if (explicit_obj && *explicit_obj)
+        {
+          snprintf(objOut, sizeof(objOut), "%s", explicit_obj);
+          obj_is_temp = 0;
+        }
+        else if (no_link && obj_override)
         {
           build_path_with_ext(dir, base,
 #ifdef _WIN32
@@ -4476,9 +4654,12 @@ int main(int argc, char **argv)
 
       int imported_count = 0;
       Symbol *imported_syms = sema_copy_imported_function_symbols(sc, &imported_count);
+      int imported_global_count = 0;
+      Symbol *imported_global_syms = sema_copy_imported_global_symbols(sc, &imported_global_count);
 
       CodegenOptions co = {.freestanding = freestanding != 0,
                            .m32 = m32 != 0,
+                           .debug_symbols = debug_symbols != 0,
                            .emit_asm = stop_after_asm != 0,
                            .no_link = (no_link || multi_link ||
                                        stop_after_ccb || stop_after_asm) != 0,
@@ -4489,8 +4670,10 @@ int main(int argc, char **argv)
                            .os = target_os,
                            .externs = NULL,
                            .extern_count = 0,
-               .imported_externs = imported_syms,
-               .imported_extern_count = imported_count,
+                           .imported_externs = imported_syms,
+                           .imported_extern_count = imported_count,
+                           .imported_globals = imported_global_syms,
+                           .imported_global_count = imported_global_count,
                            .opt_level = opt_level};
       int extern_count = 0;
       const Symbol *extern_syms = parser_get_externs(ps, &extern_count);
@@ -4498,6 +4681,7 @@ int main(int argc, char **argv)
       co.extern_count = extern_count;
       rc = codegen_ccb_write_module(unit, &co);
       free(imported_syms);
+      free(imported_global_syms);
 
       if (!rc)
       {
@@ -4543,7 +4727,7 @@ int main(int argc, char **argv)
             else
             {
               int spawn_errno = 0;
-                int ccbin_rc = run_chancecodec_emit_ccbin(
+              int ccbin_rc = run_chancecodec_emit_ccbin(
                   chancecodec_cmd_to_use, ccb_path, ccbin_path, opt_level,
                   strip_metadata, strip_hard, obfuscate,
                   strip_map_ready ? strip_map_path : NULL, &spawn_errno);
@@ -4600,20 +4784,32 @@ int main(int argc, char **argv)
           if (target_arch == ARCH_X86)
             backend = "x86-gas";
           else if (target_arch == ARCH_ARM64)
-            backend = "arm64-macos";
+            backend = arm64_backend_name_for_os(target_os);
           else
             backend = "bslash";
         }
         const char *target_os_option = NULL;
         if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
           target_os_option = target_os_to_option(target_os);
-        if (target_arch == ARCH_ARM64 && (!target_os_option ||
-                                          strcmp(target_os_option, "macos") != 0))
+        if (target_arch == ARCH_ARM64)
         {
-          fprintf(stderr,
-                  "arm64 backend requires --target-os macos (current target-os is '%s')\n",
-                  target_os_option ? target_os_option : "<unset>");
-          rc = 1;
+          int os_invalid = (!target_os_option ||
+                            (strcmp(target_os_option, "macos") != 0 &&
+                             strcmp(target_os_option, "linux") != 0));
+          if (os_invalid)
+          {
+            fprintf(stderr,
+                    "arm64 backend requires --target-os macos or linux (current target-os is '%s')\n",
+                    target_os_option ? target_os_option : "<unset>");
+            rc = 1;
+          }
+          else if (!backend)
+          {
+            fprintf(stderr,
+                    "arm64 backend unavailable for target-os '%s'\n",
+                    target_os_option);
+            rc = 1;
+          }
         }
         if (rc)
           break;
@@ -4635,8 +4831,8 @@ int main(int argc, char **argv)
                                         debug_symbols,
                                         target_os_option, asm_path, ccb_path);
 
-            int spawn_errno = 0;
-            int chance_rc = run_chancecodec_process(
+          int spawn_errno = 0;
+          int chance_rc = run_chancecodec_process(
               chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
               strip_hard, obfuscate,
               strip_map_ready ? strip_map_path : NULL,
@@ -4678,9 +4874,9 @@ int main(int argc, char **argv)
         else
         {
           char cc_cmd[4096];
-          size_t pos =
-              (size_t)snprintf(cc_cmd, sizeof(cc_cmd), "cc -c \"%s\" -o \"%s\"",
-                               asm_path, objOut);
+          size_t pos = (size_t)snprintf(
+              cc_cmd, sizeof(cc_cmd), "\"%s\" -c \"%s\" -o \"%s\"",
+              host_cc_cmd_to_use, asm_path, objOut);
           if (pos >= sizeof(cc_cmd))
           {
             fprintf(stderr, "command buffer exhausted for cc invocation\n");
@@ -4702,8 +4898,8 @@ int main(int argc, char **argv)
             strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
             if (target_arch == ARCH_ARM64)
-              strncat(cc_cmd, " -arch arm64",
-                      sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+              append_arm64_arch_flag(cc_cmd, sizeof(cc_cmd), target_os,
+                                     host_cc_cmd_to_use);
             if (opt_level > 0)
             {
               char optbuf[8];
@@ -4875,21 +5071,34 @@ int main(int argc, char **argv)
           if (target_arch == ARCH_X86)
             backend = "x86-gas";
           else if (target_arch == ARCH_ARM64)
-            backend = "arm64-macos";
+            backend = arm64_backend_name_for_os(target_os);
           else
             backend = "bslash";
         }
         const char *target_os_option = NULL;
         if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
           target_os_option = target_os_to_option(target_os);
-        if (target_arch == ARCH_ARM64 &&
-            (!target_os_option || strcmp(target_os_option, "macos") != 0))
+        if (target_arch == ARCH_ARM64)
         {
-          fprintf(stderr,
-                  "arm64 backend requires --target-os macos (current target-os is '%s')\n",
-                  target_os_option ? target_os_option : "<unset>");
-          rc = 1;
-          break;
+          int os_invalid = (!target_os_option ||
+                            (strcmp(target_os_option, "macos") != 0 &&
+                             strcmp(target_os_option, "linux") != 0));
+          if (os_invalid)
+          {
+            fprintf(stderr,
+                    "arm64 backend requires --target-os macos or linux (current target-os is '%s')\n",
+                    target_os_option ? target_os_option : "<unset>");
+            rc = 1;
+            break;
+          }
+          if (!backend)
+          {
+            fprintf(stderr,
+                    "arm64 backend unavailable for target-os '%s'\n",
+                    target_os_option);
+            rc = 1;
+            break;
+          }
         }
         if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
         {
@@ -4900,19 +5109,19 @@ int main(int argc, char **argv)
         }
         char display_cmd[4096];
         build_chancecodec_display_cmd(display_cmd, sizeof(display_cmd),
-              chancecodec_cmd_to_use, backend,
-              opt_level, strip_metadata,
-              strip_hard, obfuscate,
-              strip_map_ready ? strip_map_path : NULL,
-              debug_symbols,
-              target_os_option, asm_path, ccb_path);
+                                      chancecodec_cmd_to_use, backend,
+                                      opt_level, strip_metadata,
+                                      strip_hard, obfuscate,
+                                      strip_map_ready ? strip_map_path : NULL,
+                                      debug_symbols,
+                                      target_os_option, asm_path, ccb_path);
 
         int spawn_errno = 0;
         int chance_rc = run_chancecodec_process(
-          chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
-          strip_hard, obfuscate,
-          strip_map_ready ? strip_map_path : NULL, debug_symbols,
-          asm_path, ccb_path, target_os_option, &spawn_errno);
+            chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
+            strip_hard, obfuscate,
+            strip_map_ready ? strip_map_path : NULL, debug_symbols,
+            asm_path, ccb_path, target_os_option, &spawn_errno);
         if (chance_rc != 0)
         {
           if (chance_rc < 0)
@@ -4949,7 +5158,8 @@ int main(int argc, char **argv)
 
         char cc_cmd[4096];
         size_t pos = (size_t)snprintf(
-            cc_cmd, sizeof(cc_cmd), "cc -c \"%s\" -o \"%s\"", asm_path, objOut);
+            cc_cmd, sizeof(cc_cmd), "\"%s\" -c \"%s\" -o \"%s\"",
+            host_cc_cmd_to_use, asm_path, objOut);
         if (pos >= sizeof(cc_cmd))
         {
           fprintf(stderr, "command buffer exhausted for cc invocation\n");
@@ -4968,8 +5178,8 @@ int main(int argc, char **argv)
         strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
         if (target_arch == ARCH_ARM64)
-          strncat(cc_cmd, " -arch arm64",
-                  sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+          append_arm64_arch_flag(cc_cmd, sizeof(cc_cmd), target_os,
+                                 host_cc_cmd_to_use);
         if (opt_level > 0)
         {
           char optbuf[8];
@@ -5139,28 +5349,50 @@ int main(int argc, char **argv)
           if (target_arch == ARCH_X86)
             backend = "x86-gas";
           else if (target_arch == ARCH_ARM64)
-            backend = "arm64-macos";
+            backend = arm64_backend_name_for_os(target_os);
           else
             backend = "bslash";
         }
         const char *target_os_option = NULL;
         if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
           target_os_option = target_os_to_option(target_os);
+        if (target_arch == ARCH_ARM64)
+        {
+          int os_invalid = (!target_os_option ||
+                            (strcmp(target_os_option, "macos") != 0 &&
+                             strcmp(target_os_option, "linux") != 0));
+          if (os_invalid)
+          {
+            fprintf(stderr,
+                    "arm64 backend requires --target-os macos or linux (current target-os is '%s')\n",
+                    target_os_option ? target_os_option : "<unset>");
+            rc = 1;
+            break;
+          }
+          if (!backend)
+          {
+            fprintf(stderr,
+                    "arm64 backend unavailable for target-os '%s'\n",
+                    target_os_option);
+            rc = 1;
+            break;
+          }
+        }
         char display_cmd[4096];
         build_chancecodec_display_cmd(display_cmd, sizeof(display_cmd),
-              chancecodec_cmd_to_use, backend,
-              opt_level, strip_metadata,
-              strip_hard, obfuscate,
-              strip_map_ready ? strip_map_path : NULL,
-              debug_symbols,
-              target_os_option, asm_path, ccbin_path);
+                                      chancecodec_cmd_to_use, backend,
+                                      opt_level, strip_metadata,
+                                      strip_hard, obfuscate,
+                                      strip_map_ready ? strip_map_path : NULL,
+                                      debug_symbols,
+                                      target_os_option, asm_path, ccbin_path);
 
         int spawn_errno = 0;
         int chance_rc = run_chancecodec_process(
-          chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
-          strip_hard, obfuscate,
-          strip_map_ready ? strip_map_path : NULL, debug_symbols,
-          asm_path, ccbin_path, target_os_option, &spawn_errno);
+            chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
+            strip_hard, obfuscate,
+            strip_map_ready ? strip_map_path : NULL, debug_symbols,
+            asm_path, ccbin_path, target_os_option, &spawn_errno);
         if (chance_rc != 0)
         {
           if (chance_rc < 0)
@@ -5189,17 +5421,17 @@ int main(int argc, char **argv)
           }
 
           char cc_cmd[4096];
-          size_t pos =
-              (size_t)snprintf(cc_cmd, sizeof(cc_cmd), "cc -c \"%s\" -o \"%s\"",
-                               asm_path, objOut);
+          size_t pos = (size_t)snprintf(
+              cc_cmd, sizeof(cc_cmd), "\"%s\" -c \"%s\" -o \"%s\"",
+              host_cc_cmd_to_use, asm_path, objOut);
           if (pos >= sizeof(cc_cmd))
           {
             fprintf(stderr, "command buffer exhausted for cc invocation\n");
             rc = 1;
             break;
           }
-            strncat(cc_cmd, " -g -gdwarf-4",
-              sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+          strncat(cc_cmd, " -g -gdwarf-4",
+                  sizeof(cc_cmd) - strlen(cc_cmd) - 1);
           if (freestanding)
             strncat(cc_cmd, " -ffreestanding -nostdlib",
                     sizeof(cc_cmd) - strlen(cc_cmd) - 1);
@@ -5285,13 +5517,14 @@ int main(int argc, char **argv)
     size_t cmdsz = 4096;
     char *cmd = (char *)xmalloc(cmdsz);
     if (debug_symbols)
-      snprintf(cmd, cmdsz, "cc -g -gdwarf-4 -o \"%s\"", out);
+      snprintf(cmd, cmdsz, "\"%s\" -g -gdwarf-4 -o \"%s\"",
+               host_cc_cmd_to_use, out);
     else
-      snprintf(cmd, cmdsz, "cc -o \"%s\"", out);
+      snprintf(cmd, cmdsz, "\"%s\" -o \"%s\"", host_cc_cmd_to_use, out);
     if (target_arch == ARCH_ARM64)
-      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
-    if (target_arch == ARCH_ARM64)
-      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
+      append_arm64_arch_flag(cmd, cmdsz, target_os, host_cc_cmd_to_use);
+    if (freestanding)
+      strncat(cmd, " -ffreestanding -nostdlib", cmdsz - strlen(cmd) - 1);
     for (int i = 0; i < to_cnt; ++i)
     {
       size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
@@ -5350,13 +5583,17 @@ int main(int argc, char **argv)
     char link_cmd[4096];
     if (debug_symbols)
       snprintf(link_cmd, sizeof(link_cmd),
-               "cc -g -gdwarf-4 -o \"%s\" \"%s\"", out,
-               single_obj_path);
+               "\"%s\" -g -gdwarf-4 -o \"%s\" \"%s\"",
+               host_cc_cmd_to_use, out, single_obj_path);
     else
-      snprintf(link_cmd, sizeof(link_cmd), "cc -o \"%s\" \"%s\"", out,
+      snprintf(link_cmd, sizeof(link_cmd),
+               "\"%s\" -o \"%s\" \"%s\"", host_cc_cmd_to_use, out,
                single_obj_path);
     if (target_arch == ARCH_ARM64)
-      strncat(link_cmd, " -arch arm64",
+      append_arm64_arch_flag(link_cmd, sizeof(link_cmd), target_os,
+                             host_cc_cmd_to_use);
+    if (freestanding)
+      strncat(link_cmd, " -ffreestanding -nostdlib",
               sizeof(link_cmd) - strlen(link_cmd) - 1);
     if (compiler_verbose_enabled())
     {
@@ -5384,13 +5621,15 @@ int main(int argc, char **argv)
     size_t cmdsz = 4096;
     char *cmd = (char *)xmalloc(cmdsz);
     if (debug_symbols)
-      snprintf(cmd, cmdsz, "cc -g -gdwarf-4 -r -o \"%s\"", obj_override);
+      snprintf(cmd, cmdsz, "\"%s\" -g -gdwarf-4 -r -o \"%s\"",
+               host_cc_cmd_to_use, obj_override);
     else
-      snprintf(cmd, cmdsz, "cc -r -o \"%s\"", obj_override);
+      snprintf(cmd, cmdsz, "\"%s\" -r -o \"%s\"", host_cc_cmd_to_use,
+               obj_override);
     if (target_arch == ARCH_ARM64)
-      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
-    if (target_arch == ARCH_ARM64)
-      strncat(cmd, " -arch arm64", cmdsz - strlen(cmd) - 1);
+      append_arm64_arch_flag(cmd, cmdsz, target_os, host_cc_cmd_to_use);
+    if (freestanding)
+      strncat(cmd, " -ffreestanding -nostdlib", cmdsz - strlen(cmd) - 1);
     for (int i = 0; i < to_cnt; ++i)
     {
       size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
@@ -5507,6 +5746,12 @@ cleanup:
     for (int i = 0; i < owned_ce_count; ++i)
       free(owned_ce_inputs[i]);
     free(owned_ce_inputs);
+  }
+  if (ce_obj_outputs)
+  {
+    for (int i = 0; i < ce_cap; ++i)
+      free(ce_obj_outputs[i]);
+    free(ce_obj_outputs);
   }
   if (owned_ccb_inputs)
   {
