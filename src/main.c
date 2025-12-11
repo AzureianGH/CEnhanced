@@ -690,9 +690,7 @@ static void append_arm64_arch_flag(char *cmd, size_t cmd_cap, TargetOS target_os
   if (!cmd || cmd_cap == 0)
     return;
   const char *flag = NULL;
-  if (target_os == OS_WINDOWS)
-    flag = " --target=arm64-pc-windows-msvc";
-  else if (host_cc_is_aarch64_elf_gcc(host_cc_cmd) || target_os == OS_LINUX)
+  if (host_cc_is_aarch64_elf_gcc(host_cc_cmd) || target_os == OS_LINUX)
     flag = " -march=armv8-a";
   else
     flag = " -arch arm64";

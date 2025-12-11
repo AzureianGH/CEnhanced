@@ -4,6 +4,7 @@ bring Test.Chance as TC;
 bring LibTest as LT;
 bring LibTest.Another;
 bring Std;
+bring Std.File as File;
 
 #define WARN_MSG "diag warning triggered"
 #define NOTE_MSG "diag note triggered"
@@ -61,6 +62,29 @@ extend from "C" void free(void *);
 extend from "C" void exit(int);
 extend from "C" int test();
 extend fun test_chance() -> i32;
+extend from "C" i32 remove(char*);
+
+hide alias string = char*;
+
+
+// Forward declaration and struct that holds an action field
+struct AsmProgram;
+
+struct ArchHandler
+{
+    string name;
+    string description;
+    action(AsmProgram* program) -> i32 assemble;
+};
+
+struct AsmProgram
+{
+    string input_path;
+    string output_path;
+    ArchHandler* arch;
+    i32 format;
+    i32 reloc;
+};
 
 expose struct AnElement
 {
@@ -96,7 +120,6 @@ hide fun offsetof_alignprobe_payload() -> i32
 hide i32 total_test_count = 0;
 OtherElement globalElement = {}; // auto hide members
 
-hide alias string = char*;
 hide alias ptr<T> = T*;
 
 [Inline]
@@ -133,6 +156,13 @@ hide fun assert(bool condition, string message) -> void
         abort();
     }
     ret;
+}
+
+hide fun mock_assemble(AsmProgram* program) -> i32
+{
+    if (program == null)
+        ret -1;
+    ret 7;
 }
 
 [EntryPoint]
@@ -712,8 +742,19 @@ expose fun main() -> i32
         }
     );
 
-    lambda_test(test_action, test_action2);
+    lambda_test(test_action, /* multi line comment */ test_action2);
 
+    /* multi
+    lined
+    comment
+    */
+
+
+    file_io_tests();
+
+    u32 uliteral = 88u;
+
+    assert(uliteral == (88 as u32), "unsigned literal 88u == 88 as u32");
 
 
     Std.IO.printnl("All tests completed successfully! %d total asserts.", total_test_count);
@@ -728,6 +769,93 @@ hide fun lambda_test(action a () -> void, action b (i32) -> i16) -> void
     Std.IO.print("Lambda returned: %d\n", val);
     ret;
 }
+
+hide fun file_io_tests() -> void
+{
+    //
+    // Basic byte write/read test
+    //
+    u8* file_payload = Std.Memory.alloc(4) as u8*;
+    file_payload[0] = 1;
+    file_payload[1] = 2;
+    file_payload[2] = 3;
+    file_payload[3] = 4;
+
+    i32 bytes_written =
+        File.write_all("file_test.bin", file_payload as void*, 4);
+    assert(bytes_written == 4, "write_all wrote 4 bytes");
+
+    void* file_buf = null;
+    i32 file_len = 0;
+
+    i32 bytes_read =
+        File.read_all("file_test.bin", (&file_buf) as void**, &file_len);
+    assert(bytes_read == 4 && file_len == 4, "read_all read 4 bytes");
+
+    u8* file_bytes = file_buf as u8*;
+    assert(file_bytes[0] == 1 &&
+           file_bytes[1] == 2 &&
+           file_bytes[2] == 3 &&
+           file_bytes[3] == 4,
+           "read_all preserved byte contents");
+
+    Std.Memory.dealloc(file_buf);
+    Std.Memory.dealloc(file_payload as void*);
+
+
+    //
+    // Struct write/read test
+    //
+    TC.SmallTest* file_struct =
+        Std.Memory.alloc(sizeof(TC.SmallTest)) as TC.SmallTest*;
+    file_struct->smallValue = 7;
+    file_struct->testVar   = 99;
+
+    void* fh = File.open("file_struct.bin", "wb");
+    assert(fh != null, "open for write returned handle");
+
+    i32 struct_size = sizeof(TC.SmallTest) as i32;
+    assert(File.write(fh, file_struct as void*, struct_size) == struct_size,
+           "write struct bytes");
+
+    File.flush(fh);
+    File.close(fh);
+
+    //
+    // Validate written struct
+    //
+    fh = File.open("file_struct.bin", "rb");
+    assert(fh != null, "open for read returned handle");
+
+    // Seek to end
+    assert(File.seek(fh, 0, 2) == 0, "seek to end succeeded");  // 2 = SEEK_END
+    i64 end_pos = File.tell(fh);
+    assert(end_pos == struct_size as i64, "end position matches struct size");
+
+    // Seek to start
+    assert(File.seek(fh, 0, 0) == 0, "seek to start succeeded"); // 0 = SEEK_SET
+
+    void* struct_buf = Std.Memory.alloc(struct_size);
+    assert(File.read(fh, struct_buf, struct_size) == struct_size,
+           "read struct bytes");
+
+    File.close(fh);
+
+    TC.SmallTest loaded_struct = *(struct_buf as TC.SmallTest*);
+    assert(loaded_struct.smallValue == 7 &&
+           loaded_struct.testVar   == 99,
+           "struct round-trip matches");
+
+    Std.Memory.dealloc(struct_buf);
+    Std.Memory.dealloc(file_struct as void*);
+
+    //
+    // Cleanup
+    //
+    remove("file_test.bin");
+    remove("file_struct.bin");
+}
+
 
 hide fun super_args(
     i32 a, i32 b, i32 c, 

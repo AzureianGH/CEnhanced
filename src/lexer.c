@@ -41,6 +41,7 @@ static Token make_tok(Lexer *lx, TokenKind k, const char *start, int len)
     t.lexeme = start;
     t.length = len;
     t.int_val = 0;
+    t.int_is_unsigned = 0;
     t.float_val = 0.0;
     t.float_is_f32 = 0;
     t.line = lx->line;
@@ -283,6 +284,29 @@ static void skip_ws_and_comments(Lexer *lx)
                 ;
             continue;
         }
+        if (c == '/' && lx->idx + 1 < lx->src.length &&
+            lx->src.src[lx->idx + 1] == '*')
+        {
+            int start_line = lx->line;
+            int start_col = lx->col;
+            getc2(lx); // '/'
+            getc2(lx); // '*'
+            while (!at_end(lx))
+            {
+                char cc = getc2(lx);
+                if (cc == '*' && peekc(lx) == '/')
+                {
+                    getc2(lx); // consume '/'
+                    break;
+                }
+            }
+            if (at_end(lx))
+            {
+                diag_error_at(&lx->src, start_line, start_col,
+                              "unterminated block comment");
+            }
+            continue;
+        }
         break;
     }
 }
@@ -294,6 +318,7 @@ static Token lex_number(Lexer *lx)
     int has_fraction = 0;
     int has_exponent = 0;
     int is_prefixed = 0;
+    int saw_suffix_u = 0;
     // Check for base prefixes: 0x, 0b, 0o, 0d
     if (peekc(lx) == '0' && lx->idx + 1 < lx->src.length)
     {
@@ -334,8 +359,19 @@ static Token lex_number(Lexer *lx)
                 any = 1;
             }
             int len = lx->idx - start;
+            if (!has_fraction && !has_exponent)
+            {
+                char suffix = peekc(lx);
+                if (suffix == 'u' || suffix == 'U')
+                {
+                    saw_suffix_u = 1;
+                    getc2(lx);
+                    len = lx->idx - start;
+                }
+            }
             Token t = make_tok(lx, TK_INT, lx->src.src + start, len);
             t.int_val = any ? v : 0;
+            t.int_is_unsigned = saw_suffix_u;
             return t;
         }
     }
@@ -397,6 +433,16 @@ static Token lex_number(Lexer *lx)
         }
     }
 
+    if (!has_fraction && !has_exponent && !saw_suffix_f)
+    {
+        char suffix = peekc(lx);
+        if (suffix == 'u' || suffix == 'U')
+        {
+            saw_suffix_u = 1;
+            getc2(lx);
+        }
+    }
+
     int token_len = lx->idx - start;
     Token t;
     if (has_fraction || has_exponent || saw_suffix_f)
@@ -423,6 +469,7 @@ static Token lex_number(Lexer *lx)
         v = v * 10 + (lx->src.src[i] - '0');
     }
     t.int_val = v;
+    t.int_is_unsigned = saw_suffix_u;
     return t;
 }
 

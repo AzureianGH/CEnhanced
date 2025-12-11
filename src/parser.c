@@ -1936,6 +1936,24 @@ static Type *parse_type_spec(Parser *ps)
     else if (b.kind == TK_KW_ACTION)
     {
         Type *func_ty = type_func();
+        Token maybe_lparen = lexer_peek(ps->lx);
+        if (maybe_lparen.kind == TK_LPAREN)
+        {
+            int ret_inside = parse_funptr_signature_parens(ps, func_ty, 1);
+            if (!ret_inside)
+            {
+                Token arrow = lexer_peek(ps->lx);
+                if (arrow.kind != TK_ARROW)
+                {
+                    diag_error_at(lexer_source(ps->lx), arrow.line, arrow.col,
+                                  "action type requires '->' return type when signature is present");
+                    exit(1);
+                }
+                lexer_next(ps->lx);
+                func_ty->func.ret = parse_type_spec(ps);
+            }
+            finalize_funptr_signature(ps, func_ty, &maybe_lparen);
+        }
         base = type_ptr(func_ty);
     }
     else if (b.kind == TK_IDENT)
@@ -2148,7 +2166,7 @@ static Type *parse_type_spec(Parser *ps)
                       "expected type specifier");
         exit(1);
     }
-    // array suffixes '[...]'
+    // array suffixes '[...]' before pointers
     Token p = lexer_peek(ps->lx);
     while (p.kind == TK_LBRACKET)
     {
@@ -2194,9 +2212,47 @@ static Type *parse_type_spec(Parser *ps)
         depth++;
         p = lexer_peek(ps->lx);
     }
-    if (depth == 0)
-        return base;
-    return make_ptr_chain_dyn(base, depth);
+    Type *ty = (depth == 0) ? base : make_ptr_chain_dyn(base, depth);
+
+    // trailing array suffixes after pointer chains (e.g., T*[N])
+    while (p.kind == TK_LBRACKET)
+    {
+        lexer_next(ps->lx);
+        Token len_tok = lexer_peek(ps->lx);
+        int length = -1;
+        if (len_tok.kind == TK_RBRACKET)
+        {
+            length = -1;
+        }
+        else
+        {
+            len_tok = lexer_next(ps->lx);
+            if (len_tok.kind != TK_INT)
+            {
+                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                              "array length must be an integer literal");
+                exit(1);
+            }
+            if (len_tok.int_val < 0)
+            {
+                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                              "array length must be non-negative");
+                exit(1);
+            }
+            if (len_tok.int_val > INT_MAX)
+            {
+                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                              "array length is too large");
+                exit(1);
+            }
+            length = (int)len_tok.int_val;
+        }
+        expect(ps, TK_RBRACKET, "]");
+        ty = type_array(ty, length);
+        p = lexer_peek(ps->lx);
+    }
+
+    return ty;
 }
 
 static int parser_peek_struct_literal(Parser *ps, Token look)
@@ -2577,6 +2633,7 @@ static Node *parse_primary(Parser *ps)
     {
         Node *n = new_node(ND_INT);
         n->int_val = t.int_val;
+        n->int_is_unsigned = t.int_is_unsigned;
         n->line = t.line;
         n->col = t.col;
         n->src = lexer_source(ps->lx);
@@ -5344,14 +5401,78 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
 {
     expect(ps, TK_KW_STRUCT, "struct");
     Token name = expect(ps, TK_IDENT, "struct name");
+    Token after_name = lexer_peek(ps->lx);
+    // Forward declaration: 'struct Name;'
+    if (after_name.kind == TK_SEMI)
+    {
+        lexer_next(ps->lx);
+        Type *existing = named_type_get(ps, name.lexeme, name.length);
+        if (existing)
+        {
+            if (existing->kind != TY_STRUCT)
+            {
+                diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                              "type '%.*s' already declared with non-struct kind",
+                              name.length, name.lexeme);
+                exit(1);
+            }
+            if (is_exposed && !existing->is_exposed)
+                existing->is_exposed = 1;
+            return;
+        }
+        Type *forward = (Type *)xcalloc(1, sizeof(Type));
+        forward->kind = TY_STRUCT;
+        forward->struct_name = (char *)xmalloc((size_t)name.length + 1);
+        memcpy((char *)forward->struct_name, name.lexeme, (size_t)name.length);
+        ((char *)forward->struct_name)[name.length] = '\0';
+        forward->is_exposed = is_exposed;
+        forward->strct.field_count = 0;
+        forward->strct.size_bytes = 0;
+        named_type_add(ps, name.lexeme, name.length, forward, is_exposed);
+        return;
+    }
+
     expect(ps, TK_LBRACE, "{");
-    // Create a Type object for the struct
-    Type *st = (Type *)xcalloc(1, sizeof(Type));
-    st->kind = TY_STRUCT;
-    st->struct_name = (char *)xmalloc((size_t)name.length + 1);
-    memcpy((char *)st->struct_name, name.lexeme, (size_t)name.length);
-    ((char *)st->struct_name)[name.length] = '\0';
-    st->is_exposed = is_exposed;
+    // Reuse forward declaration if present; otherwise create a new struct Type
+    Type *st = named_type_get(ps, name.lexeme, name.length);
+    int is_new_struct = 0;
+    if (st)
+    {
+        if (st->kind != TY_STRUCT)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "type '%.*s' already declared with non-struct kind",
+                          name.length, name.lexeme);
+            exit(1);
+        }
+        if (st->strct.field_count > 0)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "redefinition of struct '%.*s'", name.length, name.lexeme);
+            exit(1);
+        }
+    }
+    else
+    {
+        st = (Type *)xcalloc(1, sizeof(Type));
+        st->kind = TY_STRUCT;
+        st->struct_name = (char *)xmalloc((size_t)name.length + 1);
+        memcpy((char *)st->struct_name, name.lexeme, (size_t)name.length);
+        ((char *)st->struct_name)[name.length] = '\0';
+        is_new_struct = 1;
+    }
+    st->is_exposed = st->is_exposed || is_exposed;
+    // Ensure name is registered before parsing fields so self-references work.
+    if (is_new_struct)
+        named_type_add(ps, name.lexeme, name.length, st, is_exposed);
+
+    // Reset any forward-declaration field info before populating.
+    st->strct.field_names = NULL;
+    st->strct.field_types = NULL;
+    st->strct.field_offsets = NULL;
+    st->strct.field_count = 0;
+    st->strct.size_bytes = 0;
+
     // Parse fields: list of type ident ';'
     const char **fnames = NULL;
     Type **ftypes = NULL;
@@ -5430,8 +5551,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
     int struct_align = max_align > 0 ? max_align : 1;
     offset = align_up(offset, struct_align);
     st->strct.size_bytes = offset;
-    // register named type
-    named_type_add(ps, name.lexeme, name.length, st, is_exposed);
+    // named type already registered above
     if (is_exposed && ps->module_full_name)
         module_registry_register_struct(ps->module_full_name, st);
     expect(ps, TK_SEMI, ";");

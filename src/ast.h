@@ -128,6 +128,7 @@ typedef struct
     const char *lexeme; // pointer into buffer
     int length;
     int64_t int_val;
+    int int_is_unsigned;
     double float_val;
     int float_is_f32;
     int line;
@@ -321,6 +322,7 @@ struct Node
     struct Node *lhs;
     struct Node *rhs;
     int64_t int_val;  // for ND_INT
+    int int_is_unsigned;
     double float_val; // for ND_FLOAT
     // Source location for diagnostics
     int line;

@@ -2533,6 +2533,7 @@ static int node_force_int_literal(Node *n)
         if (n->lhs->kind != ND_INT)
             return 0;
         int64_t val = n->lhs->int_val;
+        int was_unsigned = n->lhs->int_is_unsigned;
         ast_free(n->lhs);
         n->lhs = NULL;
         if (n->rhs)
@@ -2542,6 +2543,7 @@ static int node_force_int_literal(Node *n)
         }
         n->kind = ND_INT;
         n->int_val = -val;
+        n->int_is_unsigned = was_unsigned;
         return 1;
     }
     if (n->kind == ND_CAST && n->lhs && type_is_int(n->type))
@@ -2551,6 +2553,7 @@ static int node_force_int_literal(Node *n)
         if (n->lhs->kind != ND_INT)
             return 0;
         int64_t val = n->lhs->int_val;
+        int was_unsigned = n->lhs->int_is_unsigned;
         ast_free(n->lhs);
         n->lhs = NULL;
         if (n->rhs)
@@ -2560,6 +2563,7 @@ static int node_force_int_literal(Node *n)
         }
         n->kind = ND_INT;
         n->int_val = val;
+        n->int_is_unsigned = was_unsigned;
         return 1;
     }
     return 0;
@@ -2633,6 +2637,7 @@ static int coerce_int_literal_to_type(Node *literal, Type *target, const char *c
 
     literal->int_val = coerced;
     literal->type = canon_target;
+    literal->int_is_unsigned = type_is_unsigned_int(canon_target) ? 1 : 0;
 
     if (warn)
     {
@@ -3013,9 +3018,42 @@ static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target
     }
     if (!init->init.is_zero)
     {
-        diag_error_at(init->src, init->line, init->col,
-                      "brace initializer not supported for this type");
-        exit(1);
+        int count = init->init.count;
+        if (count != 1)
+        {
+            diag_error_at(init->src, init->line, init->col,
+                          "brace initializer for this type requires exactly one element");
+            exit(1);
+        }
+        const char *designator = init->init.designators ? init->init.designators[0] : NULL;
+        if (designator)
+        {
+            diag_error_at(init->src, init->line, init->col,
+                          "designators are not supported for this initializer");
+            exit(1);
+        }
+        Node *elem = (init->init.elems && init->init.count > 0) ? init->init.elems[0] : NULL;
+        if (!elem)
+        {
+            diag_error_at(init->src, init->line, init->col,
+                          "missing initializer expression");
+            exit(1);
+        }
+        if (elem->kind == ND_INIT_LIST)
+        {
+            diag_error_at(elem->src, elem->line, elem->col,
+                          "nested initializer lists are not supported for this type");
+            exit(1);
+        }
+        check_expr(sc, elem);
+        if (target && !can_assign(target, elem))
+        {
+            diag_error_at(elem->src, elem->line, elem->col,
+                          "initializer expression type mismatch");
+            exit(1);
+        }
+        init->type = target;
+        return;
     }
     init->type = target;
 }
@@ -3495,7 +3533,7 @@ static void check_expr(SemaContext *sc, Node *e)
     if (e->kind == ND_INT)
     {
         if (!e->type)
-            e->type = &ty_i32;
+            e->type = e->int_is_unsigned ? &ty_u32 : &ty_i32;
         return;
     }
     if (e->kind == ND_FLOAT)
@@ -4095,12 +4133,6 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, target);
-        if (target->kind == ND_VAR && target->var_is_global && !target->var_is_function)
-        {
-            diag_error_at(target->src, target->line, target->col,
-                          "address-of operator is not supported for global variables");
-            exit(1);
-        }
         if (!target->type && target->kind == ND_VAR)
             target->type = resolve_variable(sc, target->var_ref, NULL, NULL, NULL, NULL);
         if (!target->type)
@@ -5266,6 +5298,17 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
             stmt->rhs->type = stmt->var_type;
         }
         stmt->var_type = canonicalize_type_deep(stmt->var_type);
+        // Support multi-element brace initializers on pointer targets by
+        // treating the storage as a fixed-size array of the pointee type.
+        if (stmt->var_type && stmt->var_type->kind == TY_PTR && stmt->rhs && stmt->rhs->kind == ND_INIT_LIST && !stmt->rhs->init.is_zero)
+        {
+            int elem_count = stmt->rhs->init.count;
+            if (elem_count > 0)
+            {
+                Type *elem_ty = stmt->var_type->pointee ? canonicalize_type_deep(stmt->var_type->pointee) : &ty_i32;
+                stmt->var_type = canonicalize_type_deep(type_array(elem_ty, elem_count));
+            }
+        }
         if (stmt->var_type && stmt->var_type->kind == TY_ARRAY && stmt->var_type->array.is_unsized && stmt->rhs && stmt->rhs->kind == ND_INIT_LIST)
         {
             int elem_count = stmt->rhs->init.count;
@@ -5520,10 +5563,17 @@ static int sema_global_initializer_is_const(const Node *expr)
     case ND_INT:
     case ND_FLOAT:
     case ND_NULL:
+    case ND_STRING:
         return 1;
     case ND_NEG:
     case ND_CAST:
         return sema_global_initializer_is_const(expr->lhs);
+    case ND_ADDR:
+        if (!expr->lhs)
+            return 0;
+        if (expr->lhs->kind == ND_VAR && (expr->lhs->var_is_global || expr->lhs->var_is_function))
+            return 1;
+        return 0;
     case ND_INIT_LIST:
         if (expr->init.is_zero)
             return 1;
@@ -5568,6 +5618,19 @@ static int sema_check_global_decl(SemaContext *sc, Node *decl)
                       "global '%s' cannot have type void",
                       decl->var_name);
         return 1;
+    }
+    // Allow brace initializers with multiple elements to target pointer types by
+    // materializing a fixed-size array of the pointee type. This supports
+    // patterns like `char** tok = {null, null};`.
+    if (ty->kind == TY_PTR && decl->rhs && decl->rhs->kind == ND_INIT_LIST && !decl->rhs->init.is_zero)
+    {
+        int elem_count = decl->rhs->init.count;
+        if (elem_count > 0)
+        {
+            Type *elem_ty = ty->pointee ? canonicalize_type_deep(ty->pointee) : &ty_i32;
+            decl->var_type = canonicalize_type_deep(type_array(elem_ty, elem_count));
+            ty = decl->var_type;
+        }
     }
     if (ty->kind == TY_ARRAY && ty->array.is_unsized && decl->rhs && decl->rhs->kind == ND_INIT_LIST)
     {
@@ -5633,13 +5696,16 @@ static int sema_check_global_decl(SemaContext *sc, Node *decl)
 
     if (decl->rhs->kind == ND_INIT_LIST)
     {
-        if (!decl->rhs->init.is_zero)
+        check_initializer_for_type(sc, decl->rhs, ty);
+        if (!sema_global_initializer_is_const(decl->rhs))
         {
             diag_error_at(decl->rhs->src, decl->rhs->line, decl->rhs->col,
-                          "non-zero initializer lists are not supported for this global type");
+                          "global initializer for '%s' must be a constant expression",
+                          decl->var_name);
             return 1;
         }
-        decl->rhs->type = ty;
+        if (!decl->rhs->type)
+            decl->rhs->type = ty;
         return 0;
     }
 

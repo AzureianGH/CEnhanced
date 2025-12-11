@@ -1,0 +1,127 @@
+module Std.File;
+
+bring Std.Memory as Mem;
+
+extend from "C" void* fopen(char* path, char* mode);
+extend from "C" i32 fclose(void* handle);
+extend from "C" i32 fread(void* buffer, i32 size, i32 count, void* handle);
+extend from "C" i32 fwrite(void* buffer, i32 size, i32 count, void* handle);
+extend from "C" i32 fseek(void* handle, i64 offset, i32 whence);
+extend from "C" i64 ftell(void* handle);
+extend from "C" i32 fflush(void* handle);
+
+constant i32 SEEK_SET = 0;
+constant i32 SEEK_CUR = 1;
+constant i32 SEEK_END = 2;
+
+expose fun open(char* path, char* mode) -> void*
+{
+    ret fopen(path, mode);
+}
+
+expose fun close(void* handle) -> i32
+{
+    if (handle == 0 as void*)
+        ret -1;
+    ret fclose(handle);
+}
+
+expose fun read(void* handle, void* buffer, i32 size) -> i32
+{
+    if (handle == 0 as void* || buffer == 0 as void* || size < 0)
+        ret -1;
+    ret fread(buffer, 1, size, handle);
+}
+
+expose fun write(void* handle, void* buffer, i32 size) -> i32
+{
+    if (handle == 0 as void* || buffer == 0 as void* || size < 0)
+        ret -1;
+    ret fwrite(buffer, 1, size, handle);
+}
+
+expose fun flush(void* handle) -> i32
+{
+    if (handle == 0 as void*)
+        ret -1;
+    ret fflush(handle);
+}
+
+expose fun seek(void* handle, i64 offset, i32 whence) -> i32
+{
+    if (handle == 0 as void*)
+        ret -1;
+    ret fseek(handle, offset, whence);
+}
+
+expose fun tell(void* handle) -> i64
+{
+    if (handle == 0 as void*)
+        ret -1 as i64;
+    ret ftell(handle);
+}
+
+expose fun read_all(char* path, void** out_buf, i32* out_len) -> i32
+{
+    if (out_buf == 0 as void** || out_len == 0 as i32*)
+        ret -1;
+    *out_buf = 0 as void*;
+    *out_len = 0;
+
+    void* handle = open(path, "rb");
+    if (handle == 0 as void*)
+        ret -1;
+
+    if (seek(handle, 0, SEEK_END as i32) != 0)
+    {
+        close(handle);
+        ret -1;
+    }
+    i64 size64 = tell(handle);
+    if (size64 < 0 || size64 > 0x7FFFFFFF)
+    {
+        close(handle);
+        ret -1;
+    }
+    i32 size = size64 as i32;
+    if (seek(handle, 0, SEEK_SET as i32) != 0)
+    {
+        close(handle);
+        ret -1;
+    }
+
+    void* buf = Mem.alloc(size + 1);
+    if (buf == 0 as void*)
+    {
+        close(handle);
+        ret -1;
+    }
+
+    i32 read_bytes = read(handle, buf, size);
+    close(handle);
+    if (read_bytes < 0)
+    {
+        Mem.dealloc(buf);
+        ret -1;
+    }
+    u8* ubuf = buf as u8*;
+    if (read_bytes < size + 1)
+        ubuf[read_bytes] = 0;
+
+    *out_buf = buf;
+    *out_len = read_bytes;
+    ret read_bytes;
+}
+
+expose fun write_all(char* path, void* data, i32 len) -> i32
+{
+    if (data == 0 as void* || len < 0)
+        ret -1;
+    void* handle = open(path, "wb");
+    if (handle == 0 as void*)
+        ret -1;
+    i32 written = write(handle, data, len);
+    flush(handle);
+    close(handle);
+    ret written;
+}
