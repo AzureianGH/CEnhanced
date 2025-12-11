@@ -209,8 +209,8 @@ static uint64_t fnv1a64(const char *s)
 // stable hash to avoid collisions when -g includes full type spellings.
 static char *shorten_mangled(char *name)
 {
-    const size_t MAX_LEN = 180;   // avoid extremely long assembler symbols
-    const size_t KEEP_LEN = 96;   // keep a readable prefix
+    const size_t MAX_LEN = 180; // avoid extremely long assembler symbols
+    const size_t KEEP_LEN = 96; // keep a readable prefix
     if (!name)
         return NULL;
     size_t len = strlen(name);
