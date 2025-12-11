@@ -54,7 +54,6 @@ bring Std;
 #define FEATURE_SENTINEL -10
 #endif
 
-extend from "C" i32 printf(char *, ...);
 extend from "C" i32 write(int, char *, int);
 extend from "C" i32 read(i32, char *, int);
 extend from "C" void *malloc(int);
@@ -118,18 +117,19 @@ hide fun printwrapper() -> i32
 {
     string fn_name = __FUNCTION__;
     assert(strcmp(fn_name, "printwrapper") == 0, "__FUNCTION__ matches printwrapper");
-    ret printf("Hello, %s! Number: %d\n", "CHance", 42);
+    ret Std.IO.print("Hello, %s! Number: %d\n", "CHance", 42);
 }
 
 hide fun assert(bool condition, string message) -> void
 {
+    total_test_count += 1;
     if (condition)
     {
-        printf("TEST PASSED: %s\n", message);
+        Std.IO.print("TEST PASSED: %s\n", message);
     }
     else
     {
-        printf("TEST FAIL: %s\n", message);
+        Std.IO.print("TEST FAIL: %s\n", message);
         abort();
     }
     ret;
@@ -183,7 +183,7 @@ expose fun main() -> i32
     }
     else
     {
-        printf("No input read, using empty string\n");
+        Std.IO.print("No input read, using empty string\n");
         str[0] = 0;
     }
 
@@ -202,12 +202,12 @@ expose fun main() -> i32
         assert(true, "User did not enter the secret name (not required for tests)");
     }
 
-    printf("Freeing memory...\n");
+    Std.IO.print("Freeing memory...\n");
     Std.Memory.dealloc(buf as void*);
 
     // Test overflow behavior
     i16 of = test_overflow();
-    printf("test_overflow result: %d\n", of);
+    Std.IO.print("test_overflow result: %d\n", of);
     assert(of == -25536, "test_overflow result is -25536");
 
     // Test multiplication overflow
@@ -226,9 +226,9 @@ expose fun main() -> i32
 
     assert((0xFF as i32) == 255, "0xFF == 255");
 
-    printf("Calling test_chance(): %d\n", TC.test_chance());
+    Std.IO.print("Calling test_chance(): %d\n", TC.test_chance());
 
-    printf("Calling extended C function test(): %d\n", test());
+    Std.IO.print("Calling extended C function test(): %d\n", test());
 
     TC.SmallTest vari = {};
     vari.smallValue = 3;
@@ -263,7 +263,7 @@ expose fun main() -> i32
     Std.Memory.dealloc(addptr as void*);
 
     i32* testintptr = test as i32*;
-    printf("testVar via intptr: %p\n", testintptr);
+    Std.IO.print("testVar via intptr: %p\n", testintptr);
 
     TC.Element elem = TC.Element.SetElement;
 
@@ -277,7 +277,7 @@ expose fun main() -> i32
     i32 b = 4 >> 1;
     assert(b == 2, "4 >> 1 == 2");
 
-    printf("typeof() = %s with sizeof() = %d\n", typeof(TC.SmallTest), sizeof(TC.SmallTest));
+    Std.IO.print("typeof() = %s with sizeof() = %d\n", typeof(TC.SmallTest), sizeof(TC.SmallTest));
 
     [MetadataCall("differentsig")]();
 
@@ -285,9 +285,9 @@ expose fun main() -> i32
 
     assert(rawthing(10) == 466, "rawthing(10) == 466");
 
-    printf("Result from LibTest: %d\n", LT.test_fun(41));
+    Std.IO.print("Result from LibTest: %d\n", LT.test_fun(41));
 
-    printf("Result from LibTest.Another: %d\n", other_test_fun(50)); // Will be 60
+    Std.IO.print("Result from LibTest.Another: %d\n", other_test_fun(50)); // Will be 60
 
     f32 floatval = 3.14f;
     f64 doubleval = 1.23456789;
@@ -299,7 +299,7 @@ expose fun main() -> i32
     assert(ac == 4, "ac == 4");
     assert(floatptr[0] == 6.28f, "floatptr[0] == 6.28f");
     assert(doubleval == 1.23456789, "doubleval == 1.23456789");
-    printf("Expect addition of doubleval + floatval = %lf\n", (doubleval + (floatval as f64)) as f64);
+    Std.IO.print("Expect addition of doubleval + floatval = %lf\n", (doubleval + (floatval as f64)) as f64);
     f64 sum = doubleval + (floatval as f64);
     f64 diff = sum - 7.514568;
     if (diff < 0.0) diff = -diff;
@@ -490,16 +490,16 @@ expose fun main() -> i32
     void* inlinedvoidp = inlinedptr as void*;
 
     fun* (i32, -> i32) retinlinedptr = inlinedvoidp as fun* (i32, -> i32);
-    printf("Value is %d!\n", retinlinedptr(5));
+    Std.IO.print("Value is %d!\n", retinlinedptr(5));
 
     #if __TARGET_ARCH__ == "xa86"
     assert(false, "target arch is invalid");
     #endif
 
     #if __TARGET_ARCH__ == "x8""6"
-    printf("Arch is %s.\n", __TARGET_ARCH__);
+    Std.IO.print("Arch is %s.\n", __TARGET_ARCH__);
     #else
-    printf("Arch (non-x86) is %s.\n", __TARGET_ARCH__);
+    Std.IO.print("Arch (non-x86) is %s.\n", __TARGET_ARCH__);
     #endif
 
     i32 structvarargs_sum = multistructargs(
@@ -516,7 +516,7 @@ expose fun main() -> i32
         TC.SmallTest{ .smallValue = 0, .testVar = 33 }
     );
 
-    printf("structvarargs_result = %d\n", structvarargs_result);
+    Std.IO.print("structvarargs_result = %d\n", structvarargs_result);
 
     assert(structvarargs_result == 66, "structvarargs sum is 66");
 
@@ -688,14 +688,14 @@ expose fun main() -> i32
     assert(superarg_result % 20 == -8, "super_args product mod 20 is 12");
 
     action test_action = fun () -> void {
-        printf("This is a test action!\n");
+        Std.IO.print("This is a test action!\n");
         ret;
     }(); // immediate invocation
 
     test_action(); // second invocation
 
     action test_action2 = fun (i32 x) -> i16 {
-        printf("This is a test action with arg: %d\n", x);
+        Std.IO.print("This is a test action with arg: %d\n", x);
         ret (x as i16) + 1;
     };
 
@@ -703,18 +703,20 @@ expose fun main() -> i32
     assert(lambda_result == 42, "lambda action returned 42");
     lambda_test(
         fun () -> void {
-            printf("Lambda test action A invoked!\n");
+            Std.IO.print("Lambda test action A invoked!\n");
             ret;
         },
         fun (i32 x) -> i16 {
-            printf("Lambda test action B invoked with %d!\n", x);
+            Std.IO.print("Lambda test action B invoked with %d!\n", x);
             ret (x as i16) + 1;
         }
     );
 
     lambda_test(test_action, test_action2);
 
-    printf("All tests completed successfully!\n");
+
+
+    Std.IO.printnl("All tests completed successfully! %d total asserts.", total_test_count);
 
     ret (final_sum / 168) - 1; // expect 0
 }
@@ -723,7 +725,7 @@ hide fun lambda_test(action a () -> void, action b (i32) -> i16) -> void
 {
     a();
     i16 val = b(42);
-    printf("Lambda returned: %d\n", val);
+    Std.IO.print("Lambda returned: %d\n", val);
     ret;
 }
 
@@ -787,7 +789,7 @@ expose fun internal_diffvarargs(i32 empty, ...) -> void
     i32 first = va_arg(list, i32);
     f64 second = va_arg(list, f64);
     string third = va_arg(list, string);
-    printf("internal_diffvarargs: first=%d, second=%lf, third=%s\n", first, second, third);
+    Std.IO.print("internal_diffvarargs: first=%d, second=%lf, third=%s\n", first, second, third);
     va_end(list);
     ret;
 }
@@ -902,7 +904,7 @@ hide fun test_mul_overflow() -> u8
 [OverrideMetadata(".func differentsig ret=void params=0 locals=0")]
 hide fun test_idk() -> void
 {
-    printf("Hello from sigfunction!\n");
+    Std.IO.print("Hello from sigfunction!\n");
     ret;
 }
 

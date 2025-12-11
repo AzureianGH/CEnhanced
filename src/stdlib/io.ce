@@ -1,0 +1,361 @@
+module Std.IO;
+
+bring Std.String as Str;
+
+extend from "C" i32 write(i32, char*, int);
+extend from "C" i32 printf(char*, ...);
+constant i32 STDOUT_FD = 1;
+
+hide fun flush_buf(char* buf, i32 len) -> i32
+{
+    if (len <= 0)
+        ret 0;
+    ret write(STDOUT_FD as i32, buf, len);
+}
+
+hide fun reverse_range(char* buf, i32 start, i32 end) -> void
+{
+    i32 i = start;
+    i32 j = end - 1;
+    while (i < j)
+    {
+        char tmp = buf[i];
+        buf[i] = buf[j];
+        buf[j] = tmp;
+        i++;
+        j--;
+    }
+}
+
+hide fun u32_to_str(u32 val, char* out, i32 cap) -> i32
+{
+    if (cap <= 1)
+        ret 0;
+    if (val == 0)
+    {
+        out[0] = '0';
+        out[1] = 0;
+        ret 1;
+    }
+    i32 idx = 0;
+    while (val > 0 && idx < cap - 1)
+    {
+        u32 digit = val % 10;
+        out[idx++] = (digit as char) + '0';
+        val = val / 10;
+    }
+    reverse_range(out, 0, idx);
+    out[idx] = 0;
+    ret idx;
+}
+
+hide fun i32_to_str(i32 val, char* out, i32 cap) -> i32
+{
+    if (cap <= 1)
+        ret 0;
+    if (val == 0)
+    {
+        out[0] = '0';
+        out[1] = 0;
+        ret 1;
+    }
+    i32 idx = 0;
+    i32 start = 0;
+    if (val < 0)
+    {
+        out[idx++] = '-';
+        start = 1;
+        val = -val;
+    }
+    while (val > 0 && idx < cap - 1)
+    {
+        i32 digit = val % 10;
+        out[idx++] = (digit as char) + '0';
+        val = val / 10;
+    }
+    reverse_range(out, start, idx);
+    out[idx] = 0;
+    ret idx;
+}
+
+hide fun u32_to_hex(u32 val, char* out, i32 cap) -> i32
+{
+    if (cap <= 1)
+        ret 0;
+    constant char* digits = "0123456789abcdef";
+    if (val == 0)
+    {
+        out[0] = '0';
+        out[1] = 0;
+        ret 1;
+    }
+    i32 idx = 0;
+    while (val > 0 && idx < cap - 1)
+    {
+        u32 nibble = val & 0xF;
+        out[idx++] = digits[nibble];
+        val = val >> 4;
+    }
+    reverse_range(out, 0, idx);
+    out[idx] = 0;
+    ret idx;
+}
+
+hide fun u64_to_str(u64 val, char* out, i32 cap) -> i32
+{
+    if (cap <= 1)
+        ret 0;
+    if (val == 0)
+    {
+        out[0] = '0';
+        out[1] = 0;
+        ret 1;
+    }
+    i32 idx = 0;
+    while (val > 0 && idx < cap - 1)
+    {
+        u64 digit = val % 10;
+        out[idx++] = (digit as char) + '0';
+        val = val / 10;
+    }
+    reverse_range(out, 0, idx);
+    out[idx] = 0;
+    ret idx;
+}
+
+hide fun f64_to_str(f64 val, char* out, i32 cap) -> i32
+{
+    printf("DEBUG: f64_to_str called with val=%lf, cap=%d\n", val, cap);
+    if (cap < 8)
+        ret 0;
+
+    i32 idx = 0;
+    if (val < 0.0)
+    {
+        out[idx++] = '-';
+        val = -val;
+    }
+
+    // handle NaN/Inf rudimentarily
+    if (val != val)
+    {
+        if (idx + 3 >= cap) ret 0;
+        out[idx++] = 'n'; out[idx++] = 'a'; out[idx++] = 'n';
+        out[idx] = 0;
+        ret idx;
+    }
+    if (val > 1.0e308)
+    {
+        if (idx + 3 >= cap) ret 0;
+        out[idx++] = 'i'; out[idx++] = 'n'; out[idx++] = 'f';
+        out[idx] = 0;
+        ret idx;
+    }
+
+    u64 int_part = val as u64;
+    f64 frac = val - (int_part as f64);
+
+    char[32] intbuf = {};
+    i32 ilen = u64_to_str(int_part, intbuf, 32);
+    if (idx + ilen + 1 + 6 >= cap)
+        ret 0;
+    i32 j = 0;
+    while (j < ilen)
+    {
+        out[idx + j] = intbuf[j];
+        j++;
+    }
+    idx = idx + ilen;
+
+    out[idx++] = '.';
+
+    // fixed 6 digits with rounding
+    f64 scaled = frac * 1000000.0 + 0.5;
+    u64 frac_scaled = scaled as u64;
+    if (frac_scaled >= 1000000)
+    {
+        frac_scaled = frac_scaled - 1000000;
+        // carry into integer part
+        i32 carry_len = u64_to_str(int_part + 1, intbuf, 32);
+        if (idx - 1 + carry_len + 6 >= cap)
+            ret 0;
+        // rewrite integer portion
+        idx = idx - 1; // overwrite '.' temporarily
+        j = 0;
+        while (j < carry_len)
+        {
+            out[idx + j] = intbuf[j];
+            j++;
+        }
+        idx = idx + carry_len;
+        out[idx++] = '.';
+    }
+
+    // emit exactly 6 fractional digits with leading zeros
+    i32 k = 5;
+    while (k >= 0)
+    {
+        out[idx + k] = ((frac_scaled % 10) as char) + '0';
+        frac_scaled = frac_scaled / 10;
+        k = k - 1;
+    }
+    idx = idx + 6;
+    out[idx] = 0;
+    ret idx;
+}
+
+hide fun append_bytes(char* out, i32 cap, i32* idx, char* data, i32 len, i32* total_written) -> void
+{
+    i32 offset = 0;
+    while (offset < len)
+    {
+        if (*idx >= cap)
+        {
+            *total_written = *total_written + flush_buf(out, *idx);
+            *idx = 0;
+        }
+        i32 space = cap - *idx;
+        if (space <= 0)
+            continue;
+        i32 chunk = len - offset;
+        if (chunk > space)
+            chunk = space;
+        i32 j = 0;
+        while (j < chunk)
+        {
+            out[*idx + j] = data[offset + j];
+            j++;
+        }
+        *idx = *idx + chunk;
+        offset = offset + chunk;
+    }
+}
+
+hide fun append_cstr(char* out, i32 cap, i32* idx, char* str, i32* total_written) -> void
+{
+    i32 slen = Str.strlen(str);
+    append_bytes(out, cap, idx, str, slen, total_written);
+}
+
+hide fun append_char(char* out, i32 cap, i32* idx, char c, i32* total_written) -> void
+{
+    char[1] tmp = {};
+    tmp[0] = c;
+    append_bytes(out, cap, idx, tmp as char*, 1, total_written);
+}
+
+hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
+{
+    char[1024] out = {};
+    i32 out_idx = 0;
+    i32 written = 0;
+    i32 i = 0;
+    while (fmt[i] != 0)
+    {
+        char c = fmt[i];
+        if (c != '%')
+        {
+            append_char(out, 1024, &out_idx, c, &written);
+            i++;
+            continue;
+        }
+        i++;
+        char spec = fmt[i];
+        if (spec == 0)
+            break;
+        if (spec == '%')
+        {
+            append_char(out, 1024, &out_idx, '%', &written);
+            i++;
+            continue;
+        }
+        if (spec == 's')
+        {
+            char* s = va_arg(*list, char*);
+            if (s == 0 as char*)
+                s = "(null)";
+            append_cstr(out, 1024, &out_idx, s, &written);
+            i++;
+            continue;
+        }
+        if (spec == 'c')
+        {
+            i32 v = va_arg(*list, i32);
+            append_char(out, 1024, &out_idx, v as char, &written);
+            i++;
+            continue;
+        }
+        if (spec == 'd' || spec == 'i')
+        {
+            char[32] numbuf = {};
+            i32 v = va_arg(*list, i32);
+            i32 nlen = i32_to_str(v, numbuf, 32);
+            append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+            i++;
+            continue;
+        }
+        if (spec == 'u')
+        {
+            char[32] numbuf = {};
+            u32 v = va_arg(*list, u32);
+            i32 nlen = u32_to_str(v, numbuf, 32);
+            append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+            i++;
+            continue;
+        }
+        if (spec == 'x')
+        {
+            char[32] numbuf = {};
+            u32 v = va_arg(*list, u32);
+            i32 nlen = u32_to_hex(v, numbuf, 32);
+            append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+            i++;
+            continue;
+        }
+        if (spec == 'l')
+        {
+            char next = fmt[i + 1];
+            if (next == 'f')
+            {
+                char[64] fbuf = {};
+                f64 v = va_arg(*list, f64);
+                i32 flen = f64_to_str(v, fbuf, 64);
+                append_bytes(out, 1024, &out_idx, fbuf, flen, &written);
+                i = i + 2;
+                continue;
+            }
+        }
+        // Unknown specifier: emit it literally
+        append_char(out, 1024, &out_idx, '%', &written);
+        append_char(out, 1024, &out_idx, spec, &written);
+        i++;
+    }
+    if (append_newline != 0)
+        append_char(out, 1024, &out_idx, '\n', &written);
+    written = written + flush_buf(out, out_idx);
+    ret written;
+}
+
+expose fun format(char* fmt, ...) -> i32
+{
+    va_list list = va_start();
+    i32 written = vformat_out(fmt, &list, 0);
+    va_end(list);
+    ret written;
+}
+
+expose fun print(char* fmt, ...) -> i32
+{
+    va_list list = va_start();
+    i32 written = vformat_out(fmt, &list, 0);
+    va_end(list);
+    ret written;
+}
+
+expose fun printnl(char* fmt, ...) -> i32
+{
+    va_list list = va_start();
+    i32 written = vformat_out(fmt, &list, 1);
+    va_end(list);
+    ret written;
+}

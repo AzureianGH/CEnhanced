@@ -3976,6 +3976,9 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
     if (expr->arg_count > 0)
         arg_types = (CCValueType *)xcalloc((size_t)expr->arg_count, sizeof(CCValueType));
 
+    const int fixed_param_count = expr->call_target ? expr->call_target->param_count : -1;
+    const bool call_is_varargs = expr->call_is_varargs || (expr->call_target && expr->call_target->is_varargs);
+
     int rc = 0;
     for (int i = 0; i < expr->arg_count; ++i)
     {
@@ -3985,8 +3988,34 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
             rc = 1;
             break;
         }
+
+        CCValueType arg_ty = ccb_type_for_expr(arg);
+        bool is_vararg_slot = call_is_varargs && (fixed_param_count < 0 || i >= fixed_param_count);
+        if (is_vararg_slot)
+        {
+            // Default promotions: float -> double, small ints -> int
+            if (arg_ty == CC_TYPE_F32)
+            {
+                if (ccb_emit_convert_between(fb, CC_TYPE_F32, CC_TYPE_F64, arg))
+                {
+                    rc = 1;
+                    break;
+                }
+                arg_ty = CC_TYPE_F64;
+            }
+            else if (arg_ty == CC_TYPE_I8 || arg_ty == CC_TYPE_U8 || arg_ty == CC_TYPE_I16 || arg_ty == CC_TYPE_U16 || arg_ty == CC_TYPE_I1)
+            {
+                if (ccb_emit_convert_between(fb, arg_ty, CC_TYPE_I32, arg))
+                {
+                    rc = 1;
+                    break;
+                }
+                arg_ty = CC_TYPE_I32;
+            }
+        }
+
         if (arg_types)
-            arg_types[i] = ccb_type_for_expr(arg);
+            arg_types[i] = arg_ty;
     }
 
     if (!rc && is_indirect)
@@ -4305,16 +4334,47 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             diag_error_at(expr->src, expr->line, expr->col, "va_arg requires a va_list expression");
             return 1;
         }
-        // Expect lhs to be a variable reference so we can update it
-        if (expr->lhs->kind != ND_VAR || !expr->lhs->var_ref)
+
+        const Node *list_expr = expr->lhs;
+        CcbLocal *list_local = NULL;          // direct va_list local/param
+        CcbLocal *list_addr_local = NULL;     // address holding a va_list slot for indirection
+        bool lhs_is_indirect = false;
+
+        if (list_expr->kind == ND_VAR && list_expr->var_ref)
         {
-            diag_error_at(expr->lhs->src, expr->lhs->line, expr->lhs->col, "va_arg first argument must be a va_list variable");
-            return 1;
+            list_local = ccb_local_lookup(fb, list_expr->var_ref);
+            if (!list_local)
+            {
+                diag_error_at(list_expr->src, list_expr->line, list_expr->col, "unknown va_list variable '%s'", list_expr->var_ref);
+                return 1;
+            }
         }
-        CcbLocal *list_local = ccb_local_lookup(fb, expr->lhs->var_ref);
-        if (!list_local)
+        else if (list_expr->kind == ND_DEREF)
         {
-            diag_error_at(expr->lhs->src, expr->lhs->line, expr->lhs->col, "unknown va_list variable '%s'", expr->lhs->var_ref);
+            // Support passing va_list by pointer (e.g., va_list* param)
+            CCValueType elem_ty = CC_TYPE_PTR;
+            const Type *elem_type = NULL;
+            if (ccb_emit_deref_address(fb, list_expr, &elem_ty, &elem_type))
+                return 1;
+
+            const Type *va_slot_type = elem_type ? elem_type : type_va_list();
+            if (va_slot_type && va_slot_type->kind != TY_VA_LIST)
+            {
+                diag_error_at(list_expr->src, list_expr->line, list_expr->col, "va_arg first argument must be a va_list or pointer to va_list");
+                return 1;
+            }
+
+            Type *addr_ty = type_ptr((Type *)va_slot_type);
+            list_addr_local = ccb_local_add(fb, NULL, addr_ty, false, false);
+            if (!list_addr_local)
+                return 1;
+            if (!ccb_emit_store_local(fb, list_addr_local))
+                return 1;
+            lhs_is_indirect = true;
+        }
+        else
+        {
+            diag_error_at(list_expr->src, list_expr->line, list_expr->col, "va_arg first argument must be a va_list variable");
             return 1;
         }
 
@@ -4323,16 +4383,60 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         CCValueType val_ty = map_type_to_cc(target_type);
         if (val_ty == CC_TYPE_INVALID && type_is_address_only(target_type))
             val_ty = CC_TYPE_PTR;
-        if (!ccb_emit_load_local(fb, list_local))
+
+        // Load current pointer to the next argument and align to value size
+        if (lhs_is_indirect)
+        {
+            if (!ccb_emit_load_local(fb, list_addr_local))
+                return 1;
+            if (!ccb_emit_load_indirect(&fb->body, CC_TYPE_PTR))
+                return 1;
+        }
+        else
+        {
+            if (!ccb_emit_load_local(fb, list_local))
+                return 1;
+        }
+
+        if (ccb_emit_convert_between(fb, CC_TYPE_PTR, CC_TYPE_I64, expr))
+            return 1;
+
+        size_t size_bytes = ccb_value_type_size(val_ty);
+        if (size_bytes == 0)
+            size_bytes = sizeof(void *);
+        if (size_bytes < 1)
+            size_bytes = 1;
+
+        // align pointer up to size_bytes
+        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)(size_bytes - 1)))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
+            return 1;
+        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)(~((int64_t)size_bytes - 1))))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  binop and %s", cc_type_name(CC_TYPE_I64)))
+            return 1;
+
+        // convert aligned ptr back
+        if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+            return 1;
+
+        // stash aligned pointer in a temp so we can both load and advance
+        CcbLocal *aligned_ptr = ccb_local_add(fb, NULL, type_ptr(type_void()), false, false);
+        if (!aligned_ptr)
+            return 1;
+        if (!ccb_emit_store_local(fb, aligned_ptr))
+            return 1;
+
+        // load value from aligned pointer
+        if (!ccb_emit_load_local(fb, aligned_ptr))
             return 1;
         if (!ccb_emit_load_indirect(&fb->body, val_ty))
             return 1;
 
-        // Now advance the pointer stored in the va_list variable by sizeof(target)
-        if (!ccb_emit_load_local(fb, list_local))
+        // prepare to advance pointer using the stashed aligned ptr
+        if (!ccb_emit_load_local(fb, aligned_ptr))
             return 1;
-
-        // convert ptr -> i64
         if (ccb_emit_convert_between(fb, CC_TYPE_PTR, CC_TYPE_I64, expr))
             return 1;
 
@@ -4340,14 +4444,14 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         size_t slot_size = ccb_value_type_size(CC_TYPE_PTR);
         if (slot_size == 0)
             slot_size = sizeof(void *);
-        size_t size_bytes = ccb_value_type_size(val_ty);
-        if (size_bytes == 0)
-            size_bytes = slot_size;
-        if (size_bytes < slot_size)
-            size_bytes = slot_size;
-        else if (size_bytes % slot_size != 0)
-            size_bytes += slot_size - (size_bytes % slot_size);
-        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)size_bytes))
+        size_t size_advance = size_bytes;
+        if (size_advance == 0)
+            size_advance = slot_size;
+        if (size_advance < slot_size)
+            size_advance = slot_size;
+        else if (size_advance % slot_size != 0)
+            size_advance += slot_size - (size_advance % slot_size);
+        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)size_advance))
             return 1;
         if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
             return 1;
@@ -4356,9 +4460,27 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
             return 1;
 
-        // store updated pointer back into the va_list variable
-        if (!ccb_emit_store_local(fb, list_local))
-            return 1;
+        if (lhs_is_indirect)
+        {
+            // store updated pointer back through the va_list*
+            CcbLocal *tmp_ptr = ccb_local_add(fb, NULL, type_va_list(), false, false);
+            if (!tmp_ptr)
+                return 1;
+            if (!ccb_emit_store_local(fb, tmp_ptr))
+                return 1;
+            if (!ccb_emit_load_local(fb, list_addr_local))
+                return 1;
+            if (!ccb_emit_load_local(fb, tmp_ptr))
+                return 1;
+            if (!ccb_emit_store_indirect(&fb->body, CC_TYPE_PTR))
+                return 1;
+        }
+        else
+        {
+            // store updated pointer back into the va_list variable
+            if (!ccb_emit_store_local(fb, list_local))
+                return 1;
+        }
 
         return 0;
     }

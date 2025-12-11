@@ -314,7 +314,7 @@ static void usage(const char *prog)
   fprintf(stderr, "  -m32|-m64         Target bitness (currently -m64 only)\n");
   fprintf(stderr, "  -x86              Select x86-64 backend for "
                   "assembly/object/executable output\n");
-  fprintf(stderr, "  -arm64            Select ARM64 macOS backend for "
+  fprintf(stderr, "  -arm64            Select ARM64 backend (use --target-os macos|linux|windows) for "
                   "assembly/object/executable output\n");
   fprintf(stderr, "  -bslash           Select BSlash backend for assembly output\n");
   fprintf(stderr, "  --target-os <os>  Backend target OS: windows|linux|macos\n");
@@ -670,6 +670,8 @@ static const char *arm64_backend_name_for_os(TargetOS os)
     return "arm64-macos";
   case OS_LINUX:
     return "arm64-elf";
+  case OS_WINDOWS:
+    return "arm64-windows";
   default:
     return NULL;
   }
@@ -688,7 +690,9 @@ static void append_arm64_arch_flag(char *cmd, size_t cmd_cap, TargetOS target_os
   if (!cmd || cmd_cap == 0)
     return;
   const char *flag = NULL;
-  if (host_cc_is_aarch64_elf_gcc(host_cc_cmd) || target_os == OS_LINUX)
+  if (target_os == OS_WINDOWS)
+    flag = " --target=arm64-pc-windows-msvc";
+  else if (host_cc_is_aarch64_elf_gcc(host_cc_cmd) || target_os == OS_LINUX)
     flag = " -march=armv8-a";
   else
     flag = " -arch arm64";
@@ -4795,11 +4799,12 @@ int main(int argc, char **argv)
         {
           int os_invalid = (!target_os_option ||
                             (strcmp(target_os_option, "macos") != 0 &&
-                             strcmp(target_os_option, "linux") != 0));
+                             strcmp(target_os_option, "linux") != 0 &&
+                             strcmp(target_os_option, "windows") != 0));
           if (os_invalid)
           {
             fprintf(stderr,
-                    "arm64 backend requires --target-os macos or linux (current target-os is '%s')\n",
+                    "arm64 backend requires --target-os macos, linux, or windows (current target-os is '%s')\n",
                     target_os_option ? target_os_option : "<unset>");
             rc = 1;
           }
@@ -4895,7 +4900,8 @@ int main(int argc, char **argv)
                       sizeof(cc_cmd) - strlen(cc_cmd) - 1);
             }
 #ifdef _WIN32
-            strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+            if (target_arch == ARCH_X86)
+              strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
             if (target_arch == ARCH_ARM64)
               append_arm64_arch_flag(cc_cmd, sizeof(cc_cmd), target_os,
@@ -5082,11 +5088,12 @@ int main(int argc, char **argv)
         {
           int os_invalid = (!target_os_option ||
                             (strcmp(target_os_option, "macos") != 0 &&
-                             strcmp(target_os_option, "linux") != 0));
+                             strcmp(target_os_option, "linux") != 0 &&
+                             strcmp(target_os_option, "windows") != 0));
           if (os_invalid)
           {
             fprintf(stderr,
-                    "arm64 backend requires --target-os macos or linux (current target-os is '%s')\n",
+                    "arm64 backend requires --target-os macos, linux, or windows (current target-os is '%s')\n",
                     target_os_option ? target_os_option : "<unset>");
             rc = 1;
             break;
@@ -5175,7 +5182,8 @@ int main(int argc, char **argv)
                   sizeof(cc_cmd) - strlen(cc_cmd) - 1);
         }
 #ifdef _WIN32
-        strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+  if (target_arch == ARCH_X86)
+    strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
         if (target_arch == ARCH_ARM64)
           append_arm64_arch_flag(cc_cmd, sizeof(cc_cmd), target_os,
@@ -5360,11 +5368,12 @@ int main(int argc, char **argv)
         {
           int os_invalid = (!target_os_option ||
                             (strcmp(target_os_option, "macos") != 0 &&
-                             strcmp(target_os_option, "linux") != 0));
+                             strcmp(target_os_option, "linux") != 0 &&
+                             strcmp(target_os_option, "windows") != 0));
           if (os_invalid)
           {
             fprintf(stderr,
-                    "arm64 backend requires --target-os macos or linux (current target-os is '%s')\n",
+                    "arm64 backend requires --target-os macos, linux, or windows (current target-os is '%s')\n",
                     target_os_option ? target_os_option : "<unset>");
             rc = 1;
             break;
@@ -5436,7 +5445,8 @@ int main(int argc, char **argv)
             strncat(cc_cmd, " -ffreestanding -nostdlib",
                     sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #ifdef _WIN32
-          strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
+          if (target_arch == ARCH_X86)
+            strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
 #endif
           if (opt_level > 0)
           {

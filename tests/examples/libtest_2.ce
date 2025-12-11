@@ -1,6 +1,7 @@
 module LibTest.Another;
 
 bring Test.Chance as TC;
+bring Std;
 
 extend from "C" i32 printf(char *, ...);
 
@@ -36,11 +37,7 @@ expose fun test_diffvarargs(i32 empty, ...) -> void
     i32 first = va_arg(list, i32);
     f64 second = va_arg(list, f64);
     string third = va_arg(list, string);
-    printf("test_diffvarargs: first=%d, second=%lf, third=%s\n", first, second, third);
-    if (empty)
-    {
-        printf("  (empty parameter was not zero!)\n");
-    }
+    Std.IO.print("test_diffvarargs: first=%d, second=%lf, third=%s\n", first, second, third);
     va_end(list);
     ret;
 }
