@@ -488,6 +488,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_RET;
     else if (len == 5 && strncmp(p, "stack", 5) == 0)
         k = TK_KW_STACK;
+    else if (len == 6 && strncmp(p, "static", 6) == 0)
+        k = TK_KW_STATIC;
     else if (len == 3 && strncmp(p, "reg", 3) == 0)
         k = TK_KW_REG;
     else if (len == 6 && strncmp(p, "module", 6) == 0)

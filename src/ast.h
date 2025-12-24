@@ -17,6 +17,7 @@ typedef enum
     TK_KW_ACTION,
     TK_KW_RET,
     TK_KW_STACK,
+    TK_KW_STATIC,
     TK_KW_REG,
     TK_KW_STRUCT,
     TK_KW_STRUC, // alias accepted
@@ -394,6 +395,7 @@ struct Node
     const char *var_name;
     Type *var_type;
     int var_is_const;                 // for ND_VAR_DECL
+    int var_is_static;                // storage-class flag for variables
     int var_is_global;                // set on declarations/references that live at global scope
     int var_is_array;                 // for ND_VAR references to array-typed variables
     int var_is_function;              // for ND_VAR references that name a function symbol

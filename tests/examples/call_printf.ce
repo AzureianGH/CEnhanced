@@ -65,7 +65,7 @@ extend fun test_chance() -> i32;
 extend from "C" i32 remove(char*);
 
 hide alias string = char*;
-
+hide alias uint32_t = u32;
 
 // Forward declaration and struct that holds an action field
 struct AsmProgram;

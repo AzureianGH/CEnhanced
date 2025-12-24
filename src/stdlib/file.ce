@@ -9,6 +9,7 @@ extend from "C" i32 fwrite(void* buffer, i32 size, i32 count, void* handle);
 extend from "C" i32 fseek(void* handle, i64 offset, i32 whence);
 extend from "C" i64 ftell(void* handle);
 extend from "C" i32 fflush(void* handle);
+extend from "C" i32 remove(char* path);
 
 constant i32 SEEK_SET = 0;
 constant i32 SEEK_CUR = 1;
@@ -124,4 +125,18 @@ expose fun write_all(char* path, void* data, i32 len) -> i32
     flush(handle);
     close(handle);
     ret written;
+}
+
+expose fun exists(char* path) -> i32
+{
+    void* handle = open(path, "rb");
+    if (handle == 0 as void*)
+        ret 0;
+    close(handle);
+    ret 1;
+}
+
+expose fun delete(char* path) -> i32
+{
+    ret remove(path);
 }

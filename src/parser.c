@@ -3854,14 +3854,34 @@ static Node *parse_stmt(Parser *ps)
     {
         return parse_inferred_var_decl(ps, 1);
     }
-    if (t.kind == TK_KW_CONSTANT || is_type_start(ps, t))
+    if (t.kind == TK_KW_STATIC || t.kind == TK_KW_CONSTANT || is_type_start(ps, t))
     {
         int is_const = 0;
-        if (t.kind == TK_KW_CONSTANT)
+        int is_static = 0;
+        while (1)
         {
-            lexer_next(ps->lx);
-            is_const = 1;
-            t = lexer_peek(ps->lx);
+            if (!is_static && t.kind == TK_KW_STATIC)
+            {
+                lexer_next(ps->lx);
+                is_static = 1;
+                t = lexer_peek(ps->lx);
+                continue;
+            }
+            if (!is_const && t.kind == TK_KW_CONSTANT)
+            {
+                lexer_next(ps->lx);
+                is_const = 1;
+                t = lexer_peek(ps->lx);
+                continue;
+            }
+            break;
+        }
+
+        if (!is_type_start(ps, t))
+        {
+            diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                          "expected a type after storage qualifiers");
+            exit(1);
         }
         // var decl: [stack] type ident [= expr] ;
         Type *ty = parse_type_spec(ps);
@@ -3875,6 +3895,7 @@ static Node *parse_stmt(Parser *ps)
         decl->var_is_array = (ty && ty->kind == TY_ARRAY);
         decl->var_is_function = (ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_FUNC);
         decl->var_is_const = is_const;
+        decl->var_is_static = is_static;
         decl->line = name.line;
         decl->col = name.col;
         decl->src = lexer_source(ps->lx);
@@ -4150,14 +4171,35 @@ static Node *parse_for(Parser *ps)
     {
         // Reuse parse_stmt for a single statement ending with ';'
         // But we must allow only a simple statement here; parse a declaration or expression-statement
-        if (next.kind == TK_KW_CONSTANT || is_type_start(ps, next))
+        if (next.kind == TK_KW_STATIC || next.kind == TK_KW_CONSTANT || is_type_start(ps, next))
         {
             // var decl statement
             int is_const = 0;
-            if (next.kind == TK_KW_CONSTANT)
+            int is_static = 0;
+            while (1)
             {
-                lexer_next(ps->lx);
-                is_const = 1;
+                if (!is_static && next.kind == TK_KW_STATIC)
+                {
+                    lexer_next(ps->lx);
+                    is_static = 1;
+                    next = lexer_peek(ps->lx);
+                    continue;
+                }
+                if (!is_const && next.kind == TK_KW_CONSTANT)
+                {
+                    lexer_next(ps->lx);
+                    is_const = 1;
+                    next = lexer_peek(ps->lx);
+                    continue;
+                }
+                break;
+            }
+
+            if (!is_type_start(ps, next))
+            {
+                diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                              "expected a type after storage qualifiers");
+                exit(1);
             }
             Type *ty = parse_type_spec(ps);
             Token name = expect(ps, TK_IDENT, "identifier");
@@ -4170,6 +4212,7 @@ static Node *parse_for(Parser *ps)
             decl->var_is_array = (ty && ty->kind == TY_ARRAY);
             decl->var_is_function = (ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_FUNC);
             decl->var_is_const = is_const;
+            decl->var_is_static = is_static;
             decl->line = name.line;
             decl->col = name.col;
             decl->src = lexer_source(ps->lx);
@@ -5003,7 +5046,7 @@ Node *parse_unit(Parser *ps)
             continue;
         }
 
-        if (t.kind == TK_KW_CONSTANT || is_type_start(ps, t))
+        if (t.kind == TK_KW_STATIC || t.kind == TK_KW_CONSTANT || is_type_start(ps, t))
         {
             if (bring_seen)
                 bring_block_done = 1;
@@ -5017,11 +5060,31 @@ Node *parse_unit(Parser *ps)
             }
 
             int is_const = 0;
-            if (t.kind == TK_KW_CONSTANT)
+            int is_static = 0;
+            while (1)
             {
-                lexer_next(ps->lx);
-                is_const = 1;
-                t = lexer_peek(ps->lx);
+                if (!is_static && t.kind == TK_KW_STATIC)
+                {
+                    lexer_next(ps->lx);
+                    is_static = 1;
+                    t = lexer_peek(ps->lx);
+                    continue;
+                }
+                if (!is_const && t.kind == TK_KW_CONSTANT)
+                {
+                    lexer_next(ps->lx);
+                    is_const = 1;
+                    t = lexer_peek(ps->lx);
+                    continue;
+                }
+                break;
+            }
+
+            if (!is_type_start(ps, t))
+            {
+                diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                              "expected a type after storage qualifiers");
+                exit(1);
             }
 
             Type *ty = parse_type_spec(ps);
@@ -5037,8 +5100,15 @@ Node *parse_unit(Parser *ps)
             decl->var_is_array = (ty && ty->kind == TY_ARRAY);
             decl->var_is_function = (ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_FUNC);
             decl->var_is_const = is_const;
+            decl->var_is_static = is_static;
             decl->var_is_global = 1;
-            decl->is_exposed = visibility;
+            if (is_static && visibility)
+            {
+                diag_error_at(lexer_source(ps->lx), vis_tok.line, vis_tok.col,
+                              "'static' declarations cannot be exposed");
+                exit(1);
+            }
+            decl->is_exposed = visibility && !is_static;
             decl->line = name.line;
             decl->col = name.col;
             decl->src = lexer_source(ps->lx);

@@ -6278,6 +6278,8 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
     }
     case ND_VAR_DECL:
     {
+        if (stmt->var_is_global)
+            return 0;
         if (!stmt->var_name)
         {
             diag_error_at(stmt->src, stmt->line, stmt->col,
@@ -6561,7 +6563,8 @@ static int ccb_module_append_global(CcbModule *mod, const Node *decl)
     }
 
     const char *const_attr = decl->var_is_const ? " const" : "";
-    const char *hidden_attr = decl->is_exposed ? "" : " hidden";
+    int hide = decl->var_is_static || !decl->is_exposed;
+    const char *hidden_attr = hide ? " hidden" : "";
 
     if (decl->var_type && type_is_address_only(decl->var_type))
     {
@@ -7440,41 +7443,8 @@ static char *ccb_encode_bytes_literal(const uint8_t *data, size_t len)
     for (size_t i = 0; i < len; ++i)
     {
         uint8_t byte = data[i];
-        switch (byte)
-        {
-        case '\\':
-        case '"':
-            *cursor++ = '\\';
-            *cursor++ = (char)byte;
-            break;
-        case '\n':
-            *cursor++ = '\\';
-            *cursor++ = 'n';
-            break;
-        case '\r':
-            *cursor++ = '\\';
-            *cursor++ = 'r';
-            break;
-        case '\t':
-            *cursor++ = '\\';
-            *cursor++ = 't';
-            break;
-        case '\0':
-            *cursor++ = '\\';
-            *cursor++ = '0';
-            break;
-        default:
-            if (isprint((int)byte))
-            {
-                *cursor++ = (char)byte;
-            }
-            else
-            {
-                snprintf(cursor, 5, "\\x%02X", byte);
-                cursor += 4;
-            }
-            break;
-        }
+        snprintf(cursor, 5, "\\x%02X", byte);
+        cursor += 4;
     }
     *cursor++ = '"';
     *cursor = '\0';

@@ -521,6 +521,8 @@ struct VarBind
     const char *name;
     Type *type;
     int is_const;
+    int is_static;
+    const char *backend_name;
 };
 struct Scope
 {
@@ -1232,6 +1234,40 @@ static void unit_append_function(Node *unit, Node *fn)
     unit->stmt_count = new_count;
 }
 
+static int sema_check_global_decl(SemaContext *sc, Node *decl);
+
+static void unit_append_decl(Node *unit, Node *decl)
+{
+    if (!unit || unit->kind != ND_UNIT || !decl)
+        return;
+    int new_count = unit->stmt_count + 1;
+    Node **grown = (Node **)realloc(unit->stmts, (size_t)new_count * sizeof(Node *));
+    if (!grown)
+    {
+        diag_error("out of memory while appending declaration");
+        exit(1);
+    }
+    unit->stmts = grown;
+    unit->stmts[unit->stmt_count] = decl;
+    unit->stmt_count = new_count;
+}
+
+static char *make_static_local_backend_name(const Node *fn, const char *var_name)
+{
+    const char *base = NULL;
+    if (fn && fn->metadata.backend_name && fn->metadata.backend_name[0])
+        base = fn->metadata.backend_name;
+    else if (fn && fn->name)
+        base = fn->name;
+    else
+        base = "__static";
+    const char *suffix = (var_name && var_name[0]) ? var_name : "unnamed";
+    size_t need = strlen(base) + strlen(suffix) + 12;
+    char *buf = (char *)xmalloc(need);
+    snprintf(buf, need, "%s__static_%s", base, suffix);
+    return buf;
+}
+
 static char *sema_make_lambda_name(SemaContext *sc)
 {
     int index = sc ? sc->lambda_counter++ : 0;
@@ -1323,6 +1359,7 @@ static Node *clone_function_var_ref(const Node *var)
     clone->var_type = var->var_type;
     clone->type = var->type;
     clone->var_is_const = var->var_is_const;
+    clone->var_is_static = var->var_is_static;
     clone->var_is_global = var->var_is_global;
     clone->var_is_array = var->var_is_array;
     clone->var_is_function = var->var_is_function;
@@ -3084,20 +3121,20 @@ static int scope_find(SemaContext *sc, const char *name)
     }
     return 0;
 }
-static Type *scope_get_type(SemaContext *sc, const char *name)
+static const struct VarBind *scope_get_binding(SemaContext *sc, const char *name)
 {
-    for (struct Scope *s = sc->scope; s; s = s->parent)
+    for (struct Scope *s = sc ? sc->scope : NULL; s; s = s->parent)
     {
         for (int i = 0; i < s->local_count; i++)
         {
             if (strcmp(s->locals[i].name, name) == 0)
-                return s->locals[i].type;
+                return &s->locals[i];
         }
     }
     return NULL;
 }
 static void scope_add(SemaContext *sc, const char *name, Type *ty,
-                      int is_const)
+                      int is_const, int is_static, const char *backend_name)
 {
     if (!sc->scope)
         scope_push(sc);
@@ -3108,20 +3145,15 @@ static void scope_add(SemaContext *sc, const char *name, Type *ty,
         s->locals[s->local_count].name = name;
         s->locals[s->local_count].type = ty;
         s->locals[s->local_count].is_const = is_const;
+        s->locals[s->local_count].is_static = is_static;
+        s->locals[s->local_count].backend_name = backend_name;
         s->local_count++;
     }
 }
 static int scope_is_const(SemaContext *sc, const char *name)
 {
-    for (struct Scope *s = sc->scope; s; s = s->parent)
-    {
-        for (int i = 0; i < s->local_count; i++)
-        {
-            if (strcmp(s->locals[i].name, name) == 0)
-                return s->locals[i].is_const;
-        }
-    }
-    return 0;
+    const struct VarBind *b = scope_get_binding(sc, name);
+    return b ? b->is_const : 0;
 }
 
 static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global, int *is_const, int *is_function, const Symbol **out_sym)
@@ -3137,12 +3169,18 @@ static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global,
     if (!sc || !name)
         return NULL;
 
-    Type *local_ty = scope_get_type(sc, name);
-    if (local_ty)
+    const struct VarBind *binding = scope_get_binding(sc, name);
+    if (binding)
     {
         if (is_const)
-            *is_const = scope_is_const(sc, name);
-        return canonicalize_type_deep(local_ty);
+            *is_const = binding->is_const;
+        if (is_global)
+            *is_global = binding->is_static;
+        if (is_function)
+            *is_function = 0;
+        if (out_sym)
+            *out_sym = NULL;
+        return canonicalize_type_deep(binding->type);
     }
 
     if (!sc->syms)
@@ -3632,6 +3670,11 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         if (resolved_sym && resolved_sym->kind == SYM_GLOBAL)
             sema_track_imported_global_usage(sc, resolved_sym);
+
+        const struct VarBind *binding = scope_get_binding(sc, orig_name);
+        if (binding && binding->is_static && binding->backend_name)
+            e->var_ref = binding->backend_name;
+
         Type *canon = canonicalize_type_deep(t);
         e->var_type = canon ? canon : t;
         if (canon && canon->kind == TY_ARRAY)
@@ -5326,7 +5369,44 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
         else
             stmt->var_is_array = 0;
         stmt->var_is_function = type_is_function_pointer(stmt->var_type);
-        scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const);
+        if (stmt->var_is_static)
+        {
+            if (!sc || !sc->unit || sc->unit->kind != ND_UNIT)
+            {
+                diag_error_at(stmt->src, stmt->line, stmt->col,
+                              "static local variables require a translation unit context");
+                return 1;
+            }
+            char *backend = make_static_local_backend_name(fn, stmt->var_name);
+            Node *hoisted = (Node *)xcalloc(1, sizeof(Node));
+            hoisted->kind = ND_VAR_DECL;
+            hoisted->var_name = backend;
+            hoisted->var_type = stmt->var_type;
+            hoisted->var_is_const = stmt->var_is_const;
+            hoisted->var_is_static = 1;
+            hoisted->var_is_global = 1;
+            hoisted->var_is_array = stmt->var_is_array;
+            hoisted->var_is_function = stmt->var_is_function;
+            hoisted->is_exposed = 0;
+            hoisted->export_name = 0;
+            hoisted->src = stmt->src;
+            hoisted->line = stmt->line;
+            hoisted->col = stmt->col;
+            hoisted->metadata.backend_name = backend;
+            hoisted->rhs = stmt->rhs;
+
+            if (sema_check_global_decl(sc, hoisted))
+                return 1;
+
+            sema_register_global_local(sc, sc->unit, hoisted);
+            unit_append_decl(sc->unit, hoisted);
+            scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const, 1, backend);
+
+            stmt->rhs = NULL;
+            stmt->var_is_global = 1;
+            return 0;
+        }
+        scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const, 0, NULL);
         if (stmt->rhs)
         {
             if (stmt->rhs->kind == ND_INIT_LIST)
@@ -5747,7 +5827,7 @@ static int sema_check_function(SemaContext *sc, Node *fn)
     {
         fn->param_types[i] = canonicalize_type_deep(fn->param_types[i]);
         int param_is_const = (fn->param_const_flags && i < fn->param_count) ? fn->param_const_flags[i] : 0;
-        scope_add(sc, fn->param_names[i], fn->param_types[i], param_is_const);
+        scope_add(sc, fn->param_names[i], fn->param_types[i], param_is_const, 0, NULL);
     }
     int has_return = 0;
     int rc;
