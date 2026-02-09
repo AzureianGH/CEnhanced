@@ -3,5 +3,5 @@ type=Console
 backend=arm64
 output=build/SampleTests
 ce=call_printf.ce, test_chance.ce
-cclib=libtest.cclib, stdlib.cclib
+cclib=libtest.cclib
 obj=test_mac.o

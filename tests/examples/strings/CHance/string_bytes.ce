@@ -1,0 +1,42 @@
+module Examples.Strings;
+
+bring Std;
+
+extend from "C" i32 printf(char*, ...);
+
+hide alias string = char*;
+
+hide fun str_len(string s) -> i32
+{
+    i32 n = 0;
+    while (s[n] != 0)
+        n = n + 1;
+    ret n;
+}
+
+hide fun print_bytes(string label, string s) -> void
+{
+    i32 len = str_len(s);
+    printf("%s\n", label);
+    printf("len=%d\n", len);
+    printf("bytes:");
+    i32 i = 0;
+    while (i < len)
+    {
+        u8 b = s[i] as u8;
+        printf(" %02X", b as i32);
+        i = i + 1;
+    }
+    printf("\n\n");
+    ret;
+}
+
+[EntryPoint]
+expose fun main() -> i32
+{
+    string s1 = "A\nB\tC\\D\"E";
+    string s2 = "sum = 2 + 3\r\n";
+    print_bytes("s1", s1);
+    print_bytes("s2", s2);
+    ret 0;
+}

@@ -1,0 +1,122 @@
+module Examples.Html.HttpServer;
+
+bring Std.Net as Net;
+bring Std.IO as IO;
+bring Std.String as Str;
+bring Std.File as File;
+bring Std.Memory as Mem;
+
+alias string = char*;
+
+hide fun send_response(i32 sock, i32 status, char* content_type, void* body, i32 body_len) -> void
+{
+    char[512] header = {};
+    // expose fun sprintf(char* buf, i32 cap, char* fmt, ...) -> i32
+    IO.sprintf(header, 512, "HTTP/1.1 %d OK\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", status, content_type, body_len);
+    Net.tcp_send_all(sock, header as void*, Str.strlen(header));
+    if (body != 0 as void* && body_len > 0)
+        Net.tcp_send_all(sock, body, body_len);
+}
+
+hide fun get_mime_type(char* path) -> char*
+{
+    if (Str.ends_with(path, ".html")) ret "text/html";
+    if (Str.ends_with(path, ".htm"))  ret "text/html";
+    if (Str.ends_with(path, ".css"))  ret "text/css";
+    if (Str.ends_with(path, ".js"))   ret "application/javascript";
+    if (Str.ends_with(path, ".png"))  ret "image/png";
+    if (Str.ends_with(path, ".jpg"))  ret "image/jpeg";
+    if (Str.ends_with(path, ".jpeg")) ret "image/jpeg";
+    if (Str.ends_with(path, ".gif"))  ret "image/gif";
+    if (Str.ends_with(path, ".svg"))  ret "image/svg+xml";
+    ret "application/octet-stream"; // fallback
+}
+
+hide fun serve_file(i32 sock, char* path) -> void
+{
+    void* buf = 0 as void*;
+    i32 len = 0;
+    char* mime = get_mime_type(path);
+    if (File.read_all(path, &buf, &len) > 0)
+    {
+        send_response(sock, 200, mime, buf, len);
+        Mem.dealloc(buf);
+    }
+    else
+    {
+        char* msg = "<h1>404 Not Found</h1>";
+        send_response(sock, 404, "text/html", msg as void*, Str.strlen(msg));
+    }
+}
+
+
+[EntryPoint]
+expose fun main(i32 argc, char** argv) -> i32
+{
+    i32 port = 8080;
+    char* cwd = File.getcwd();
+    if (cwd == 0 as char*)
+    {
+        IO.print("getcwd failed\n");
+        ret 1;
+    }
+
+    i32 listener = Net.tcp_listen(port, 5);
+    if (listener < 0)
+    {
+        IO.print("Failed to listen on port\n");
+        ret 1;
+    }
+
+    IO.print("Serving files from: ");
+    IO.print(cwd);
+    IO.print("\nListening on port 8080...\n");
+
+    char[4096] buffer = {};
+    for (;;)
+    {
+        i32 client = Net.tcp_accept(listener);
+        if (client < 0)
+            continue;
+
+        i32 recv_len = Net.tcp_recv(client, buffer as void*, 4096);
+        if (recv_len <= 0)
+        {
+            Net.tcp_close(client);
+            continue;
+        }
+        char* get_ptr = Str.strstr(buffer, "GET ");
+        if (get_ptr != null)
+        {
+            get_ptr = get_ptr + 4;
+            char* end_ptr = Str.strchr(get_ptr, ' ');
+            if (end_ptr != null)
+            {
+                i32 path_len = (end_ptr - get_ptr) as i32;
+                char[1024] path = {};
+                for (i32 i = 0; i < path_len; i++)
+                    path[i] = get_ptr[i];
+                path[path_len] = 0;
+
+                char[2048] full_path = {};
+                Str.strcpy(full_path, cwd);
+
+                if (Str.strlen(path) == 0 || (Str.strlen(path) == 1 && path[0] == '/'))
+                {
+                    Str.strcat(full_path, "/index.html");
+                }
+                else
+                {
+                    Str.strcat(full_path, path);
+                }
+
+                serve_file(client, full_path);
+            }
+        }
+
+        Net.tcp_close(client);
+    }
+
+    Net.cleanup();
+    ret 0;
+}

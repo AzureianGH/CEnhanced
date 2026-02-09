@@ -437,9 +437,15 @@ expose fun main() -> i32
     }
 #ifdef __WIN32__
     assert(__WIN32__ == 1, "__WIN32__ macro active");
-#else
+#elif __LINUX__
     assert(__LINUX__ == 1, "__LINUX__ macro active");
+#elif __MACH__
+    assert(__MACH__ == 1, "__MACH__ macro active");
+#else
+    assert(false, "unknown OS platform macros");
 #endif
+
+    ubyte jsdnfij = 3;
 
     string file_macro = __FILE__;
     assert(file_macro[0] != 0, "__FILE__ yields non-empty value");

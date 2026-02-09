@@ -1,5 +1,7 @@
 module Std.String;
 
+bring Std.Memory as Mem;
+
 expose fun strcmp(char* str1, char* str2) -> i32
 {
     i32 idx = 0;
@@ -86,4 +88,57 @@ expose fun strstr(char* haystack, char* needle) -> char*
         }
     }
     ret 0 as char*;
+}
+
+expose fun ends_with(char* str, char* suffix) -> i32
+{
+    i32 str_len = strlen(str);
+    i32 suffix_len = strlen(suffix);
+    if (suffix_len > str_len)
+    {
+        ret 0;
+    }
+    for (i32 i = 0; i < suffix_len; i++)
+    {
+        if (str[str_len - suffix_len + i] != suffix[i])
+        {
+            ret 0;
+        }
+    }
+    ret 1;
+}
+
+expose fun strdup(char* str) -> char*
+{
+    i32 len = strlen(str);
+    void* mem = Mem.alloc(len + 1);
+    if (mem == 0 as void*)
+    {
+        ret 0 as char*;
+    }
+    char* dest = mem as char*;
+    for (i32 i = 0; i < len; i++)
+    {
+        dest[i] = str[i];
+    }
+    dest[len] = 0; // Null-terminate
+    ret dest;
+}
+
+expose fun strncmp(char* str1, char* str2, i32 n) -> i32
+{
+    i32 idx = 0;
+    while (idx < n && str1[idx] != 0 && str2[idx] != 0)
+    {
+        if (str1[idx] != str2[idx])
+        {
+            ret (str1[idx] as i32) - (str2[idx] as i32);
+        }
+        idx++;
+    }
+    if (idx == n)
+    {
+        ret 0;
+    }
+    ret (str1[idx] as i32) - (str2[idx] as i32);
 }

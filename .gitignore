@@ -2,3 +2,4 @@
 tests/examples/build/SampleTests
 .DS_Store
 tests/.DS_Store
+/vscode-ext

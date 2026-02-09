@@ -23,6 +23,9 @@ extern char **environ;
 #if !defined(_WIN32)
 #include <limits.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 #define CHANCECODEC_BASE "chancecodec"
@@ -556,19 +559,79 @@ static int get_executable_dir(char *dir, size_t dirsz, const char *argv0)
     return 1;
 #else
   char resolved[PATH_MAX];
+  resolved[0] = '\0';
   if (!argv0)
     argv0 = "";
+
   if (!realpath(argv0, resolved))
   {
 #if defined(__linux__)
     ssize_t len = readlink("/proc/self/exe", resolved, sizeof(resolved) - 1);
-    if (len <= 0)
-      return 1;
-    resolved[len] = '\0';
+    if (len > 0)
+      resolved[len] = '\0';
+    else
+      resolved[0] = '\0';
+#elif defined(__APPLE__)
+    uint32_t size = (uint32_t)sizeof(resolved);
+    if (_NSGetExecutablePath(resolved, &size) != 0)
+    {
+      char *dyn = (char *)malloc(size + 1);
+      if (dyn)
+      {
+        if (_NSGetExecutablePath(dyn, &size) == 0 && realpath(dyn, resolved))
+        {
+          // resolved ok
+        }
+        else
+        {
+          resolved[0] = '\0';
+        }
+        free(dyn);
+      }
+      else
+      {
+        resolved[0] = '\0';
+      }
+    }
+    else
+    {
+      if (!realpath(resolved, resolved))
+        resolved[0] = '\0';
+    }
 #else
-    return 1;
+    resolved[0] = '\0';
 #endif
   }
+
+  if (!resolved[0] && argv0 && *argv0)
+  {
+    const char *path_env = getenv("PATH");
+    if (path_env)
+    {
+      const char *p = path_env;
+      while (*p)
+      {
+        const char *s = p;
+        while (*p && *p != ':')
+          p++;
+        size_t seg_len = (size_t)(p - s);
+        if (seg_len > 0)
+        {
+          char candidate[PATH_MAX];
+          if (snprintf(candidate, sizeof(candidate), "%.*s/%s", (int)seg_len, s, argv0) > 0)
+          {
+            if (access(candidate, X_OK) == 0 && realpath(candidate, resolved))
+              break;
+          }
+        }
+        if (*p)
+          p++;
+      }
+    }
+  }
+
+  if (!resolved[0])
+    return 1;
 #endif
   split_path(resolved, dir, dirsz, NULL, 0);
   return dir[0] ? 0 : 1;
@@ -590,6 +653,7 @@ static int locate_chancecodec(char *out, size_t outsz, const char *exe_dir)
   }
   const char *env_home = getenv("CHANCECODE_HOME");
   if (env_home && *env_home)
+
   {
     char home_build[1024];
     snprintf(home_build, sizeof(home_build), "%s%cbuild", env_home,
@@ -3626,6 +3690,7 @@ int main(int argc, char **argv)
   int no_link = 0; // -c / --no-link
   int emit_library = 0;
   int freestanding = 0;
+  int freestanding_requested = 0;
   int m32 = 0;
   int opt_level = 0;
   int debug_symbols = 0;
@@ -3870,6 +3935,7 @@ int main(int argc, char **argv)
     if (strcmp(argv[i], "--freestanding") == 0)
     {
       freestanding = 1;
+      freestanding_requested = 1;
       continue;
     }
     if (strcmp(argv[i], "-x86") == 0)
@@ -4011,6 +4077,7 @@ int main(int argc, char **argv)
                                    &obj_cap, &owned_obj_inputs,
                                    &owned_obj_count, &owned_obj_cap,
                                    NULL};
+      int freestanding_before = freestanding;
       int perr = parse_ceproj_file(
           arg, ce_list, ccb_list, cclib_list, obj_list, &include_dirs,
           &include_dir_count, &output_overridden, &out, &project_output_alloc,
@@ -4018,6 +4085,8 @@ int main(int argc, char **argv)
           &emit_library, &no_link, &freestanding, &target_os);
       if (perr != 0)
         return 2;
+      if (!freestanding_requested && !freestanding_before && freestanding)
+        freestanding_requested = 1;
       continue;
     }
     if (ends_with_icase(arg, ".ce"))
@@ -4205,6 +4274,62 @@ int main(int argc, char **argv)
     {
       chancecodec_cmd_to_use = default_chancecodec_name;
       chancecodec_uses_fallback = 1;
+    }
+  }
+
+  if (!freestanding_requested)
+  {
+    char stdlib_path[1024];
+    if (exe_dir[0])
+      snprintf(stdlib_path, sizeof(stdlib_path), "%s%cstdlib%cstdlib.cclib",
+               exe_dir, CHANCE_PATH_SEP, CHANCE_PATH_SEP);
+    else
+      stdlib_path[0] = '\0';
+
+    if (!stdlib_path[0] || !is_regular_file(stdlib_path))
+    {
+      const char *path_env = getenv("PATH");
+      if (path_env)
+      {
+        const char *p = path_env;
+        while (*p)
+        {
+          const char *s = p;
+          while (*p && *p != ':')
+            p++;
+          size_t seg_len = (size_t)(p - s);
+          if (seg_len > 0)
+          {
+            char candidate[1024];
+            if (snprintf(candidate, sizeof(candidate), "%.*s/stdlib/stdlib.cclib", (int)seg_len, s) > 0)
+            {
+              if (is_regular_file(candidate))
+              {
+                snprintf(stdlib_path, sizeof(stdlib_path), "%s", candidate);
+                break;
+              }
+            }
+          }
+          if (*p)
+            p++;
+        }
+      }
+    }
+
+    if (stdlib_path[0] && is_regular_file(stdlib_path))
+    {
+      ProjectInputList cclib_list = {&cclib_inputs, &cclib_count, &cclib_cap,
+                                     &owned_cclib_inputs, &owned_cclib_count,
+                                     &owned_cclib_cap, NULL};
+      if (push_input_entry(stdlib_path, cclib_list, 1) != 0)
+        goto fail;
+    }
+    else
+    {
+      freestanding = 1;
+      fprintf(stderr,
+              "warning: stdlib not found at '%s'; enabling freestanding (--nostdlib)\n",
+              stdlib_path[0] ? stdlib_path : "<unknown>");
     }
   }
 

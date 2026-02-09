@@ -84,6 +84,18 @@ struct Parser
     } *enum_types;
     int et_count;
     int et_cap;
+    // const integer values (for array sizes and other compile-time needs)
+    struct ConstInt
+    {
+        char *name;
+        int name_len;
+        int value;
+    } *const_ints;
+    int const_int_count;
+    int const_int_cap;
+    int *const_scope_marks;
+    int const_scope_count;
+    int const_scope_cap;
     // module metadata
     char **module_parts;
     int module_part_count;
@@ -1292,6 +1304,104 @@ static void enum_const_add(Parser *ps, const char *name, int len, int value)
     ps->enum_consts[ps->ec_count].value = value;
     ps->ec_count++;
 }
+static int const_int_get(Parser *ps, const char *name, int len, int *out)
+{
+    if (!ps || !name || len <= 0)
+        return 0;
+    for (int i = ps->const_int_count - 1; i >= 0; --i)
+    {
+        if (ps->const_ints[i].name_len == len &&
+            strncmp(ps->const_ints[i].name, name, (size_t)len) == 0)
+        {
+            if (out)
+                *out = ps->const_ints[i].value;
+            return 1;
+        }
+    }
+    return 0;
+}
+static void const_int_add(Parser *ps, const char *name, int len, int value)
+{
+    if (!ps || !name || len <= 0)
+        return;
+    if (ps->const_int_count == ps->const_int_cap)
+    {
+        ps->const_int_cap = ps->const_int_cap ? ps->const_int_cap * 2 : 8;
+        ps->const_ints = (struct ConstInt *)realloc(ps->const_ints, ps->const_int_cap * sizeof(struct ConstInt));
+        if (!ps->const_ints)
+        {
+            diag_error("out of memory while tracking constant integers");
+            exit(1);
+        }
+    }
+    ps->const_ints[ps->const_int_count].name = (char *)xmalloc((size_t)len + 1);
+    memcpy(ps->const_ints[ps->const_int_count].name, name, (size_t)len);
+    ps->const_ints[ps->const_int_count].name[len] = '\0';
+    ps->const_ints[ps->const_int_count].name_len = len;
+    ps->const_ints[ps->const_int_count].value = value;
+    ps->const_int_count++;
+}
+static void const_scope_push(Parser *ps)
+{
+    if (!ps)
+        return;
+    if (ps->const_scope_count == ps->const_scope_cap)
+    {
+        ps->const_scope_cap = ps->const_scope_cap ? ps->const_scope_cap * 2 : 4;
+        ps->const_scope_marks = (int *)realloc(ps->const_scope_marks, ps->const_scope_cap * sizeof(int));
+        if (!ps->const_scope_marks)
+        {
+            diag_error("out of memory while tracking constant scopes");
+            exit(1);
+        }
+    }
+    ps->const_scope_marks[ps->const_scope_count++] = ps->const_int_count;
+}
+static void const_scope_pop(Parser *ps)
+{
+    if (!ps || ps->const_scope_count <= 0)
+        return;
+    int mark = ps->const_scope_marks[--ps->const_scope_count];
+    for (int i = ps->const_int_count - 1; i >= mark; --i)
+    {
+        free(ps->const_ints[i].name);
+        ps->const_ints[i].name = NULL;
+        ps->const_ints[i].name_len = 0;
+        ps->const_ints[i].value = 0;
+    }
+    ps->const_int_count = mark;
+}
+static int parser_eval_const_int(Node *expr, int *out)
+{
+    if (!expr || !out)
+        return 0;
+    switch (expr->kind)
+    {
+    case ND_INT:
+        *out = (int)expr->int_val;
+        return 1;
+    case ND_NEG:
+    {
+        int v = 0;
+        if (!parser_eval_const_int(expr->lhs, &v))
+            return 0;
+        *out = -v;
+        return 1;
+    }
+    default:
+        break;
+    }
+    return 0;
+}
+static void parser_maybe_register_const_int(Parser *ps, int is_const, Token name, Node *init)
+{
+    if (!ps || !is_const || !init)
+        return;
+    int value = 0;
+    if (!parser_eval_const_int(init, &value))
+        return;
+    const_int_add(ps, name.lexeme, name.length, value);
+}
 static int enum_type_find(Parser *ps, const char *name, int len)
 {
     for (int i = 0; i < ps->et_count; i++)
@@ -1860,14 +1970,18 @@ static Type *parse_type_spec(Parser *ps)
         base = &ti8;
     else if (b.kind == TK_KW_U8)
         base = &tu8;
-    else if (b.kind == TK_KW_I16)
+    else if (b.kind == TK_KW_I16 || b.kind == TK_KW_SHORT)
         base = &ti16;
-    else if (b.kind == TK_KW_U16)
+    else if (b.kind == TK_KW_U16 || b.kind == TK_KW_USHORT)
         base = &tu16;
     else if (b.kind == TK_KW_I32 || b.kind == TK_KW_INT)
         base = &ti32;
     else if (b.kind == TK_KW_U32 || b.kind == TK_KW_UINT)
         base = &tu32;
+    else if (b.kind == TK_KW_BYTE)
+        base = &ti8;
+    else if (b.kind == TK_KW_UBYTE)
+        base = &tu8;
     else if (b.kind == TK_KW_I64 || b.kind == TK_KW_LONG)
         base = &ti64;
     else if (b.kind == TK_KW_U64 || b.kind == TK_KW_ULONG)
@@ -2180,25 +2294,49 @@ static Type *parse_type_spec(Parser *ps)
         else
         {
             len_tok = lexer_next(ps->lx);
-            if (len_tok.kind != TK_INT)
+            if (len_tok.kind == TK_INT)
+            {
+                if (len_tok.int_val < 0)
+                {
+                    diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                                  "array length must be non-negative");
+                    exit(1);
+                }
+                if (len_tok.int_val > INT_MAX)
+                {
+                    diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                                  "array length is too large");
+                    exit(1);
+                }
+                length = (int)len_tok.int_val;
+            }
+            else if (len_tok.kind == TK_IDENT)
+            {
+                int ev = 0;
+                if (enum_const_get(ps, len_tok.lexeme, len_tok.length, &ev) ||
+                    const_int_get(ps, len_tok.lexeme, len_tok.length, &ev))
+                {
+                    if (ev < 0)
+                    {
+                        diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                                      "array length must be non-negative");
+                        exit(1);
+                    }
+                    length = ev;
+                }
+                else
+                {
+                    diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                                  "array length must be an integer literal or constant");
+                    exit(1);
+                }
+            }
+            else
             {
                 diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
-                              "array length must be an integer literal");
+                              "array length must be an integer literal or constant");
                 exit(1);
             }
-            if (len_tok.int_val < 0)
-            {
-                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
-                              "array length must be non-negative");
-                exit(1);
-            }
-            if (len_tok.int_val > INT_MAX)
-            {
-                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
-                              "array length is too large");
-                exit(1);
-            }
-            length = (int)len_tok.int_val;
         }
         expect(ps, TK_RBRACKET, "]");
         base = type_array(base, length);
@@ -2227,25 +2365,49 @@ static Type *parse_type_spec(Parser *ps)
         else
         {
             len_tok = lexer_next(ps->lx);
-            if (len_tok.kind != TK_INT)
+            if (len_tok.kind == TK_INT)
+            {
+                if (len_tok.int_val < 0)
+                {
+                    diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                                  "array length must be non-negative");
+                    exit(1);
+                }
+                if (len_tok.int_val > INT_MAX)
+                {
+                    diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                                  "array length is too large");
+                    exit(1);
+                }
+                length = (int)len_tok.int_val;
+            }
+            else if (len_tok.kind == TK_IDENT)
+            {
+                int ev = 0;
+                if (enum_const_get(ps, len_tok.lexeme, len_tok.length, &ev) ||
+                    const_int_get(ps, len_tok.lexeme, len_tok.length, &ev))
+                {
+                    if (ev < 0)
+                    {
+                        diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                                      "array length must be non-negative");
+                        exit(1);
+                    }
+                    length = ev;
+                }
+                else
+                {
+                    diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
+                                  "array length must be an integer literal or constant");
+                    exit(1);
+                }
+            }
+            else
             {
                 diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
-                              "array length must be an integer literal");
+                              "array length must be an integer literal or constant");
                 exit(1);
             }
-            if (len_tok.int_val < 0)
-            {
-                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
-                              "array length must be non-negative");
-                exit(1);
-            }
-            if (len_tok.int_val > INT_MAX)
-            {
-                diag_error_at(lexer_source(ps->lx), len_tok.line, len_tok.col,
-                              "array length is too large");
-                exit(1);
-            }
-            length = (int)len_tok.int_val;
         }
         expect(ps, TK_RBRACKET, "]");
         ty = type_array(ty, length);
@@ -3906,6 +4068,7 @@ static Node *parse_stmt(Parser *ps)
             lexer_next(ps->lx);
             decl->rhs = parse_initializer(ps);
         }
+        parser_maybe_register_const_int(ps, is_const, name, decl->rhs);
         expect(ps, TK_SEMI, ";");
         return decl;
     }
@@ -3923,6 +4086,7 @@ static Node *parse_stmt(Parser *ps)
 static Node *parse_block(Parser *ps)
 {
     expect(ps, TK_LBRACE, "{");
+    const_scope_push(ps);
     Node **stmts = NULL;
     int cnt = 0, cap = 0;
     for (;;)
@@ -3947,6 +4111,7 @@ static Node *parse_block(Parser *ps)
     b->line = 0;
     b->col = 0;
     b->src = lexer_source(ps->lx);
+    const_scope_pop(ps);
     return b;
 }
 
@@ -4222,6 +4387,7 @@ static Node *parse_for(Parser *ps)
                 lexer_next(ps->lx);
                 decl->rhs = parse_initializer(ps);
             }
+            parser_maybe_register_const_int(ps, is_const, name, decl->rhs);
             expect(ps, TK_SEMI, ";");
             init = decl;
         }
@@ -5145,6 +5311,8 @@ Node *parse_unit(Parser *ps)
                 lexer_next(ps->lx);
                 decl->rhs = parse_initializer(ps);
             }
+
+            parser_maybe_register_const_int(ps, is_const, name, decl->rhs);
 
             expect(ps, TK_SEMI, ";");
 

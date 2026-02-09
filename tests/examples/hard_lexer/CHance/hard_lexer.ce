@@ -1,0 +1,217 @@
+module Examples.HardLexer;
+
+bring Std;
+
+extend from "C" i32 printf(char*, ...);
+
+hide alias string = char*;
+
+enum TokenKind
+{
+    TokEOF,
+    TokIdent,
+    TokInt,
+    TokHex,
+    TokFloat,
+    TokString,
+    TokOp,
+    TokUnknown,
+};
+
+struct Token
+{
+    TokenKind kind;
+    string start;
+    i32 length;
+};
+
+struct Lexer
+{
+    string src;
+    i32 pos;
+};
+
+constant string[8] TOKEN_NAMES = {
+    "EOF",
+    "IDENT",
+    "INT",
+    "HEX",
+    "FLOAT",
+    "STRING",
+    "OP",
+    "UNKNOWN",
+};
+
+hide fun is_alpha(char c) -> bool
+{
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_')
+        ret true;
+    ret false;
+}
+
+hide fun is_digit(char c) -> bool
+{
+    if (c >= '0' && c <= '9')
+        ret true;
+    ret false;
+}
+
+hide fun is_hex_digit(char c) -> bool
+{
+    if (is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))
+        ret true;
+    ret false;
+}
+
+hide fun peek(Lexer* lex, i32 offset) -> char
+{
+    ret lex->src[lex->pos + offset];
+}
+
+hide fun skip_whitespace_and_comments(Lexer* lex) -> void
+{
+    while (true)
+    {
+        char c = peek(lex, 0);
+        if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f')
+        {
+            lex->pos = lex->pos + 1;
+            continue;
+        }
+        if (c == '/' && peek(lex, 1) == '/')
+        {
+            lex->pos = lex->pos + 2;
+            while (peek(lex, 0) != 0 && peek(lex, 0) != '\n')
+                lex->pos = lex->pos + 1;
+            continue;
+        }
+        if (c == '/' && peek(lex, 1) == '*')
+        {
+            lex->pos = lex->pos + 2;
+            while (peek(lex, 0) != 0)
+            {
+                if (peek(lex, 0) == '*' && peek(lex, 1) == '/')
+                {
+                    lex->pos = lex->pos + 2;
+                    break;
+                }
+                lex->pos = lex->pos + 1;
+            }
+            continue;
+        }
+        break;
+    }
+    ret;
+}
+
+hide fun make_token(Lexer* lex, TokenKind kind, i32 start) -> Token
+{
+    Token tok = {};
+    tok.kind = kind;
+    tok.start = lex->src + start;
+    tok.length = lex->pos - start;
+    ret tok;
+}
+
+hide fun lex_token(Lexer* lex) -> Token
+{
+    skip_whitespace_and_comments(lex);
+
+    i32 start = lex->pos;
+    char c = peek(lex, 0);
+    if (c == 0)
+        ret make_token(lex, TokEOF, start);
+
+    if (is_alpha(c))
+    {
+        lex->pos = lex->pos + 1;
+        while (is_alpha(peek(lex, 0)) || is_digit(peek(lex, 0)))
+            lex->pos = lex->pos + 1;
+        ret make_token(lex, TokIdent, start);
+    }
+
+    if (is_digit(c))
+    {
+        if (c == '0' && (peek(lex, 1) == 'x' || peek(lex, 1) == 'X'))
+        {
+            lex->pos = lex->pos + 2;
+            while (is_hex_digit(peek(lex, 0)))
+                lex->pos = lex->pos + 1;
+            ret make_token(lex, TokHex, start);
+        }
+
+        lex->pos = lex->pos + 1;
+        while (is_digit(peek(lex, 0)))
+            lex->pos = lex->pos + 1;
+
+        if (peek(lex, 0) == '.' && is_digit(peek(lex, 1)))
+        {
+            lex->pos = lex->pos + 1;
+            while (is_digit(peek(lex, 0)))
+                lex->pos = lex->pos + 1;
+            ret make_token(lex, TokFloat, start);
+        }
+
+        ret make_token(lex, TokInt, start);
+    }
+
+    if (c == '"')
+    {
+        lex->pos = lex->pos + 1;
+        while (peek(lex, 0) != 0 && peek(lex, 0) != '"')
+        {
+            if (peek(lex, 0) == '\\' && peek(lex, 1) != 0)
+                lex->pos = lex->pos + 2;
+            else
+                lex->pos = lex->pos + 1;
+        }
+        if (peek(lex, 0) == '"')
+            lex->pos = lex->pos + 1;
+        ret make_token(lex, TokString, start);
+    }
+
+    if ((c == '=' && peek(lex, 1) == '=') || (c == '!' && peek(lex, 1) == '=') ||
+        (c == '<' && peek(lex, 1) == '=') || (c == '>' && peek(lex, 1) == '=') ||
+        (c == '&' && peek(lex, 1) == '&') || (c == '|' && peek(lex, 1) == '|'))
+    {
+        lex->pos = lex->pos + 2;
+        ret make_token(lex, TokOp, start);
+    }
+
+    if (c == '+' || c == '-' || c == '*' || c == '/' || c == '=' || c == '<' || c == '>' ||
+        c == '(' || c == ')' || c == '{' || c == '}' || c == ';' || c == ',' || c == '.')
+    {
+        lex->pos = lex->pos + 1;
+        ret make_token(lex, TokOp, start);
+    }
+
+    lex->pos = lex->pos + 1;
+    ret make_token(lex, TokUnknown, start);
+}
+
+hide fun print_token(Token tok) -> void
+{
+    printf("%-8s '%.*s'\n", TOKEN_NAMES[tok.kind as i32], tok.length, tok.start);
+    ret;
+}
+
+[EntryPoint]
+expose fun main() -> i32
+{
+    string source =
+        "// header comment\n"
+        "sum = 2 + 3.14 * (value_1 - 0x2A);\n"
+        "name == \"a\\n\\t\\\\b\" && flag != 0\n"
+        "/* block comment with = and && */\n";
+
+    Lexer lex = { .src = source, .pos = 0 };
+    while (true)
+    {
+        Token tok = lex_token(&lex);
+        print_token(tok);
+        if (tok.kind == TokEOF)
+            break;
+    }
+
+    ret 0;
+}

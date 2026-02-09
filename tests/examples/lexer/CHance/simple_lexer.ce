@@ -1,0 +1,155 @@
+module Examples.Lexer;
+
+bring Std;
+
+extend from "C" i32 printf(char*, ...);
+
+hide alias string = char*;
+
+enum TokenKind
+{
+    TokEOF,
+    TokNumber,
+    TokIdent,
+    TokLParen,
+    TokRParen,
+    TokPlus,
+    TokMinus,
+    TokStar,
+    TokSlash,
+    TokUnknown,
+};
+
+struct Token
+{
+    TokenKind kind;
+    string start;
+    i32 length;
+};
+
+struct Lexer
+{
+    string src;
+    i32 pos;
+};
+
+constant string[10] TOKEN_NAMES = {
+    "EOF",
+    "NUMBER",
+    "IDENT",
+    "LPAREN",
+    "RPAREN",
+    "PLUS",
+    "MINUS",
+    "STAR",
+    "SLASH",
+    "UNKNOWN",
+};
+
+hide fun is_alpha(char c) -> bool
+{
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_')
+        ret true;
+    ret false;
+}
+
+hide fun is_digit(char c) -> bool
+{
+    if (c >= '0' && c <= '9')
+        ret true;
+    ret false;
+}
+
+hide fun is_space(char c) -> bool
+{
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f')
+        ret true;
+    ret false;
+}
+
+hide fun skip_whitespace(Lexer* lex) -> void
+{
+    while (lex->src[lex->pos] != 0 && is_space(lex->src[lex->pos]))
+    {
+        lex->pos = lex->pos + 1;
+    }
+    ret;
+}
+
+hide fun make_token(Lexer* lex, TokenKind kind, i32 start) -> Token
+{
+    Token tok = {};
+    tok.kind = kind;
+    tok.start = lex->src + start;
+    tok.length = lex->pos - start;
+    ret tok;
+}
+
+hide fun lex_token(Lexer* lex) -> Token
+{
+    skip_whitespace(lex);
+
+    i32 start = lex->pos;
+    char c = lex->src[lex->pos];
+
+    if (c == 0)
+    {
+        ret make_token(lex, TokEOF, start);
+    }
+
+    if (is_alpha(c))
+    {
+        lex->pos = lex->pos + 1;
+        while (is_alpha(lex->src[lex->pos]) || is_digit(lex->src[lex->pos]))
+        {
+            lex->pos = lex->pos + 1;
+        }
+        ret make_token(lex, TokIdent, start);
+    }
+
+    if (is_digit(c))
+    {
+        lex->pos = lex->pos + 1;
+        while (is_digit(lex->src[lex->pos]))
+        {
+            lex->pos = lex->pos + 1;
+        }
+        ret make_token(lex, TokNumber, start);
+    }
+
+    lex->pos = lex->pos + 1;
+    switch (c)
+    {
+        case '+': ret make_token(lex, TokPlus, start);
+        case '-': ret make_token(lex, TokMinus, start);
+        case '*': ret make_token(lex, TokStar, start);
+        case '/': ret make_token(lex, TokSlash, start);
+        case '(': ret make_token(lex, TokLParen, start);
+        case ')': ret make_token(lex, TokRParen, start);
+        default:  ret make_token(lex, TokUnknown, start);
+    }
+}
+
+hide fun print_token(Token tok) -> void
+{
+    printf("%-8s '%.*s'\n", TOKEN_NAMES[tok.kind as i32], tok.length, tok.start);
+    ret;
+}
+
+[EntryPoint]
+expose fun main() -> i32
+{
+    string source = "sum = a1 + 23*(foo - 5)/bar";
+
+    Lexer lex = { .src = source, .pos = 0 };
+
+    while (true)
+    {
+        Token tok = lex_token(&lex);
+        print_token(tok);
+        if (tok.kind == TokEOF)
+            break;
+    }
+
+    ret 0;
+}

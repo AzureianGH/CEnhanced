@@ -1,6 +1,7 @@
 module Std.File;
 
 bring Std.Memory as Mem;
+bring Std.String as Str;
 
 extend from "C" void* fopen(char* path, char* mode);
 extend from "C" i32 fclose(void* handle);
@@ -10,6 +11,7 @@ extend from "C" i32 fseek(void* handle, i64 offset, i32 whence);
 extend from "C" i64 ftell(void* handle);
 extend from "C" i32 fflush(void* handle);
 extend from "C" i32 remove(char* path);
+extend from "C" char* getcwd(char* buf, i32 size);
 
 constant i32 SEEK_SET = 0;
 constant i32 SEEK_CUR = 1;
@@ -139,4 +141,13 @@ expose fun exists(char* path) -> i32
 expose fun delete(char* path) -> i32
 {
     ret remove(path);
+}
+
+expose fun getcwd() -> char*
+{
+    char[1024] buf = {};
+    char* res = getcwd(buf as char*, 1024);
+    if (res == 0 as char*)
+        ret 0 as char*;
+    ret Str.strdup(buf as char*);
 }

@@ -1,0 +1,349 @@
+module Examples.FakeAsm;
+
+bring Std;
+
+extend from "C" i32 printf(char*, ...);
+
+hide alias string = char*;
+
+constant i32 MAX_LABELS = 32;
+constant i32 MAX_CODE = 256;
+
+struct Label
+{
+    string name;
+    i32 length;
+    i32 addr;
+};
+
+struct AsmSource
+{
+    string src;
+};
+
+hide fun is_space(char c) -> bool
+{
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\v' || c == '\f')
+        ret true;
+    ret false;
+}
+
+hide fun tolower_ascii(char c) -> char
+{
+    if (c >= 'A' && c <= 'Z')
+        ret (c + 32) as char;
+    ret c;
+}
+
+hide fun ident_eq(string a, i32 a_len, string b) -> bool
+{
+    i32 b_len = 0;
+    while (b[b_len] != 0)
+        b_len = b_len + 1;
+    if (a_len != b_len)
+        ret false;
+    i32 i = 0;
+    while (i < a_len)
+    {
+        if (tolower_ascii(a[i]) != tolower_ascii(b[i]))
+            ret false;
+        i = i + 1;
+    }
+    ret true;
+}
+
+hide fun parse_ident(string line, i32 i, i32 end, i32* out_len) -> i32
+{
+    if (i >= end)
+        ret -1;
+    char c = line[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'))
+        ret -1;
+    i32 start = i;
+    i = i + 1;
+    while (i < end)
+    {
+        c = line[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'))
+            break;
+        i = i + 1;
+    }
+    *out_len = i - start;
+    ret start;
+}
+
+hide fun parse_int(string line, i32 i, i32 end, i32* out) -> i32
+{
+    i32 value = 0;
+    bool saw = false;
+    while (i < end && line[i] >= '0' && line[i] <= '9')
+    {
+        value = value * 10 + ((line[i] as i32) - ('0' as i32));
+        i = i + 1;
+        saw = true;
+    }
+    if (!saw)
+        ret -1;
+    *out = value;
+    ret i;
+}
+
+hide fun parse_reg(string line, i32 i, i32 end, i32* out) -> i32
+{
+    if (i + 1 >= end)
+        ret -1;
+    char c0 = line[i];
+    char c1 = line[i + 1];
+    if (tolower_ascii(c0) != 'r')
+        ret -1;
+    if (c1 < '0' || c1 > '7')
+        ret -1;
+    *out = (c1 as i32) - ('0' as i32);
+    ret i + 2;
+}
+
+hide fun parse_imm(string line, i32 i, i32 end, i32* out) -> i32
+{
+    if (i >= end || line[i] != '#')
+        ret -1;
+    ret parse_int(line, i + 1, end, out);
+}
+
+hide fun skip_ws(string line, i32 i, i32 end) -> i32
+{
+    while (i < end && is_space(line[i]))
+        i = i + 1;
+    ret i;
+}
+
+hide fun add_label(Label* labels, i32* count, string name, i32 len, i32 addr) -> void
+{
+    if (*count >= MAX_LABELS)
+        ret;
+    labels[*count].name = name;
+    labels[*count].length = len;
+    labels[*count].addr = addr;
+    *count = *count + 1;
+    ret;
+}
+
+hide fun find_label(Label* labels, i32 count, string name, i32 len) -> i32
+{
+    i32 i = 0;
+    while (i < count)
+    {
+        if (labels[i].length == len && ident_eq(labels[i].name, len, name))
+            ret labels[i].addr;
+        i = i + 1;
+    }
+    ret -1;
+}
+
+hide fun first_pass(string source, Label* labels, i32* label_count) -> void
+{
+    i32 addr = 0;
+    i32 pos = 0;
+    while (source[pos] != 0)
+    {
+        i32 line_start = pos;
+        while (source[pos] != 0 && source[pos] != '\n')
+            pos = pos + 1;
+        i32 line_end = pos;
+
+        i32 comment = line_start;
+        while (comment < line_end)
+        {
+            if (source[comment] == ';')
+            {
+                line_end = comment;
+                break;
+            }
+            comment = comment + 1;
+        }
+
+        i32 i = skip_ws(source, line_start, line_end);
+        if (i < line_end)
+        {
+            i32 name_len = 0;
+            i32 name_start = parse_ident(source, i, line_end, &name_len);
+            if (name_start >= 0)
+            {
+                i32 j = skip_ws(source, name_start + name_len, line_end);
+                if (j < line_end && source[j] == ':')
+                {
+                    add_label(labels, label_count, source + name_start, name_len, addr);
+                    j = skip_ws(source, j + 1, line_end);
+                    if (j < line_end)
+                    {
+                        i32 mn_len = 0;
+                        i32 mn_start = parse_ident(source, j, line_end, &mn_len);
+                        if (mn_start >= 0)
+                        {
+                            if (ident_eq(source + mn_start, mn_len, "mov") || ident_eq(source + mn_start, mn_len, "jmp"))
+                                addr = addr + 2;
+                            else if (ident_eq(source + mn_start, mn_len, "add") || ident_eq(source + mn_start, mn_len, "sub"))
+                                addr = addr + 1;
+                        }
+                    }
+                }
+                else
+                {
+                    if (ident_eq(source + name_start, name_len, "mov") || ident_eq(source + name_start, name_len, "jmp"))
+                        addr = addr + 2;
+                    else if (ident_eq(source + name_start, name_len, "add") || ident_eq(source + name_start, name_len, "sub"))
+                        addr = addr + 1;
+                }
+            }
+        }
+
+        if (source[pos] == 0)
+            break;
+        pos = pos + 1;
+    }
+    ret;
+}
+
+hide fun emit_byte(u8* code, i32* code_len, u8 value) -> void
+{
+    if (*code_len >= MAX_CODE)
+        ret;
+    code[*code_len] = value;
+    *code_len = *code_len + 1;
+    ret;
+}
+
+hide fun second_pass(string source, Label* labels, i32 label_count, u8* code, i32* code_len) -> void
+{
+    i32 pos = 0;
+    while (source[pos] != 0)
+    {
+        i32 line_start = pos;
+        while (source[pos] != 0 && source[pos] != '\n')
+            pos = pos + 1;
+        i32 line_end = pos;
+
+        i32 comment = line_start;
+        while (comment < line_end)
+        {
+            if (source[comment] == ';')
+            {
+                line_end = comment;
+                break;
+            }
+            comment = comment + 1;
+        }
+
+        i32 i = skip_ws(source, line_start, line_end);
+        if (i < line_end)
+        {
+            i32 name_len = 0;
+            i32 name_start = parse_ident(source, i, line_end, &name_len);
+            if (name_start >= 0)
+            {
+                i32 j = skip_ws(source, name_start + name_len, line_end);
+                if (j < line_end && source[j] == ':')
+                {
+                    j = skip_ws(source, j + 1, line_end);
+                    if (j < line_end)
+                    {
+                        name_len = 0;
+                        name_start = parse_ident(source, j, line_end, &name_len);
+                    }
+                    else
+                    {
+                        name_len = 0;
+                        name_start = -1;
+                    }
+                }
+
+                if (name_start >= 0 && name_len > 0)
+                {
+                    i32 k = skip_ws(source, name_start + name_len, line_end);
+                    if (ident_eq(source + name_start, name_len, "mov"))
+                    {
+                        i32 reg_idx = 0;
+                        i32 imm = 0;
+                        k = parse_reg(source, k, line_end, &reg_idx);
+                        k = skip_ws(source, k, line_end);
+                        if (k >= 0 && k < line_end && source[k] == ',')
+                            k = skip_ws(source, k + 1, line_end);
+                        k = parse_imm(source, k, line_end, &imm);
+                        emit_byte(code, code_len, (0x10 | (reg_idx & 7)) as u8);
+                        emit_byte(code, code_len, (imm & 0xFF) as u8);
+                    }
+                    else if (ident_eq(source + name_start, name_len, "add") || ident_eq(source + name_start, name_len, "sub"))
+                    {
+                        i32 reg_a = 0;
+                        i32 reg_b = 0;
+                        k = parse_reg(source, k, line_end, &reg_a);
+                        k = skip_ws(source, k, line_end);
+                        if (k >= 0 && k < line_end && source[k] == ',')
+                            k = skip_ws(source, k + 1, line_end);
+                        k = parse_reg(source, k, line_end, &reg_b);
+                        i32 base = ident_eq(source + name_start, name_len, "add") ? 0x20 : 0x30;
+                        emit_byte(code, code_len, (base | ((reg_a & 7) << 3) | (reg_b & 7)) as u8);
+                    }
+                    else if (ident_eq(source + name_start, name_len, "jmp"))
+                    {
+                        i32 tgt_len = 0;
+                        i32 tgt_start = parse_ident(source, k, line_end, &tgt_len);
+                        i32 addr = (tgt_start >= 0) ? find_label(labels, label_count, source + tgt_start, tgt_len) : -1;
+                        if (addr < 0)
+                            addr = 0;
+                        emit_byte(code, code_len, 0x40 as u8);
+                        emit_byte(code, code_len, (addr & 0xFF) as u8);
+                    }
+                }
+            }
+        }
+
+        if (source[pos] == 0)
+            break;
+        pos = pos + 1;
+    }
+    ret;
+}
+
+[EntryPoint]
+expose fun main() -> i32
+{
+    constant i32 MAX_LABELS = 32;
+
+    string source =
+        "; Fake assembly\n"
+        "start:\n"
+        "  mov r1, #5\n"
+        "  mov r2, #10\n"
+        "  add r1, r2\n"
+        "  jmp end\n"
+        "loop:\n"
+        "  sub r1, r2\n"
+        "end:\n"
+        "  mov r0, #0\n";
+
+    Label[MAX_LABELS] labels = {};
+    i32 label_count = 0;
+    first_pass(source, &labels[0], &label_count);
+
+    u8[256] code;
+    i32 code_len = 0;
+    second_pass(source, &labels[0], label_count, &code[0], &code_len);
+
+    printf("labels:\n");
+    i32 i = 0;
+    while (i < label_count)
+    {
+        printf("  %.*s = %d\n", labels[i].length, labels[i].name, labels[i].addr);
+        i = i + 1;
+    }
+
+    printf("bytes(%d):\n", code_len);
+    i = 0;
+    while (i < code_len)
+    {
+        printf("%02X%s", code[i] as i32, (i + 1 == code_len) ? "" : " ");
+        i = i + 1;
+    }
+    printf("\n");
+    ret 0;
+}

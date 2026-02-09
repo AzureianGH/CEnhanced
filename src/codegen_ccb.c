@@ -416,6 +416,10 @@ static bool ccb_store_array_bytes(const Type *array_type, const Node *expr, uint
 static bool ccb_flatten_array_initializer(const Type *array_type, const Node *init, uint8_t **out_bytes, size_t *out_size);
 static bool ccb_flatten_struct_initializer(const Type *struct_type, const Node *init, uint8_t **out_bytes, size_t *out_size);
 static char *ccb_encode_bytes_literal(const uint8_t *data, size_t len);
+static bool ccb_is_string_ptr_type(const Type *ty);
+static char *ccb_make_string_symbol(const char *base, int index);
+static bool ccb_emit_string_ptr_array_global(CcbModule *mod, const char *name, const Type *array_type, const Node *init,
+                                             const char *section_literal, const char *const_attr, const char *hidden_attr);
 static CcbLocal *ccb_local_add(CcbFunctionBuilder *fb, const char *name, Type *type, bool address_only, bool is_param);
 static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr);
 static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr);
@@ -3617,9 +3621,60 @@ static int ccb_emit_array_zero(CcbFunctionBuilder *fb, const Node *var_decl, con
 
     if (type_is_address_only(elem_type))
     {
-        diag_error_at(var_decl ? var_decl->src : NULL, var_decl ? var_decl->line : 0, var_decl ? var_decl->col : 0,
-                      "array elements with aggregate types cannot be zero-initialized yet");
-        return 1;
+        size_t elem_size = ccb_type_size_bytes(elem_type);
+        if (elem_size == 0)
+        {
+            diag_error_at(var_decl ? var_decl->src : NULL, var_decl ? var_decl->line : 0, var_decl ? var_decl->col : 0,
+                          "array element size is unknown for zero-initialization");
+            return 1;
+        }
+        size_t total_size = elem_size * (size_t)length;
+        if (total_size == 0)
+            return 0;
+
+        Type byte_type = {0};
+        byte_type.kind = TY_U8;
+
+        Node base_ref = {0};
+        base_ref.kind = ND_VAR;
+        base_ref.var_ref = var_name;
+        base_ref.type = type_ptr(&byte_type);
+        base_ref.var_type = (Type *)array_type;
+        base_ref.var_is_array = 1;
+        base_ref.var_is_const = var_decl ? var_decl->var_is_const : 0;
+        base_ref.var_is_global = var_decl ? var_decl->var_is_global : 0;
+        base_ref.src = var_decl ? var_decl->src : NULL;
+        base_ref.line = var_decl ? var_decl->line : 0;
+        base_ref.col = var_decl ? var_decl->col : 0;
+
+        for (size_t i = 0; i < total_size; ++i)
+        {
+            Node idx_lit = {0};
+            idx_lit.kind = ND_INT;
+            idx_lit.int_val = (int64_t)i;
+            idx_lit.type = type_i32();
+            idx_lit.src = base_ref.src;
+            idx_lit.line = base_ref.line;
+            idx_lit.col = base_ref.col;
+
+            Node idx_expr = {0};
+            idx_expr.kind = ND_INDEX;
+            idx_expr.lhs = &base_ref;
+            idx_expr.rhs = &idx_lit;
+            idx_expr.type = &byte_type;
+            idx_expr.src = base_ref.src;
+            idx_expr.line = base_ref.line;
+            idx_expr.col = base_ref.col;
+
+            CCValueType elem_ty = CC_TYPE_U8;
+            if (ccb_emit_index_address(fb, &idx_expr, &elem_ty, NULL))
+                return 1;
+            if (!ccb_emit_const_zero(&fb->body, elem_ty))
+                return 1;
+            if (!ccb_emit_store_indirect(&fb->body, elem_ty))
+                return 1;
+        }
+        return 0;
     }
 
     Node base_ref = {0};
@@ -6580,6 +6635,14 @@ static int ccb_module_append_global(CcbModule *mod, const Node *decl)
         const Node *init = decl->rhs;
         if (decl->var_type->kind == TY_ARRAY && init && init->kind == ND_INIT_LIST && !init->init.is_zero)
         {
+            if (ccb_emit_string_ptr_array_global(mod, name, decl->var_type, init, section_literal, const_attr, hidden_attr))
+            {
+                status = 0;
+                goto cleanup;
+            }
+        }
+        if (decl->var_type->kind == TY_ARRAY && init && init->kind == ND_INIT_LIST && !init->init.is_zero)
+        {
             uint8_t *bytes = NULL;
             size_t byte_len = 0;
             if (!ccb_flatten_array_initializer(decl->var_type, init, &bytes, &byte_len) || !bytes)
@@ -7449,6 +7512,163 @@ static char *ccb_encode_bytes_literal(const uint8_t *data, size_t len)
     *cursor++ = '"';
     *cursor = '\0';
     return out;
+}
+
+static bool ccb_is_string_ptr_type(const Type *ty)
+{
+    if (!ty || ty->kind != TY_PTR || !ty->pointee)
+        return false;
+    TypeKind pointee = ty->pointee->kind;
+    return (pointee == TY_CHAR || pointee == TY_I8 || pointee == TY_U8);
+}
+
+static char *ccb_make_string_symbol(const char *base, int index)
+{
+    const char *safe = (base && *base) ? base : "str";
+    int needed = snprintf(NULL, 0, "__ccb_str_%s_%d", safe, index);
+    if (needed < 0)
+        return NULL;
+    size_t len = (size_t)needed;
+    char *name = (char *)malloc(len + 1);
+    if (!name)
+        return NULL;
+    snprintf(name, len + 1, "__ccb_str_%s_%d", safe, index);
+    return name;
+}
+
+static bool ccb_emit_string_ptr_array_global(CcbModule *mod, const char *name, const Type *array_type, const Node *init,
+                                             const char *section_literal, const char *const_attr, const char *hidden_attr)
+{
+    if (!mod || !name || !array_type || array_type->kind != TY_ARRAY || !init || init->kind != ND_INIT_LIST)
+        return false;
+
+    int length = array_type->array.length;
+    if (length <= 0)
+        return false;
+
+    const Type *elem_type = array_type->array.elem;
+    if (!ccb_is_string_ptr_type(elem_type))
+        return false;
+
+    for (int i = 0; i < length; ++i)
+    {
+        const Node *elem = (init->init.elems && i < init->init.count) ? init->init.elems[i] : NULL;
+        if (!elem)
+            continue;
+        if (elem->kind == ND_NULL)
+            continue;
+        if (elem->kind != ND_STRING)
+            return false;
+    }
+
+    char **symbols = (char **)calloc((size_t)length, sizeof(char *));
+    if (!symbols)
+        return false;
+
+    bool ok = true;
+    for (int i = 0; i < length && ok; ++i)
+    {
+        const Node *elem = (init->init.elems && i < init->init.count) ? init->init.elems[i] : NULL;
+        if (!elem || elem->kind == ND_NULL)
+            continue;
+        if (elem->kind != ND_STRING)
+        {
+            ok = false;
+            break;
+        }
+
+        char *sym = ccb_make_string_symbol(name, i);
+        if (!sym)
+        {
+            ok = false;
+            break;
+        }
+
+        size_t str_len = (elem->str_len >= 0) ? (size_t)elem->str_len : 0;
+        size_t total_len = str_len + 1;
+        uint8_t *bytes = (uint8_t *)malloc(total_len);
+        if (!bytes)
+        {
+            free(sym);
+            ok = false;
+            break;
+        }
+        if (str_len > 0 && elem->str_data)
+            memcpy(bytes, elem->str_data, str_len);
+        bytes[str_len] = 0;
+
+        char *literal = ccb_encode_bytes_literal(bytes, total_len);
+        free(bytes);
+        if (!literal)
+        {
+            free(sym);
+            ok = false;
+            break;
+        }
+
+        if (!ccb_module_appendf(mod, ".global %s type=%s size=%zu align=1 data=%s const hidden",
+                                sym, cc_type_name(CC_TYPE_U8), total_len, literal))
+        {
+            free(literal);
+            free(sym);
+            ok = false;
+            break;
+        }
+
+        free(literal);
+        symbols[i] = sym;
+    }
+
+    if (!ok)
+    {
+        for (int i = 0; i < length; ++i)
+            free(symbols[i]);
+        free(symbols);
+        return false;
+    }
+
+    size_t list_len = 0;
+    for (int i = 0; i < length; ++i)
+    {
+        const char *entry = symbols[i] ? symbols[i] : "null";
+        list_len += strlen(entry) + 1;
+    }
+
+    char *ptr_list = (char *)malloc(list_len + 1);
+    if (!ptr_list)
+    {
+        for (int i = 0; i < length; ++i)
+            free(symbols[i]);
+        free(symbols);
+        return false;
+    }
+
+    char *cursor = ptr_list;
+    for (int i = 0; i < length; ++i)
+    {
+        const char *entry = symbols[i] ? symbols[i] : "null";
+        size_t entry_len = strlen(entry);
+        if (i > 0)
+            *cursor++ = ',';
+        memcpy(cursor, entry, entry_len);
+        cursor += entry_len;
+    }
+    *cursor = '\0';
+
+    size_t size_bytes = (size_t)length * 8;
+    bool emitted = section_literal
+                       ? ccb_module_appendf(mod, ".global %s type=%s size=%zu align=8 ptrs=%s section=%s%s%s",
+                                            name, cc_type_name(CC_TYPE_PTR), size_bytes, ptr_list, section_literal,
+                                            const_attr, hidden_attr)
+                       : ccb_module_appendf(mod, ".global %s type=%s size=%zu align=8 ptrs=%s%s%s",
+                                            name, cc_type_name(CC_TYPE_PTR), size_bytes, ptr_list, const_attr, hidden_attr);
+
+    free(ptr_list);
+    for (int i = 0; i < length; ++i)
+        free(symbols[i]);
+    free(symbols);
+
+    return emitted;
 }
 
 static void ccb_write_quoted(FILE *out, const char *text)

@@ -1,0 +1,298 @@
+module Std.Net;
+
+#if defined(_WIN32) || defined(__WIN32__)
+extend from "C" i32 WSAStartup(u16 version, void* data);
+extend from "C" i32 WSACleanup();
+extend from "C" i32 closesocket(i32 s);
+extend from "C" i32 WSAGetLastError();
+constant i32 NET_WINDOWS = 1;
+#else
+extend from "C" i32 close(i32 fd);
+constant i32 NET_WINDOWS = 0;
+#endif
+
+extend from "C" i32 socket(i32 domain, i32 type, i32 protocol);
+extend from "C" i32 connect(i32 sock, void* addr, i32 len);
+extend from "C" i32 bind(i32 sock, void* addr, i32 len);
+extend from "C" i32 listen(i32 sock, i32 backlog);
+extend from "C" i32 accept(i32 sock, void* addr, i32* len);
+extend from "C" i64 send(i32 sock, void* buf, i64 len, i32 flags);
+extend from "C" i64 recv(i32 sock, void* buf, i64 len, i32 flags);
+extend from "C" i32 shutdown(i32 sock, i32 how);
+extend from "C" i32 setsockopt(i32 sock, i32 level, i32 opt, void* val, i32 len);
+
+extend from "C" u32 inet_addr(char*);
+
+constant i32 AF_INET = 2;
+constant i32 SOCK_STREAM = 1;
+constant i32 IPPROTO_TCP = 6;
+
+constant i32 SOL_SOCKET = 1;
+constant i32 SO_REUSEADDR = 2;
+
+constant i32 SHUT_RD = 0;
+constant i32 SHUT_WR = 1;
+constant i32 SHUT_RDWR = 2;
+
+constant u32 INADDR_ANY = 0;
+
+#if defined(__APPLE__) || defined(__MACH__)
+constant i32 ERR_EINTR = 4;
+constant i32 ERR_EAGAIN = 35;
+#elif defined(__linux__)
+extend from "C" i32* __errno_location();
+constant i32 ERR_EINTR = 4;
+constant i32 ERR_EAGAIN = 11;
+#else
+constant i32 ERR_EINTR = 4;
+constant i32 ERR_EAGAIN = 11;
+#endif
+
+#if defined(__linux__)
+constant i32 SEND_FLAGS = 0x4000; // MSG_NOSIGNAL
+#else
+constant i32 SEND_FLAGS = 0;
+#endif
+
+#if defined(__APPLE__) || defined(__MACH__)
+constant i32 SO_NOSIGPIPE = 0x1022;
+#else
+constant i32 SO_NOSIGPIPE = -1;
+#endif
+
+struct SockAddrIn
+{
+#if defined(__APPLE__) || defined(__MACH__)
+    u8  sin_len;
+    u8  sin_family;
+#else
+    u16 sin_family;
+#endif
+    u16 sin_port;
+    u32 sin_addr;
+    u8[8] sin_zero;
+};
+
+#if defined(_WIN32) || defined(__WIN32__)
+global i32 wsa_ready = 0;
+#endif
+
+hide fun net_errno() -> i32
+{
+#if defined(_WIN32) || defined(__WIN32__)
+    ret WSAGetLastError();
+#elif defined(__APPLE__) || defined(__MACH__)
+    ret -1; // errno accessor unavailable; best-effort
+#elif defined(__linux__)
+    i32* p = __errno_location();
+    ret p != 0 as i32* ? *p : -1;
+#else
+    ret -1;
+#endif
+}
+
+expose fun last_error() -> i32 { ret net_errno(); }
+
+hide fun net_close(i32 s) -> i32
+{
+#if defined(_WIN32) || defined(__WIN32__)
+    ret closesocket(s);
+#else
+    ret close(s);
+#endif
+}
+
+expose fun init() -> i32
+{
+#if defined(_WIN32) || defined(__WIN32__)
+    if (wsa_ready != 0)
+        ret 0;
+    char[256] buf = {};
+    if (WSAStartup(0x0202 as u16, buf as void*) == 0)
+    {
+        wsa_ready = 1;
+        ret 0;
+    }
+    ret -1;
+#else
+    ret 0;
+#endif
+}
+
+expose fun cleanup() -> void
+{
+#if defined(_WIN32) || defined(__WIN32__)
+    if (wsa_ready != 0)
+    {
+        WSACleanup();
+        wsa_ready = 0;
+    }
+#endif
+}
+
+hide fun apply_common_opts(i32 sock) -> void
+{
+    i32 yes = 1;
+    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (&yes) as void*, 4);
+
+#if defined(__APPLE__) || defined(__MACH__)
+    if (SO_NOSIGPIPE != -1)
+        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, (&yes) as void*, 4);
+#endif
+}
+
+expose fun tcp_listen(i32 port, i32 backlog) -> i32
+{
+    if (init() != 0)
+        ret -1;
+
+    i32 s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s < 0)
+        ret -1;
+
+    apply_common_opts(s);
+
+    SockAddrIn sa = {};
+#if defined(__APPLE__) || defined(__MACH__)
+    sa.sin_len = sizeof(SockAddrIn) as u8;
+    sa.sin_family = AF_INET as u8;
+#else
+    sa.sin_family = AF_INET as u16;
+#endif
+    sa.sin_port = htons(port as u16);
+    sa.sin_addr = htonl(INADDR_ANY);
+
+    if (bind(s, (&sa) as void*, sizeof(SockAddrIn)) != 0)
+    {
+        i32 err = net_errno();
+        net_close(s);
+        ret -err;
+    }
+
+    if (listen(s, backlog) != 0)
+    {
+        i32 err = net_errno();
+        net_close(s);
+        ret -err;
+    }
+
+    ret s;
+}
+
+expose fun tcp_accept(i32 listener) -> i32
+{
+    SockAddrIn sa = {};
+    i32 len = sizeof(SockAddrIn);
+    i32 c = accept(listener, (&sa) as void*, &len);
+    if (c >= 0)
+        apply_common_opts(c);
+    ret c;
+}
+
+expose fun tcp_connect(char* ip, i32 port) -> i32
+{
+    if (init() != 0)
+        ret -1;
+
+    i32 s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s < 0)
+        ret -1;
+
+    apply_common_opts(s);
+
+    SockAddrIn sa = {};
+#if defined(__APPLE__) || defined(__MACH__)
+    sa.sin_len = sizeof(SockAddrIn) as u8;
+    sa.sin_family = AF_INET as u8;
+#else
+    sa.sin_family = AF_INET as u16;
+#endif
+    sa.sin_port = htons(port as u16);
+    sa.sin_addr = inet_addr(ip);
+
+    if (connect(s, (&sa) as void*, sizeof(SockAddrIn)) != 0)
+    {
+        net_close(s);
+        ret -1;
+    }
+
+    ret s;
+}
+
+expose fun tcp_send_all(i32 sock, void* data, i32 len) -> i32
+{
+    if (sock < 0 || data == 0 as void* || len < 0)
+        ret -1;
+
+    i32 sent = 0;
+    u8* p = data as u8*;
+
+    while (sent < len)
+    {
+        i64 rc = send(sock, (p + sent) as void*, (len - sent) as i64, SEND_FLAGS);
+
+        if (rc > 0)
+        {
+            sent = sent + (rc as i32);
+            continue;
+        }
+
+        if (rc == 0)
+            ret sent > 0 ? sent : -1;
+
+        i32 err = net_errno();
+
+        if (err == ERR_EINTR)
+            continue;
+
+        ret sent > 0 ? sent : -1;
+    }
+
+    ret sent;
+}
+
+expose fun tcp_recv(i32 sock, void* buf, i32 cap) -> i32
+{
+    if (sock < 0 || buf == 0 as void* || cap <= 0)
+        ret -1;
+
+    i64 rc = recv(sock, buf, cap as i64, 0);
+    if (rc < 0)
+        ret -1;
+    if (rc > 0x7FFFFFFF)
+        ret -1;
+    ret rc as i32;
+}
+
+expose fun tcp_shutdown(i32 sock, i32 how) -> i32
+{
+    if (sock < 0)
+        ret -1;
+    ret shutdown(sock, how);
+}
+
+expose fun tcp_close(i32 sock) -> i32
+{
+    if (sock < 0)
+        ret -1;
+    ret net_close(sock);
+}
+
+expose fun htonl(u32 hostlong) -> u32
+{
+    ret ((hostlong & 0x000000FF) << 24) |
+        ((hostlong & 0x0000FF00) << 8)  |
+        ((hostlong & 0x00FF0000) >> 8)  |
+        ((hostlong & 0xFF000000) >> 24);
+}
+
+expose fun htons(u16 hostshort) -> u16
+{
+    ret ((hostshort & 0x00FF) << 8) |
+        ((hostshort & 0xFF00) >> 8);
+}
+
+expose fun inetaddr(char* ip) -> u32
+{
+    ret inet_addr(ip);
+}

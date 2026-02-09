@@ -1756,8 +1756,13 @@ char *chance_preprocess_source(const char *path, const char *src, int len,
 	define_builtin_macro(&st, "__COUNTER__", "0");
 #if defined(_WIN32)
 	define_builtin_flag(&st, "__WIN32__");
+	define_builtin_flag(&st, "_WIN32");
+#elif defined(__APPLE__) || defined(__MACH__)
+	define_builtin_flag(&st, "__APPLE__");
+	define_builtin_flag(&st, "__MACH__");
 #else
 	define_builtin_flag(&st, "__LINUX__");
+	define_builtin_flag(&st, "__linux__");
 #endif
 	char *file_literal = make_string_literal(path ? path : "");
 	define_builtin_macro(&st, "__FILE__", file_literal);
