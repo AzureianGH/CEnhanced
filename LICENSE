@@ -1,23 +1,24 @@
-# OpenAzure License (2025)
+# OpenAzure License (2026)  
+**Copyright (c) 2026 Nathan Thomas Hornby (Azureian)**
 
-Copyright (c) 2025 Nathan Thomas Hornby (Azureian)  
+## 1. Grant of License
+Subject to the terms of this License, the Author grants you a world-wide, royalty-free, non-exclusive license to **use, fork, modify, and distribute** this software (the "Software").
 
-## Permissions
-- You are free to **use, fork, modify, and distribute** this software.
-- You may use this software in **commercial or paid products**, as long as the software itself is **not sold separately**.
-- You may **claim ownership of your modifications**, but you **cannot claim ownership of the original software**.
+## 2. Permitted Commercial Use
+You may incorporate the Software into commercial or paid products. However, you are expressly prohibited from selling, sublicensing, or distributing the Software **as a standalone product** or as the primary value proposition of a bundle. The Software must be integrated as a component of a larger product or service that adds significant independent value.
 
-## Requirements
-- **Attribution is mandatory**: You must credit the original author (Nathan Thomas Hornby, Azureian) wherever the software is publicly visible, including in:
-  - A `LICENSE.md` or equivalent file included with the software, OR
-  - A publicly accessible website listing the software.
-- You must provide a **link to the original source** of this software, unchanged, even if you modify it.
+## 3. Ownership & Attribution
+*   **Original Work**: The Author retains all intellectual property rights to the original Software. You shall not claim ownership of the original Software.
+*   **Modifications**: You own the rights to your original modifications, provided they do not infringe upon the Author's rights to the underlying Software.
+*   **Mandatory Credit**: You must maintain all original copyright notices. Attribution must be prominently displayed in a `LICENSE.md` file within the distribution and on any public-facing website or documentation associated with your product.
+*   **Source Link**: You must provide a functional hyperlink to the original source repository of the Software in all distributions.
 
-## Restrictions
-- You **may not sell the software itself**. It may only be bundled as part of a larger product or service.
-- You **cannot remove or obscure attribution** to the original author.
-- You **cannot claim the original software as your own**, even if modified.
+## 4. Restrictions
+*   **No Standalone Sale**: You shall not charge a fee specifically for the Software itself.
+*   **No Obfuscation**: You shall not remove, alter, or obscure any copyright, trademark, or attribution notices placed by the Author.
 
-## Disclaimer
-- This software is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement.
-- In no event shall the author be liable for any claim, damages, or other liability arising from the use of this software.
+## 5. Disclaimer of Warranty & Limitation of Liability
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## 6. Governing Law & Jurisdiction
+This License shall be governed by and construed in accordance with the laws of the **State of Michigan**, without regard to its conflict of law principles. Any legal action or proceeding arising under this License shall be brought exclusively in the state courts of **Livingston County, Michigan**, or the U.S. District Court for the Eastern District of Michigan, and the parties hereby consent to personal jurisdiction and venue therein.
