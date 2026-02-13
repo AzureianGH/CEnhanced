@@ -3272,6 +3272,95 @@ static void symtab_add_library_functions(SemaContext *sc, Node *unit,
   }
 }
 
+static int is_stdlib_module_name(const char *module_name)
+{
+  if (!module_name || !*module_name)
+    return 0;
+  if (strcmp(module_name, "Std") == 0)
+    return 1;
+  return strncmp(module_name, "Std.", 4) == 0;
+}
+
+static int imported_symbol_has_name(const Symbol *list, int count,
+                                    const char *name)
+{
+  if (!list || count <= 0 || !name || !*name)
+    return 0;
+  for (int i = 0; i < count; ++i)
+  {
+    const Symbol *sym = &list[i];
+    const char *sym_name = (sym->backend_name && *sym->backend_name)
+                               ? sym->backend_name
+                               : sym->name;
+    if (sym_name && strcmp(sym_name, name) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+static int append_imported_symbol(Symbol **list, int *count, int *cap,
+                                  const Symbol *sym)
+{
+  if (!list || !count || !cap || !sym)
+    return 1;
+  if (*count == *cap)
+  {
+    int new_cap = *cap ? *cap * 2 : 8;
+    Symbol *grown = (Symbol *)realloc(*list, (size_t)new_cap * sizeof(Symbol));
+    if (!grown)
+      return 1;
+    *list = grown;
+    *cap = new_cap;
+  }
+  (*list)[*count] = *sym;
+  (*count)++;
+  return 0;
+}
+
+static int merge_stdlib_externs_into_imported(
+    Symbol **imported_syms, int *imported_count, int *imported_cap,
+    const LoadedLibraryFunction *funcs, int func_count)
+{
+  if (!imported_syms || !imported_count || !imported_cap || !funcs ||
+      func_count <= 0)
+    return 0;
+
+  for (int i = 0; i < func_count; ++i)
+  {
+    const LoadedLibraryFunction *lf = &funcs[i];
+    if (!lf->qualified_name || !lf->module_name)
+      continue;
+    if (!lf->is_exposed)
+      continue;
+    if (!is_stdlib_module_name(lf->module_name))
+      continue;
+
+    Symbol sym = {0};
+    sym.kind = SYM_FUNC;
+    sym.name = lf->qualified_name;
+    sym.backend_name = lf->backend_name ? lf->backend_name : lf->qualified_name;
+    sym.is_extern = 1;
+    sym.abi = "C";
+    sym.sig.ret = lf->return_type ? lf->return_type : type_i32();
+    sym.sig.params = lf->param_types;
+    sym.sig.param_count = lf->param_count;
+    sym.sig.is_varargs = lf->is_varargs;
+    sym.is_noreturn = lf->is_noreturn;
+
+    const char *effective = (sym.backend_name && *sym.backend_name)
+                                ? sym.backend_name
+                                : sym.name;
+    if (effective && imported_symbol_has_name(*imported_syms, *imported_count,
+                                              effective))
+      continue;
+    if (append_imported_symbol(imported_syms, imported_count, imported_cap,
+                               &sym) != 0)
+      return 1;
+  }
+
+  return 0;
+}
+
 static int load_cclib_library(const char *path, LoadedLibrary **libs,
                               int *lib_count, int *lib_cap,
                               LoadedLibraryFunction **funcs, int *func_count,
@@ -3768,7 +3857,7 @@ int main(int argc, char **argv)
     {
       printf("chancec: CHance Compiler version 1.0.0\n");
       printf("chancec: CE language standard: H25-1\n");
-      printf("chancec: License: MIT\n");
+      printf("chancec: License: OpenAzure License\n");
       printf("chancec: Compiled on %s %s\n", __DATE__, __TIME__);
       printf("chancec: Created by Nathan Hornby (AzureianGH)\n");
       return 0;
@@ -4781,6 +4870,15 @@ int main(int argc, char **argv)
 
       int imported_count = 0;
       Symbol *imported_syms = sema_copy_imported_function_symbols(sc, &imported_count);
+      int imported_cap = imported_count;
+      if (merge_stdlib_externs_into_imported(
+              &imported_syms, &imported_count, &imported_cap,
+              loaded_library_functions, loaded_library_function_count) != 0)
+      {
+        rc = 1;
+        free(imported_syms);
+        break;
+      }
       int imported_global_count = 0;
       Symbol *imported_global_syms = sema_copy_imported_global_symbols(sc, &imported_global_count);
 

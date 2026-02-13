@@ -472,6 +472,12 @@ expose fun main() -> i32
     test_diffvarargs(10, 77, 3.14f, "varargs test");
     internal_diffvarargs(0, 88, 2.71828, "internal varargs test");
 
+    i32 big_vararg_sum = vararg_sum(12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12);
+    assert(big_vararg_sum == 78, "vararg_sum handles >8 args");
+
+    i32 mixed_vararg_sum = vararg_mix(6, 10, 1.5, 20, 2.5, 30, 3.5);
+    assert(mixed_vararg_sum == 66, "vararg_mix handles int+float varargs");
+
     i32[3] fixed_array = {10, 20, 30};
     i32 fixed_sum = fixed_array[0] + fixed_array[1] + fixed_array[2];
     assert(fixed_sum == 60, "fixed array sum is 60");
@@ -926,6 +932,40 @@ expose fun internal_diffvarargs(i32 empty, ...) -> void
     Std.IO.print("internal_diffvarargs: first=%d, second=%lf, third=%s\n", first, second, third);
     va_end(list);
     ret;
+}
+
+hide fun vararg_sum(i32 count, ...) -> i32
+{
+    va_list list = va_start();
+    i32 total = 0;
+    for (i32 i = 0; i < count; i = i + 1)
+    {
+        i32 value = va_arg(list, i32);
+        total = total + value;
+    }
+    va_end(list);
+    ret total;
+}
+
+hide fun vararg_mix(i32 count, ...) -> i32
+{
+    va_list list = va_start();
+    i32 total = 0;
+    for (i32 i = 0; i < count; i = i + 1)
+    {
+        if ((i % 2) == 0)
+        {
+            i32 value = va_arg(list, i32);
+            total = total + value;
+        }
+        else
+        {
+            f64 value = va_arg(list, f64);
+            total = total + (value as i32);
+        }
+    }
+    va_end(list);
+    ret total;
 }
 
 expose fun structvarargs(i32 count, ...) -> i32

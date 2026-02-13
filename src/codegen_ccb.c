@@ -7052,6 +7052,12 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         }
     }
 
+    if (rc != 0 && fn && fn->name)
+    {
+        diag_error_at(fn->src, fn->line, fn->col,
+                      "codegen failed while emitting function '%s'", fn->name);
+    }
+
     ccb_function_builder_free(&fb);
     return rc;
 }
