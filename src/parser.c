@@ -3359,6 +3359,24 @@ static Node *parse_postfix(Parser *ps)
 static Node *parse_unary(Parser *ps)
 {
     Token p = lexer_peek(ps->lx);
+    if (p.kind == TK_LPAREN)
+    {
+        Token next = lexer_peek_n(ps->lx, 1);
+        if (is_type_start(ps, next))
+        {
+            lexer_next(ps->lx); // consume '('
+            Type *ty = parse_type_spec(ps);
+            expect(ps, TK_RPAREN, ")");
+            Node *operand = parse_unary(ps);
+            Node *cs = new_node(ND_CAST);
+            cs->lhs = operand;
+            cs->type = ty;
+            cs->line = p.line;
+            cs->col = p.col;
+            cs->src = lexer_source(ps->lx);
+            return cs;
+        }
+    }
     if (p.kind == TK_PLUS)
     {
         // unary plus: no-op
