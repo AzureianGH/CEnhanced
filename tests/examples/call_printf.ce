@@ -67,6 +67,14 @@ extend from "C" i32 remove(char*);
 hide alias string = char*;
 hide alias uint32_t = u32;
 
+struct CCDiagnostic
+{
+    i32 code;
+    string message;
+};
+
+hide alias CCDiagnosticCallback = action(CCDiagnostic* diagnostic, void* userdata) -> void;
+
 // Forward declaration and struct that holds an action field
 struct AsmProgram;
 
@@ -202,6 +210,20 @@ expose fun main() -> i32
     i32 printed = printwrapper();
     // "Hello, CHance! Number: 42\n" is 26 characters
     assert(printed == 26, "printwrapper printed length");
+
+    CCDiagnostic diag = {
+        .code = 7,
+        .message = "alias test"
+    };
+    CCDiagnosticCallback cb = fun (CCDiagnostic* diagnostic, void* userdata) -> void {
+        if (diagnostic != null)
+            Std.IO.print("Diag code: %d\n", diagnostic->code);
+        if (userdata != null)
+            Std.IO.print("Diag userdata: %p\n", userdata);
+        ret;
+    };
+    cb(&diag, null);
+    assert(diag.code == 7, "CCDiagnosticCallback alias works");
 
     
     // null-terminate the string safely

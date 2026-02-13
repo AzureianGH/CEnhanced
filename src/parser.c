@@ -42,6 +42,7 @@ struct Parser
         TypeKind base_kind;
         int ptr_depth;
         int gen_ptr_depth;
+        Type *resolved_type;
         int is_exposed;
     } *aliases;
     int alias_count;
@@ -2209,53 +2210,60 @@ static Type *parse_type_spec(Parser *ps)
                         }
                         else
                         {
-                            Type *bk = NULL;
-                            switch (A->base_kind)
+                            if (A->resolved_type)
                             {
-                            case TY_I8:
-                                bk = &ti8;
-                                break;
-                            case TY_U8:
-                                bk = &tu8;
-                                break;
-                            case TY_I16:
-                                bk = &ti16;
-                                break;
-                            case TY_U16:
-                                bk = &tu16;
-                                break;
-                            case TY_I32:
-                                bk = &ti32;
-                                break;
-                            case TY_U32:
-                                bk = &tu32;
-                                break;
-                            case TY_I64:
-                                bk = &ti64;
-                                break;
-                            case TY_U64:
-                                bk = &tu64;
-                                break;
-                            case TY_F32:
-                                bk = &tf32;
-                                break;
-                            case TY_F64:
-                                bk = &tf64;
-                                break;
-                            case TY_F128:
-                                bk = &tf128;
-                                break;
-                            case TY_VOID:
-                                bk = &tv;
-                                break;
-                            case TY_CHAR:
-                                bk = &tch;
-                                break;
-                            default:
-                                diag_error("unsupported alias base kind");
-                                exit(1);
+                                base = A->resolved_type;
                             }
-                            base = make_ptr_chain_dyn(bk, A->ptr_depth);
+                            else
+                            {
+                                Type *bk = NULL;
+                                switch (A->base_kind)
+                                {
+                                case TY_I8:
+                                    bk = &ti8;
+                                    break;
+                                case TY_U8:
+                                    bk = &tu8;
+                                    break;
+                                case TY_I16:
+                                    bk = &ti16;
+                                    break;
+                                case TY_U16:
+                                    bk = &tu16;
+                                    break;
+                                case TY_I32:
+                                    bk = &ti32;
+                                    break;
+                                case TY_U32:
+                                    bk = &tu32;
+                                    break;
+                                case TY_I64:
+                                    bk = &ti64;
+                                    break;
+                                case TY_U64:
+                                    bk = &tu64;
+                                    break;
+                                case TY_F32:
+                                    bk = &tf32;
+                                    break;
+                                case TY_F64:
+                                    bk = &tf64;
+                                    break;
+                                case TY_F128:
+                                    bk = &tf128;
+                                    break;
+                                case TY_VOID:
+                                    bk = &tv;
+                                    break;
+                                case TY_CHAR:
+                                    bk = &tch;
+                                    break;
+                                default:
+                                    diag_error("unsupported alias base kind");
+                                    exit(1);
+                                }
+                                base = make_ptr_chain_dyn(bk, A->ptr_depth);
+                            }
                         }
                     }
                 }
@@ -5490,58 +5498,14 @@ static void parse_alias_decl(Parser *ps, int is_exposed)
         ps->aliases[ps->alias_count].gen_ptr_depth = gen_ptr_depth;
         ps->aliases[ps->alias_count].base_kind = TY_VOID;
         ps->aliases[ps->alias_count].ptr_depth = 0;
+        ps->aliases[ps->alias_count].resolved_type = NULL;
         ps->aliases[ps->alias_count].is_exposed = is_exposed;
         ps->alias_count++;
         return;
     }
-    // non-generic: alias Name = <builtin> '*'* ;
+    // non-generic: alias Name = <type> ;
     expect(ps, TK_ASSIGN, "=");
-    Token b = lexer_next(ps->lx);
-    if (!(b.kind == TK_KW_I8 || b.kind == TK_KW_U8 || b.kind == TK_KW_I16 ||
-          b.kind == TK_KW_U16 || b.kind == TK_KW_I32 || b.kind == TK_KW_U32 ||
-          b.kind == TK_KW_I64 || b.kind == TK_KW_U64 || b.kind == TK_KW_F32 ||
-          b.kind == TK_KW_F64 || b.kind == TK_KW_F128 || b.kind == TK_KW_VOID ||
-          b.kind == TK_KW_CHAR))
-    {
-        diag_error_at(lexer_source(ps->lx), b.line, b.col,
-                      "alias base must be a built-in type for now");
-        exit(1);
-    }
-    if (b.kind == TK_KW_I8)
-        base_kind = TY_I8;
-    else if (b.kind == TK_KW_U8)
-        base_kind = TY_U8;
-    else if (b.kind == TK_KW_I16)
-        base_kind = TY_I16;
-    else if (b.kind == TK_KW_U16)
-        base_kind = TY_U16;
-    else if (b.kind == TK_KW_I32)
-        base_kind = TY_I32;
-    else if (b.kind == TK_KW_U32)
-        base_kind = TY_U32;
-    else if (b.kind == TK_KW_I64)
-        base_kind = TY_I64;
-    else if (b.kind == TK_KW_U64)
-        base_kind = TY_U64;
-    else if (b.kind == TK_KW_F32)
-        base_kind = TY_F32;
-    else if (b.kind == TK_KW_F64)
-        base_kind = TY_F64;
-    else if (b.kind == TK_KW_F128)
-        base_kind = TY_F128;
-    else if (b.kind == TK_KW_VOID)
-        base_kind = TY_VOID;
-    else
-        base_kind = TY_CHAR;
-    int n = 0;
-    Token s = lexer_peek(ps->lx);
-    while (s.kind == TK_STAR)
-    {
-        lexer_next(ps->lx);
-        n++;
-        s = lexer_peek(ps->lx);
-    }
-    ptr_depth = n;
+    Type *alias_type = parse_type_spec(ps);
     expect(ps, TK_SEMI, ";");
     if (ps->alias_count == ps->alias_cap)
     {
@@ -5559,6 +5523,7 @@ static void parse_alias_decl(Parser *ps, int is_exposed)
     ps->aliases[ps->alias_count].base_kind = base_kind;
     ps->aliases[ps->alias_count].ptr_depth = ptr_depth;
     ps->aliases[ps->alias_count].gen_ptr_depth = 0;
+    ps->aliases[ps->alias_count].resolved_type = alias_type;
     ps->aliases[ps->alias_count].is_exposed = is_exposed;
     ps->alias_count++;
 }
