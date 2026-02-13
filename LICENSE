@@ -5,7 +5,7 @@
 Subject to the terms of this License, the Author grants you a world-wide, royalty-free, non-exclusive license to **use, fork, modify, and distribute** this software (the "Software").
 
 ## 2. Permitted Commercial Use
-You may incorporate the Software into commercial or paid products. However, you are expressly prohibited from selling, sublicensing, or distributing the Software **as a standalone product** or as the primary value proposition of a bundle. The Software must be integrated as a component of a larger product or service that adds significant independent value.
+The Software must be used as a backend or internal component. You may not expose the Software's primary API, command-line interface, or core functional logic to third parties in a way that allows them to use the Software's functionality as a standalone service (e.g., 'Software-as-a-Service' for the Software itself).
 
 ## 3. Ownership & Attribution
 *   **Original Work**: The Author retains all intellectual property rights to the original Software. You shall not claim ownership of the original Software.
