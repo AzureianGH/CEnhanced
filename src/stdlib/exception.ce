@@ -1,0 +1,46 @@
+module Std.Exception;
+
+expose struct RuntimeError {
+    i32 code;
+    string category;
+    string message;
+    string file;
+    u64 line;
+    string symbol;
+};
+
+expose struct Panic {
+    i32 code;
+    string category;
+    string message;
+    string file;
+    u64 line;
+    string symbol;
+};
+
+expose struct OutOfMemory {
+    i32 code;
+    string category;
+    string message;
+    string file;
+    u64 line;
+    string symbol;
+};
+
+expose struct NullReference {
+    i32 code;
+    string category;
+    string message;
+    string file;
+    u64 line;
+    string symbol;
+};
+
+expose struct InvalidCast {
+    i32 code;
+    string category;
+    string message;
+    string file;
+    u64 line;
+    string symbol;
+};

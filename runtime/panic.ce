@@ -1,8 +1,124 @@
 extend from "C" int printf(char* format, ...);
 extend from "C" void exit(int status);
+extend from "C" i32 strcmp(constant char* s1, constant char* s2);
+
+hide i32 __cert__exc_pending = 0;
+hide i32 __cert__exc_code = 0;
+hide char* __cert__exc_category = null;
+hide char* __cert__exc_message = null;
+hide char* __cert__exc_file = null;
+hide u64 __cert__exc_line = 0;
+hide char* __cert__exc_symbol = null;
+hide i32 __cert__exc_try_depth = 0;
+
+[Export]
+expose fun __cert__exception_enter_try() -> void {
+    __cert__exc_try_depth = __cert__exc_try_depth + 1;
+}
+
+[Export]
+expose fun __cert__exception_leave_try() -> void {
+    if (__cert__exc_try_depth > 0) {
+        __cert__exc_try_depth = __cert__exc_try_depth - 1;
+    }
+}
+
+[Export]
+expose fun __cert__exception_has_pending() -> i32 {
+    ret __cert__exc_pending;
+}
+
+[Export]
+expose fun __cert__exception_clear() -> void {
+    __cert__exc_pending = 0;
+    __cert__exc_code = 0;
+    __cert__exc_category = null;
+    __cert__exc_message = null;
+    __cert__exc_file = null;
+    __cert__exc_line = 0;
+    __cert__exc_symbol = null;
+}
+
+[Export]
+expose fun __cert__exception_get_code() -> i32 {
+    ret __cert__exc_code;
+}
+
+[Export]
+expose fun __cert__exception_get_category() -> char* {
+    ret __cert__exc_category;
+}
+
+[Export]
+expose fun __cert__exception_get_message() -> char* {
+    ret __cert__exc_message;
+}
+
+[Export]
+expose fun __cert__exception_get_file() -> char* {
+    ret __cert__exc_file;
+}
+
+[Export]
+expose fun __cert__exception_get_line() -> u64 {
+    ret __cert__exc_line;
+}
+
+[Export]
+expose fun __cert__exception_get_symbol() -> char* {
+    ret __cert__exc_symbol;
+}
+
+[Export]
+expose fun __cert__exception_matches_type(char* type_name) -> i32 {
+    if (type_name == null || __cert__exc_category == null) {
+        ret 0;
+    }
+    if (strcmp(type_name, "Exception.RuntimeError") == 0 || strcmp(type_name, "Std.Exception.RuntimeError") == 0 || strcmp(type_name, "struct:RuntimeError") == 0) ret 1;
+    if ((strcmp(type_name, "Exception.Panic") == 0 || strcmp(type_name, "Std.Exception.Panic") == 0 || strcmp(type_name, "struct:Panic") == 0) && strcmp(__cert__exc_category, "Panic") == 0) ret 1;
+    if ((strcmp(type_name, "Exception.OutOfMemory") == 0 || strcmp(type_name, "Std.Exception.OutOfMemory") == 0 || strcmp(type_name, "struct:OutOfMemory") == 0) && strcmp(__cert__exc_category, "OutOfMemory") == 0) ret 1;
+    if ((strcmp(type_name, "Exception.NullReference") == 0 || strcmp(type_name, "Std.Exception.NullReference") == 0 || strcmp(type_name, "struct:NullReference") == 0) && strcmp(__cert__exc_category, "NullReference") == 0) ret 1;
+    if ((strcmp(type_name, "Exception.InvalidCast") == 0 || strcmp(type_name, "Std.Exception.InvalidCast") == 0 || strcmp(type_name, "struct:InvalidCast") == 0) && strcmp(__cert__exc_category, "InvalidCast") == 0) ret 1;
+    ret 0;
+}
+
+[Export]
+expose noreturn fun __cert__exception_propagate() -> void {
+    __cert__runtime_error_ex(__cert__exc_code, __cert__exc_category, __cert__exc_message, __cert__exc_file, __cert__exc_line, __cert__exc_symbol);
+}
+
+[Export]
+expose noreturn fun __cert__runtime_error_ex(i32 code, char* category, char* message, char* file, u64 line, char* symbol) -> void {
+    if (__cert__exc_try_depth > 0) {
+        __cert__exc_pending = 1;
+        __cert__exc_code = code;
+        __cert__exc_category = category;
+        __cert__exc_message = message;
+        __cert__exc_file = file;
+        __cert__exc_line = line;
+        __cert__exc_symbol = symbol;
+        ret;
+    }
+    printf("\n====== CHANCE RUNTIME ERROR ======\n");
+    printf("Code: 0x%X\n", code);
+    printf("Category: %s\n", category);
+    printf("Message: %s\n", message);
+    if (file != null) {
+        printf("Location: %s:%d\n", file, line);
+    }
+    if (symbol != null) {
+        printf("Symbol: %s\n", symbol);
+    }
+    printf("==================================\n");
+    exit(1);
+}
+
+[Export]
+expose noreturn fun __cert__runtime_error(char* category, char* message) -> void {
+    __cert__runtime_error_ex(1, category, message, null, 0, null);
+}
 
 [Export]
 expose noreturn fun __cert__panic(char* message) -> void {
-    printf("__cert__panic: %s\n", message);
-    exit(1);
+    __cert__runtime_error_ex(1000, "Panic", message, null, 0, null);
 }

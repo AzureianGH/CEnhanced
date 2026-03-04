@@ -301,6 +301,15 @@ Type *type_ptr(Type *to)
     return t;
 }
 
+Type *type_ref(Type *to, int nullability)
+{
+    Type *t = (Type *)xcalloc(1, sizeof(Type));
+    t->kind = TY_REF;
+    t->pointee = to;
+    t->ref_nullability = nullability;
+    return t;
+}
+
 Type *type_func(void)
 {
     Type *t = (Type *)xcalloc(1, sizeof(Type));
@@ -333,6 +342,8 @@ int type_equals(Type *a, Type *b)
         return 0;
     if (a->kind == TY_PTR)
         return type_equals(a->pointee, b->pointee);
+    if (a->kind == TY_REF)
+        return (b->kind == TY_REF) && (a->ref_nullability == b->ref_nullability) && type_equals(a->pointee, b->pointee);
     if (a->kind == TY_ARRAY)
     {
         if (a->array.length != b->array.length)
@@ -485,8 +496,12 @@ const char *node_kind_name(NodeKind kind)
         return "typeof expression";
     case ND_EQ:
         return "equality comparison";
+    case ND_STRICT_EQ:
+        return "strict equality comparison";
     case ND_NE:
         return "inequality comparison";
+    case ND_IS:
+        return "runtime type comparison";
     case ND_COND:
         return "conditional expression";
     case ND_MEMBER:
@@ -507,6 +522,8 @@ const char *node_kind_name(NodeKind kind)
         return "bitwise NOT expression";
     case ND_SWITCH:
         return "switch statement";
+    case ND_THROW:
+        return "throw statement";
     case ND_MATCH:
         return "match expression";
     case ND_LAMBDA:

@@ -1366,6 +1366,7 @@ typedef struct
   int *include_dir_count;
   const char **obj_override;
   int *implicit_voidp;
+  int *implicit_void_function;
   int *implicit_sizeof;
   int *request_ast;
   int *diagnostics_only;
@@ -1868,6 +1869,12 @@ static int project_args_apply(const char *proj_path, int lineno,
         *state->implicit_voidp = 1;
       continue;
     }
+    if (strcmp(arg, "--implicit-void-function") == 0)
+    {
+      if (state->implicit_void_function)
+        *state->implicit_void_function = 1;
+      continue;
+    }
     if (strcmp(arg, "--implicit-sizeof") == 0)
     {
       if (state->implicit_sizeof)
@@ -1920,7 +1927,7 @@ static int parse_ceproj_file(
   int *strip_metadata, int *strip_hard, int *obfuscate,
   AsmSyntax *asm_syntax, const char **chancecodec_cmd_override,
   const char **host_cc_cmd_override, const char **obj_override,
-  int *implicit_voidp, int *implicit_sizeof, int *request_ast,
+  int *implicit_voidp, int *implicit_void_function, int *implicit_sizeof, int *request_ast,
   int *diagnostics_only,
   OverrideFile **override_files, int *override_file_count, int *override_file_cap,
   ProjectInputList symbol_ref_ce_list,
@@ -2155,6 +2162,7 @@ static int parse_ceproj_file(
           .include_dir_count = include_dir_count,
           .obj_override = obj_override,
           .implicit_voidp = implicit_voidp,
+          .implicit_void_function = implicit_void_function,
           .implicit_sizeof = implicit_sizeof,
           .request_ast = request_ast,
           .diagnostics_only = diagnostics_only,
@@ -4891,6 +4899,7 @@ int main(int argc, char **argv)
   int strip_hard = 0;
   int obfuscate = 0;
   int implicit_voidp = 0;
+  int implicit_void_function = 0;
   int implicit_sizeof = 0;
   int request_ast = 0;
   int diagnostics_only = 0;
@@ -5265,6 +5274,11 @@ int main(int argc, char **argv)
       implicit_voidp = 1;
       continue;
     }
+    if (strcmp(argv[i], "--implicit-void-function") == 0)
+    {
+      implicit_void_function = 1;
+      continue;
+    }
     if (strcmp(argv[i], "--implicit-sizeof") == 0)
     {
       implicit_sizeof = 1;
@@ -5344,7 +5358,7 @@ int main(int argc, char **argv)
           &freestanding_requested, &m32, &opt_level, &debug_symbols,
           &strip_metadata, &strip_hard, &obfuscate, &asm_syntax,
           &chancecodec_cmd_override, &host_cc_cmd_override, &obj_override,
-          &implicit_voidp, &implicit_sizeof, &request_ast,
+              &implicit_voidp, &implicit_void_function, &implicit_sizeof, &request_ast,
           &diagnostics_only,
           &override_files, &override_file_count, &override_file_cap,
           (ProjectInputList){&symbol_ref_ce_inputs, &symbol_ref_ce_count,
@@ -5744,6 +5758,7 @@ int main(int argc, char **argv)
     }
   }
   sema_set_allow_implicit_voidp(implicit_voidp);
+  sema_set_allow_implicit_void_function(implicit_void_function);
   sema_set_allow_implicit_sizeof(implicit_sizeof);
 
   module_registry_reset();
@@ -5890,6 +5905,12 @@ int main(int argc, char **argv)
     int pre_len = 0;
     char *preprocessed = chance_preprocess_source(
         input, src, len, &pre_len, target_arch_to_macro(target_arch));
+    if (getenv("DUMP_PREPROC") && input && strstr(input, "aemu/cpu8086.ce"))
+    {
+      printf("%s", preprocessed ? preprocessed : src);
+      exit(0);
+    }
+    (void)pre_len;
     SourceBuffer sb = {preprocessed ? preprocessed : src,
                        preprocessed ? pre_len : len, input};
     Parser *ps = parser_create(sb);

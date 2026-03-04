@@ -82,10 +82,25 @@ if [ ! -x "$CHANCEC_BIN" ]; then
   exit 1
 fi
 
+CHANCECODEC_BIN=""
+if [ -x "$SCRIPT_DIR/build/chancecodec" ]; then
+  CHANCECODEC_BIN="$SCRIPT_DIR/build/chancecodec"
+elif [ -x "$CHANCECODE_DIR/build/chancecodec" ]; then
+  CHANCECODEC_BIN="$CHANCECODE_DIR/build/chancecodec"
+fi
+if [ -n "$CHANCECODEC_BIN" ]; then
+  note "Using chancecodec for library rebuild: $CHANCECODEC_BIN"
+fi
+
 section "Libraries"
 log "Rebuilding runtime and stdlib with built compiler"
-(cd "$SCRIPT_DIR/runtime" && "$CHANCEC_BIN" runtime.ceproj)
-(cd "$SCRIPT_DIR/src/stdlib" && "$CHANCEC_BIN" stdlib.ceproj)
+if [ -n "$CHANCECODEC_BIN" ]; then
+  (cd "$SCRIPT_DIR/runtime" && "$CHANCEC_BIN" --chancecodec "$CHANCECODEC_BIN" runtime.ceproj)
+  (cd "$SCRIPT_DIR/src/stdlib" && "$CHANCEC_BIN" --chancecodec "$CHANCECODEC_BIN" stdlib.ceproj)
+else
+  (cd "$SCRIPT_DIR/runtime" && "$CHANCEC_BIN" runtime.ceproj)
+  (cd "$SCRIPT_DIR/src/stdlib" && "$CHANCEC_BIN" stdlib.ceproj)
+fi
 ok "Library rebuild complete"
 
 section "Install"

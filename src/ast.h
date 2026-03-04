@@ -49,7 +49,9 @@ typedef enum
     TK_KW_CONSTANT,
     TK_KW_VOID,
     TK_KW_CHAR,
+    TK_KW_STRING,
     TK_KW_BOOL,
+    TK_KW_REF,
     TK_KW_VAR,
     TK_KW_IF,
     TK_KW_ELSE,
@@ -60,19 +62,42 @@ typedef enum
     TK_KW_MATCH,
     TK_KW_BREAK,
     TK_KW_CONTINUE,
+    TK_KW_TRY,
+    TK_KW_CATCH,
+    TK_KW_FINALLY,
+    TK_KW_THROW,
+    TK_KW_JUMP,
+    TK_KW_CHANCECODE,
+    TK_KW_LITERAL,
+    TK_KW_ENTRYPOINT,
+    TK_KW_JUMPTARGET,
+    TK_KW_EXPORT,
+    TK_KW_PRESERVE,
+    TK_KW_SECTION,
+    TK_KW_FORCEINLINE,
+    TK_KW_INLINE,
+    TK_KW_HINT,
+    TK_KW_NOHINT,
+    TK_KW_OVERRIDEMETADATA,
     TK_KW_ENUM,
     TK_KW_ALIAS,
     TK_KW_AS,
+    TK_KW_IS,
     TK_KW_SIZEOF,
     TK_KW_TYPEOF,
     TK_KW_ALIGNOF,
     TK_KW_OFFSETOF,
+    TK_KW_MANAGED,
+    TK_KW_UNMANAGED,
+    TK_KW_OBJECT,
     TK_KW_NULL,
     TK_KW_NORETURN,
     TK_KW_MODULE,
     TK_KW_BRING,
     TK_KW_HIDE,
     TK_KW_EXPOSE,
+    TK_KW_NEW,
+    TK_KW_DELETE,
     // punctuation
     TK_ARROW,      // ->
     TK_LPAREN,     // (
@@ -105,6 +130,7 @@ typedef enum
     TK_MINUSMINUS, // --
     TK_MINUSEQ,    // -=
     TK_ASSIGN,     // =
+    TK_EQEQEQ,     // ===
     TK_EQEQ,       // ==
     TK_BANG,       // !
     TK_BANGEQ,     // !=
@@ -157,6 +183,7 @@ typedef enum
     TY_BOOL,
     TY_FUNC,
     TY_PTR,
+    TY_REF,
     TY_STRUCT,
     TY_ARRAY,
     TY_VA_LIST,
@@ -177,6 +204,9 @@ typedef struct Type
 {
     TypeKind kind;
     struct Type *pointee; // for TY_PTR
+    // For TY_REF: nullability semantics
+    // 0 = non-nullable, 1 = nullable (checked), 2 = nullable (unchecked)
+    int ref_nullability;
     // For TY_STRUCT
     const char *struct_name;
     struct
@@ -202,6 +232,7 @@ typedef struct Type
         int has_signature;
     } func;
     int is_exposed; // visibility flag for module system
+    int is_object;  // true when originating from the 'object' keyword
     const char *import_module;
     const char *import_type_name;
     struct Type *import_resolved;
@@ -277,10 +308,14 @@ typedef enum
     ND_ALIGNOF,
     ND_OFFSETOF,
     ND_EQ,
+    ND_STRICT_EQ,
     ND_NE,
+    ND_IS,
     ND_COND,      // ternary conditional expr: lhs ? rhs : body
     ND_MEMBER,    // struct/enum member access
     ND_INIT_LIST, // brace initializer
+    ND_NEW,
+    ND_DELETE,
     ND_SHL,       // <<
     ND_SHR,       // >>
     ND_BITAND,    // &
@@ -288,6 +323,8 @@ typedef enum
     ND_BITXOR,    // ^
     ND_BITNOT,    // ~
     ND_SWITCH,
+    ND_TRY,
+    ND_THROW,
     ND_MATCH,
     ND_LAMBDA,
     ND_SEQ,
@@ -350,6 +387,9 @@ struct Node
     const SourceBuffer *src;
     // Typed nodes
     Type *type; // inferred/declared type
+    Type *is_type; // target type used by ND_IS operator
+    // Optional expression used as a dynamic type (e.g. 'as typeof(x)')
+    struct Node *type_expr;
     // For ND_FUNC
     const char *name;
     struct Node *body; // single statement for now
@@ -365,6 +405,7 @@ struct Node
     int is_varargs;
     int is_chancecode;
     int is_literal;
+    int is_managed;
     int force_inline_literal;
     struct
     {
@@ -409,6 +450,7 @@ struct Node
     Type *call_func_type;           // canonicalized function signature when available
     int call_is_indirect;           // 1 for pointer-based calls
     int call_is_varargs;            // 1 when call accepts varargs (used for indirect calls)
+    int call_is_jump;               // 1 when call is emitted as a jump transfer (jump fn())
     const struct Node *call_target; // resolved direct call target when available
     // For ND_VAR_DECL
     const char *var_name;
@@ -445,6 +487,7 @@ struct Node
     const char *var_ref;
     int is_noreturn;
     int is_entrypoint;
+    int is_jump_target;
     int is_preserve;
     // For ND_MEMBER
     const char *field_name;
@@ -463,6 +506,7 @@ struct Node
     } init;
     // Module metadata (only valid for ND_UNIT)
     ModulePath module_path;
+    int module_is_managed;
     ModulePath *imports;
     int import_count;
     // Declaration visibility flag (used for ND_FUNC and other decl nodes)
@@ -509,6 +553,7 @@ Type *type_template_param(const char *name, int index);
 Type *type_ptr(Type *to);
 Type *type_array(Type *elem, int length);
 Type *type_func(void);
+Type *type_ref(Type *to, int nullability);
 int type_equals(Type *a, Type *b);
 
 // Codegen options when emitting ChanceCode bytecode (.ccb)
@@ -645,5 +690,7 @@ Symbol *sema_copy_imported_function_symbols(const SemaContext *sc, int *out_coun
 Symbol *sema_copy_imported_global_symbols(const SemaContext *sc, int *out_count);
 void sema_set_allow_implicit_voidp(int enable);
 void sema_set_allow_implicit_sizeof(int enable);
+void sema_set_allow_implicit_void_function(int enable);
+int sema_get_allow_implicit_void_function(void);
 
 #endif // CHANCE_AST_H

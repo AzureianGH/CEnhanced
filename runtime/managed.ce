@@ -1,0 +1,165 @@
+extend from "C" int printf(constant char* format, ...);
+extend from "C" i32 strcmp(constant char* s1, constant char* s2);
+extend fun __cert__runtime_error_ex(i32 code, char* category, char* message, char* file, u64 line, char* symbol) -> void;
+extend fun __cert__malloc(u64 size) -> void*;
+
+hide constant i32 __cert__OBJ_TAG_I64 = 1;
+hide constant i32 __cert__OBJ_TAG_F64 = 2;
+hide constant i32 __cert__OBJ_TAG_PTR = 3;
+hide constant i32 __cert__ERR_INVALID_CAST_NULL = 1001;
+hide constant i32 __cert__ERR_INVALID_CAST_TYPE = 1002;
+hide constant i32 __cert__ERR_INVALID_CAST_KIND = 1003;
+
+struct __cert__ObjectBox {
+    i32 tag;
+    char* type_name;
+    i64 i_payload;
+    f64 f_payload;
+    void* p_payload;
+};
+
+struct __cert__UnboxPtrFallback {
+    i64 a0;
+    i64 a1;
+    i64 a2;
+    i64 a3;
+    i64 a4;
+    i64 a5;
+    i64 a6;
+    i64 a7;
+    i64 a8;
+    i64 a9;
+    i64 a10;
+    i64 a11;
+    i64 a12;
+    i64 a13;
+    i64 a14;
+    i64 a15;
+};
+
+hide __cert__UnboxPtrFallback __cert__unbox_ptr_fallback;
+
+hide fun __cert__object_invalid_cast(i32 code, char* message, char* file, u64 line, char* symbol) -> void {
+    __cert__runtime_error_ex(
+        code,
+        "InvalidCast",
+        message,
+        file,
+        line,
+        symbol
+    );
+}
+
+[Export]
+expose fun __cert__box_i64(i64 value, char* type_name) -> void* {
+    __cert__ObjectBox* box = __cert__malloc(sizeof(__cert__ObjectBox) as u64) as __cert__ObjectBox*;
+    box=>tag = __cert__OBJ_TAG_I64;
+    box=>type_name = type_name;
+    box=>i_payload = value;
+    box=>f_payload = 0.0;
+    box=>p_payload = null;
+    ret box as void*;
+}
+
+[Export]
+expose fun __cert__box_f64(f64 value, char* type_name) -> void* {
+    __cert__ObjectBox* box = __cert__malloc(sizeof(__cert__ObjectBox) as u64) as __cert__ObjectBox*;
+    box=>tag = __cert__OBJ_TAG_F64;
+    box=>type_name = type_name;
+    box=>i_payload = 0;
+    box=>f_payload = value;
+    box=>p_payload = null;
+    ret box as void*;
+}
+
+[Export]
+expose fun __cert__box_ptr(void* value, char* type_name) -> void* {
+    __cert__ObjectBox* box = __cert__malloc(sizeof(__cert__ObjectBox) as u64) as __cert__ObjectBox*;
+    box=>tag = __cert__OBJ_TAG_PTR;
+    box=>type_name = type_name;
+    box=>i_payload = 0;
+    box=>f_payload = 0.0;
+    box=>p_payload = value;
+    ret box as void*;
+}
+
+[Export]
+expose fun __cert__unbox_i64(void* obj, char* expected_type, char* file, u64 line, char* symbol) -> i64 {
+    if (obj == null) {
+        __cert__object_invalid_cast(__cert__ERR_INVALID_CAST_NULL, "cannot unbox null object", file, line, symbol);
+        ret 0 as i64;
+    }
+    __cert__ObjectBox* box = obj as __cert__ObjectBox*;
+    if (box=>tag != __cert__OBJ_TAG_I64) {
+        __cert__object_invalid_cast(__cert__ERR_INVALID_CAST_KIND, "object kind mismatch for integer unbox", file, line, symbol);
+        ret 0 as i64;
+    }
+    if (box=>type_name != null && expected_type != null && strcmp(box=>type_name, expected_type) != 0) {
+        __cert__object_invalid_cast(__cert__ERR_INVALID_CAST_TYPE, "object metadata type mismatch", file, line, symbol);
+        ret 0 as i64;
+    }
+    ret box=>i_payload;
+}
+
+[Export]
+expose fun __cert__unbox_f64(void* obj, char* expected_type, char* file, u64 line, char* symbol) -> f64 {
+    if (obj == null) {
+        __cert__object_invalid_cast(__cert__ERR_INVALID_CAST_NULL, "cannot unbox null object", file, line, symbol);
+        ret 0.0;
+    }
+    __cert__ObjectBox* box = obj as __cert__ObjectBox*;
+    if (box=>tag != __cert__OBJ_TAG_F64) {
+        __cert__object_invalid_cast(__cert__ERR_INVALID_CAST_KIND, "object kind mismatch for floating-point unbox", file, line, symbol);
+        ret 0.0;
+    }
+    if (box=>type_name != null && expected_type != null && strcmp(box=>type_name, expected_type) != 0) {
+        __cert__object_invalid_cast(__cert__ERR_INVALID_CAST_TYPE, "object metadata type mismatch", file, line, symbol);
+        ret 0.0;
+    }
+    ret box=>f_payload;
+}
+
+[Export]
+expose fun __cert__unbox_ptr(void* obj, char* expected_type, char* file, u64 line, char* symbol) -> void* {
+    if (obj == null) {
+        __cert__object_invalid_cast(__cert__ERR_INVALID_CAST_NULL, "cannot unbox null object", file, line, symbol);
+        ret (&__cert__unbox_ptr_fallback) as void*;
+    }
+    __cert__ObjectBox* box = obj as __cert__ObjectBox*;
+    if (box=>tag != __cert__OBJ_TAG_PTR) {
+        __cert__object_invalid_cast(__cert__ERR_INVALID_CAST_KIND, "object kind mismatch for pointer unbox", file, line, symbol);
+        ret (&__cert__unbox_ptr_fallback) as void*;
+    }
+    if (box=>type_name != null && expected_type != null && strcmp(box=>type_name, expected_type) != 0) {
+        __cert__object_invalid_cast(__cert__ERR_INVALID_CAST_TYPE, "object metadata type mismatch", file, line, symbol);
+        ret (&__cert__unbox_ptr_fallback) as void*;
+    }
+    ret box=>p_payload;
+}
+
+[Export]
+expose fun __cert__object_is_type(void* obj, char* expected_type) -> i32 {
+    if (obj == null || expected_type == null) {
+        ret 0;
+    }
+    __cert__ObjectBox* box = obj as __cert__ObjectBox*;
+    if (box=>type_name == null) {
+        ret 0;
+    }
+    if (strcmp(box=>type_name, expected_type) == 0) {
+        ret 1;
+    }
+    ret 0;
+}
+
+[Export]
+expose fun __cert__null_deref(char* file, u64 line, char* name_of_ref_obj) -> void {
+    __cert__runtime_error_ex(
+        0xDEADC0DE,
+        "NullReference",
+        "Attempted to dereference null reference",
+        file,
+        line,
+        name_of_ref_obj
+    );
+}

@@ -997,6 +997,148 @@ static int find_param_index(MacroParam *params, int param_count, const char *nam
 	return -1;
 }
 
+static char *collapse_line_continuations(const char *src, size_t len)
+{
+	if (!src || len == 0)
+		return xstrdup("");
+	StrBuilder sb;
+	sb_init(&sb);
+	size_t i = 0;
+	while (i < len)
+	{
+		if (src[i] == '\\' && i + 1 < len)
+		{
+			if (src[i + 1] == '\n')
+			{
+				i += 2;
+				continue;
+			}
+			if (src[i + 1] == '\r')
+			{
+				i += 2;
+				if (i < len && src[i] == '\n')
+					i++;
+				continue;
+			}
+		}
+		sb_append_char(&sb, src[i]);
+		i++;
+	}
+	return sb_build(&sb);
+}
+
+static char *macro_stringize_argument(const char *arg)
+{
+	const char *src = arg ? arg : "";
+	size_t len = strlen(src);
+	size_t start = 0;
+	size_t end = len;
+	trim_range(src, len, &start, &end);
+	StrBuilder collapsed;
+	sb_init(&collapsed);
+	int pending_space = 0;
+	for (size_t i = start; i < end; ++i)
+	{
+		char c = src[i];
+		if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+		{
+			pending_space = 1;
+			continue;
+		}
+		if (pending_space && collapsed.len > 0)
+			sb_append_char(&collapsed, ' ');
+		pending_space = 0;
+		sb_append_char(&collapsed, c);
+	}
+	char *normalized = sb_build(&collapsed);
+	char *lit = make_string_literal(normalized);
+	free(normalized);
+	return lit;
+}
+
+static char *apply_macro_stringize(const char *body, MacroParam *raw_params, int param_count)
+{
+	if (!body)
+		return xstrdup("");
+	size_t len = strlen(body);
+	StrBuilder sb;
+	sb_init(&sb);
+	size_t i = 0;
+	int in_string = 0;
+	int in_char = 0;
+	int escape = 0;
+	while (i < len)
+	{
+		char c = body[i];
+		if (in_string)
+		{
+			sb_append_char(&sb, c);
+			if (!escape && c == '"')
+				in_string = 0;
+			escape = (!escape && c == '\\');
+			i++;
+			continue;
+		}
+		if (in_char)
+		{
+			sb_append_char(&sb, c);
+			if (!escape && c == '\'')
+				in_char = 0;
+			escape = (!escape && c == '\\');
+			i++;
+			continue;
+		}
+		if (c == '"')
+		{
+			sb_append_char(&sb, c);
+			in_string = 1;
+			i++;
+			continue;
+		}
+		if (c == '\'')
+		{
+			sb_append_char(&sb, c);
+			in_char = 1;
+			i++;
+			continue;
+		}
+		if (c == '#')
+		{
+			size_t j = i + 1;
+			while (j < len && (body[j] == ' ' || body[j] == '\t'))
+				j++;
+			if (j < len && is_ident_start(body[j]))
+			{
+				size_t id_start = j;
+				j++;
+				while (j < len && is_ident_char(body[j]))
+					j++;
+				size_t id_len = j - id_start;
+				char ident_buf[128];
+				char *ident = ident_buf;
+				if (id_len >= sizeof(ident_buf))
+					ident = (char *)xmalloc(id_len + 1);
+				memcpy(ident, body + id_start, id_len);
+				ident[id_len] = '\0';
+				int param_idx = find_param_index(raw_params, param_count, ident);
+				if (ident != ident_buf)
+					free(ident);
+				if (param_idx >= 0)
+				{
+					char *lit = macro_stringize_argument(raw_params[param_idx].value);
+					sb_append_str(&sb, lit);
+					free(lit);
+					i = j;
+					continue;
+				}
+			}
+		}
+		sb_append_char(&sb, c);
+		i++;
+	}
+	return sb_build(&sb);
+}
+
 static int parse_macro_arguments(const char *src, size_t len, size_t lparen, char ***out_args, int *out_count, size_t *out_end,
 								 PreprocState *st, int line_no)
 {
@@ -1138,26 +1280,35 @@ static char *expand_function_macro(PreprocState *st, const Macro *mac, const cha
 		preproc_error(st, line_no, "macro '%s' expects %d argument(s), got %d", mac->name, mac->param_count, arg_count);
 	}
 	MacroParam *subs = NULL;
+	MacroParam *raw_subs = NULL;
 	if (mac->param_count > 0)
 	{
 		subs = (MacroParam *)xcalloc((size_t)mac->param_count, sizeof(MacroParam));
+		raw_subs = (MacroParam *)xcalloc((size_t)mac->param_count, sizeof(MacroParam));
 		for (int i = 0; i < mac->param_count; ++i)
 		{
 			subs[i].name = mac->params[i];
+			raw_subs[i].name = mac->params[i];
+			raw_subs[i].value = raw_args[i];
 			char *expanded = expand_text(st, raw_args[i], strlen(raw_args[i]), NULL, 0, stack, depth + 1, line_no);
 			subs[i].value = expanded;
 		}
 	}
+	char *stringized_body = apply_macro_stringize(mac->body ? mac->body : "", raw_subs, mac->param_count);
 	macro_stack_push(stack, mac);
-	const char *body = mac->body ? mac->body : "";
-	char *result = expand_text(st, body, strlen(body), subs, mac->param_count, stack, depth + 1, line_no);
+	char *result = expand_text(st, stringized_body, strlen(stringized_body), subs, mac->param_count, stack, depth + 1, line_no);
+	char *rescanned = expand_text(st, result, strlen(result), NULL, 0, stack, depth + 1, line_no);
+	free(result);
+	result = rescanned;
 	macro_stack_pop(stack, mac);
+	free(stringized_body);
 	if (subs)
 	{
 		for (int i = 0; i < mac->param_count; ++i)
 			free((char *)subs[i].value);
 		free(subs);
 	}
+	free(raw_subs);
 	for (int i = 0; i < arg_count; ++i)
 		free(raw_args[i]);
 	free(raw_args);
@@ -1448,9 +1599,25 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 		i++;
 	size_t arg_start = i;
 	size_t line_end = i;
-	while (line_end < len && src[line_end] != '\n' && src[line_end] != '\r')
-		line_end++;
+	int consumed_newlines = 0;
+	while (1)
+	{
+		while (line_end < len && src[line_end] != '\n' && src[line_end] != '\r')
+			line_end++;
+		size_t probe = line_end;
+		while (probe > arg_start && (src[probe - 1] == ' ' || src[probe - 1] == '\t'))
+			probe--;
+		if (!(probe > arg_start && src[probe - 1] == '\\' && line_end < len))
+			break;
+		if (src[line_end] == '\r' && line_end + 1 < len && src[line_end + 1] == '\n')
+			line_end += 2;
+		else
+			line_end += 1;
+		consumed_newlines++;
+	}
 	size_t arg_len = (line_end > arg_start) ? (line_end - arg_start) : 0;
+	char *directive_arg = collapse_line_continuations(src + arg_start, arg_len);
+	size_t directive_arg_len = strlen(directive_arg);
 	char keyword[32];
 	size_t kw_len = kw_end - kw_start;
 	if (kw_len >= sizeof(keyword))
@@ -1462,18 +1629,18 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 	if (strcmp(keyword, "define") == 0)
 	{
 		if (active)
-			define_macro(st, src + arg_start, arg_len, *line_no);
+			define_macro(st, directive_arg, directive_arg_len, *line_no);
 	}
 	else if (strcmp(keyword, "undef") == 0)
 	{
 		if (active)
-			undef_macro(st, src + arg_start, arg_len);
+			undef_macro(st, directive_arg, directive_arg_len);
 	}
 	else if (strcmp(keyword, "warn") == 0)
 	{
 		if (active)
 		{
-			char *msg = expand_directive_argument(st, src + arg_start, arg_len, *line_no);
+			char *msg = expand_directive_argument(st, directive_arg, directive_arg_len, *line_no);
 			const char *path = st && st->path ? st->path : "<input>";
 			const char *text = (msg && *msg) ? msg : "#warn triggered";
 			diag_warning("%s:%d: warning: %s", path, *line_no, text);
@@ -1484,7 +1651,7 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 	{
 		if (active)
 		{
-			char *msg = expand_directive_argument(st, src + arg_start, arg_len, *line_no);
+			char *msg = expand_directive_argument(st, directive_arg, directive_arg_len, *line_no);
 			const char *path = st && st->path ? st->path : "<input>";
 			const char *text = (msg && *msg) ? msg : "#note";
 			diag_note("%s:%d: note: %s", path, *line_no, text);
@@ -1495,7 +1662,7 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 	{
 		if (active)
 		{
-			char *msg = expand_directive_argument(st, src + arg_start, arg_len, *line_no);
+			char *msg = expand_directive_argument(st, directive_arg, directive_arg_len, *line_no);
 			const char *text = (msg && *msg) ? msg : "#error";
 			preproc_error(st, *line_no, "%s", text);
 			free(msg);
@@ -1505,7 +1672,7 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 	{
 		if (active)
 		{
-			char *arg = expand_directive_argument(st, src + arg_start, arg_len, *line_no);
+			char *arg = expand_directive_argument(st, directive_arg, directive_arg_len, *line_no);
 			if (arg)
 			{
 				size_t len = strlen(arg);
@@ -1603,32 +1770,110 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 	}
 	else if (strcmp(keyword, "ifdef") == 0)
 	{
-		size_t start = arg_start;
-		size_t end = arg_start + arg_len;
-		trim_range(src, len, &start, &end);
-		char *name = copy_trimmed(src, start, end);
+		size_t start = 0;
+		size_t end = directive_arg_len;
+		trim_range(directive_arg, directive_arg_len, &start, &end);
+		char *name = copy_trimmed(directive_arg, start, end);
 		int cond = macro_find(st, name) != NULL;
 		free(name);
 		push_condition(st, current_active(st), cond);
 	}
 	else if (strcmp(keyword, "ifndef") == 0)
 	{
-		size_t start = arg_start;
-		size_t end = arg_start + arg_len;
-		trim_range(src, len, &start, &end);
-		char *name = copy_trimmed(src, start, end);
+		size_t start = 0;
+		size_t end = directive_arg_len;
+		trim_range(directive_arg, directive_arg_len, &start, &end);
+		char *name = copy_trimmed(directive_arg, start, end);
 		int cond = macro_find(st, name) == NULL;
 		free(name);
 		push_condition(st, current_active(st), cond);
 	}
+	if (strcmp(keyword, "hint") == 0)
+	{
+		if (active)
+		{
+			(void)directive_arg; (void)line_no; (void)active;
+			// parse tokens in directive_arg and emit start markers into output
+			size_t pos = 0;
+			int emitted = 0;
+			while (pos < directive_arg_len)
+			{
+				// skip separators
+				while (pos < directive_arg_len && (directive_arg[pos] == ' ' || directive_arg[pos] == '\t' || directive_arg[pos] == ','))
+					pos++;
+				if (pos >= directive_arg_len) break;
+				size_t start = pos;
+				while (pos < directive_arg_len && (is_ident_char(directive_arg[pos]) || directive_arg[pos] == '-')) pos++;
+				size_t end = pos;
+				if (end <= start) break;
+				char *tok = copy_trimmed(directive_arg, start, end);
+				if (strcmp(tok, "implicit-void-function") == 0)
+				{
+					sb_append_str(out, "__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__");
+					emitted = 1;
+				}
+				else if (strcmp(tok, "implicit-sizeof") == 0)
+				{
+					sb_append_str(out, "__CHANCE_HINT_START_IMPLICIT_SIZEOF__");
+					emitted = 1;
+				}
+				else if (strcmp(tok, "implicit-voidp") == 0)
+				{
+					sb_append_str(out, "__CHANCE_HINT_START_IMPLICIT_VOIDP__");
+					emitted = 1;
+				}
+				free(tok);
+			}
+			(void)emitted;
+		}
+	}
+	else if (strcmp(keyword, "nohint") == 0)
+	{
+		if (active)
+		{
+			(void)directive_arg; (void)line_no; (void)active;
+			// Emit end markers for hints so parser can turn off region behavior.
+			size_t pos = 0;
+			int emitted = 0;
+			while (pos < directive_arg_len)
+			{
+				while (pos < directive_arg_len && (directive_arg[pos] == ' ' || directive_arg[pos] == '\t' || directive_arg[pos] == ',')) pos++;
+				if (pos >= directive_arg_len) break;
+				size_t start = pos;
+				while (pos < directive_arg_len && (is_ident_char(directive_arg[pos]) || directive_arg[pos] == '-')) pos++;
+				size_t end = pos;
+				if (end <= start) break;
+				char *tok = copy_trimmed(directive_arg, start, end);
+				if (strcmp(tok, "implicit-void-function") == 0)
+				{
+					sb_append_str(out, "__CHANCE_HINT_END_IMPLICIT_VOID_FUNCTION__");
+					emitted = 1;
+				}
+				else if (strcmp(tok, "implicit-sizeof") == 0)
+				{
+					sb_append_str(out, "__CHANCE_HINT_END_IMPLICIT_SIZEOF__");
+					emitted = 1;
+				}
+				else if (strcmp(tok, "implicit-voidp") == 0)
+				{
+					sb_append_str(out, "__CHANCE_HINT_END_IMPLICIT_VOIDP__");
+					emitted = 1;
+				}
+				free(tok);
+			}
+			(void)emitted;
+		}
+	}
 	else if (strcmp(keyword, "if") == 0)
-		handle_if(st, src + arg_start, arg_len, *line_no);
+		handle_if(st, directive_arg, directive_arg_len, *line_no);
 	else if (strcmp(keyword, "elif") == 0)
-		handle_elif(st, src + arg_start, arg_len, *line_no);
+		handle_elif(st, directive_arg, directive_arg_len, *line_no);
 	else if (strcmp(keyword, "else") == 0)
 		handle_else(st, *line_no);
 	else if (strcmp(keyword, "endif") == 0)
 		handle_endif(st, *line_no);
+
+	free(directive_arg);
 
 	size_t newline_pos = line_end;
 	if (newline_pos < len)
@@ -1637,8 +1882,10 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 			newline_pos += 2;
 		else
 			newline_pos += 1;
-		sb_append_char(out, '\n');
-		(*line_no)++;
+		consumed_newlines++;
+		for (int n = 0; n < consumed_newlines; ++n)
+			sb_append_char(out, '\n');
+		(*line_no) += consumed_newlines;
 	}
 	*index = (int)newline_pos;
 	return 1;

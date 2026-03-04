@@ -1,0 +1,6 @@
+#hint implicit-void-function
+module Std.Environment;
+
+extend from "C" void exit(int);
+
+expose fun exit(i32 code) { exit(code); }

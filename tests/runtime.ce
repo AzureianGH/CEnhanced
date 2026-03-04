@@ -1,0 +1,44 @@
+extend from "C" int printf(constant char* format, ...);
+
+[EntryPoint]
+expose fun main() -> i32 {
+    printf("Hello, World!\n");
+    int* test_alloc = test();
+    for (int i = 0; i < 5; i++) {
+        test_alloc[i] = i * 10;
+    }
+    printf("Test allocation: %d, %d, %d, %d, %d\n", test_alloc[0], test_alloc[1], test_alloc[2], test_alloc[3], test_alloc[4]);
+    
+
+    int* out_arr;
+    test_out(&out_arr);
+    printf("Test out parameter: %d, %d, %d, %d, %d\n", out_arr[0], out_arr[1], out_arr[2], out_arr[3], out_arr[4]);
+    
+    out_of_scope();
+
+    ret 0;
+}
+
+fun test() -> int* {
+    int* arr = new int[10];
+    for (int i = 0; i < 10; i++) {
+        arr[i] = i;
+    }
+    ret arr;
+}
+
+fun test_out(int** out) -> void {
+    *out = new int[5];
+    for (int i = 0; i < 5; i++) {
+        (*out)[i] = i * 2;
+    }
+}
+
+fun out_of_scope() -> void {
+    int* arr = new int[5];
+    for (int i = 0; i < 5; i++) {
+        arr[i] = i * 3;
+    }
+    printf("Leaving scope with allocated array: %d, %d, %d, %d, %d\n", arr[0], arr[1], arr[2], arr[3], arr[4]);
+    // arr goes out of scope here, should be freed by GC
+}

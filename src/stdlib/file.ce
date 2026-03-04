@@ -13,9 +13,9 @@ extend from "C" i32 fflush(void* handle);
 extend from "C" i32 remove(char* path);
 extend from "C" char* getcwd(char* buf, i32 size);
 
-constant i32 SEEK_SET = 0;
-constant i32 SEEK_CUR = 1;
-constant i32 SEEK_END = 2;
+expose constant i32 SEEK_SET = 0;
+expose constant i32 SEEK_CUR = 1;
+expose constant i32 SEEK_END = 2;
 
 expose fun open(char* path, char* mode) -> void*
 {
@@ -138,7 +138,7 @@ expose fun exists(char* path) -> i32
     ret 1;
 }
 
-expose fun delete(char* path) -> i32
+expose fun remove(char* path) -> i32
 {
     ret remove(path);
 }

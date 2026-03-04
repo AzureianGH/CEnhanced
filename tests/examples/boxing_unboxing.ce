@@ -1,0 +1,15 @@
+fun run() -> i32 {
+    object boxedInt = 42;
+    i32 unboxedInt = boxedInt;
+
+    object boxedPtr = null;
+    i32* ptr = boxedPtr;
+
+    object boxedFromCast = (unboxedInt + 1) as object;
+    i32 roundTrip = boxedFromCast;
+
+    if (unboxedInt == 42 && ptr == null && roundTrip == 43) {
+        ret 0;
+    }
+    ret 1;
+}

@@ -65,7 +65,6 @@ extend from "C" int test();
 extend fun test_chance() -> i32;
 extend from "C" i32 remove(char*);
 
-hide alias string = char*;
 hide alias uint32_t = u32;
 
 hide struct NLGraphicsVertex {
@@ -289,7 +288,7 @@ expose fun main() -> i32
     Std.IO.print("Calling extended C function test(): %d\n", test());
 
     TC.SmallTest vari = {};
-    vari.smallValue = 3;
+    vari.smallValue = 3; 
     vari.testVar = 44;
     
     TC.SmallTest another = {
@@ -448,9 +447,9 @@ expose fun main() -> i32
     assert(UNDEF_CHECK_VALUE == 456, "#undef clears definitions for guards");
     
     assert(__CHANCE__ == 1, "__CHANCE__ builtin defined");
-    assert(__CHANCE_VERSION_MAJOR__ == 0, "major version under 1");
-    assert(__CHANCE_VERSION_MINOR__ >= 6, "minor version reflects progress");
-    assert(__CHANCE_VERSION_PATCH__ >= 1, "patch version set");
+    assert(__CHANCE_VERSION_MAJOR__ == 1, "major version under 1");
+    assert(__CHANCE_VERSION_MINOR__ >= 1, "minor version reflects progress");
+    assert(__CHANCE_VERSION_PATCH__ >= 0, "patch version set");
     assert(__CHANCE_VERSION__ == (__CHANCE_VERSION_MAJOR__ * 10000 + __CHANCE_VERSION_MINOR__ * 100 + __CHANCE_VERSION_PATCH__), "aggregate version matches components");
     assert(strcmp(__CHANCE_VERSION_STR__, "1.1.0") == 0, "string version matches 1.1.0");
     assert(__POINTER_WIDTH__ == (sizeof(void*) * 8), "__POINTER_WIDTH__ matches sizeof(void*)");
@@ -813,6 +812,39 @@ expose fun main() -> i32
     assert(vertices[2].position[0] == 0.75f && vertices[2].position[1] == -0.70f && vertices[2].position[2] == 0.0f, "vertex 2 position correct");
     assert(vertices[2].color[0] == 0.2f && vertices[2].color[1] == 0.5f && vertices[2].color[2] == 1.0f && vertices[2].color[3] == 1.0f, "vertex 2 color correct");
 
+    int* test_new = new int[3];
+    if (test_new != null)
+    {
+        test_new[0] = 10;
+        test_new[1] = 20;
+        test_new[2] = 30;
+        assert(test_new[0] == 10 && test_new[1] == 20 && test_new[2] == 30, "new int array contents correct");
+    }
+
+    float* test_float_array = new float[5];
+    if (test_float_array != null)
+    {
+        for (i32 i = 0; i < 5; i = i + 1)
+        {
+            test_float_array[i] = (i as f32) * 1.1f;
+        }
+        for (i32 i = 0; i < 5; i = i + 1)
+        {
+            assert(test_float_array[i] == (i as f32) * 1.1f, "new float array contents correct");
+        }
+    }
+
+    delete test_new;
+    delete test_float_array;
+
+    if (test_new == null && test_float_array == null)
+    {
+        assert(true, "delete set pointers to null");
+    }
+    else
+    {
+        assert(false, "delete did not set pointers to null");
+    }
 
     Std.IO.printnl("All tests completed successfully! %d total asserts.", total_test_count);
 

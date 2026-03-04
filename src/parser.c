@@ -106,6 +106,10 @@ struct Parser
     int import_count;
     int import_cap;
     int suppress_access_for_match;
+    int suppress_arrow_member_for_throw;
+    int module_is_managed;
+    int managed_scope_depth;
+    int unmanaged_scope_depth;
 };
 
 static void parser_push_access_suppression(Parser *ps)
@@ -298,6 +302,44 @@ static void clear_pending_attrs(struct PendingAttr *attrs, int count)
         pending_attr_cleanup(&attrs[i]);
 }
 
+static const char *attribute_name_from_keyword(TokenKind kind)
+{
+    switch (kind)
+    {
+    case TK_KW_OVERRIDEMETADATA:
+        return "OverrideMetadata";
+    case TK_KW_CHANCECODE:
+        return "ChanceCode";
+    case TK_KW_LITERAL:
+        return "Literal";
+    case TK_KW_ENTRYPOINT:
+        return "EntryPoint";
+    case TK_KW_JUMPTARGET:
+        return "JumpTarget";
+    case TK_KW_EXPORT:
+        return "Export";
+    case TK_KW_PRESERVE:
+        return "Preserve";
+    case TK_KW_SECTION:
+        return "Section";
+    case TK_KW_FORCEINLINE:
+        return "ForceInline";
+    case TK_KW_INLINE:
+        return "Inline";
+    case TK_KW_HINT:
+        return "Hint";
+    case TK_KW_NOHINT:
+        return "NoHint";
+    default:
+        return NULL;
+    }
+}
+
+static int token_is_attribute_keyword(TokenKind kind)
+{
+    return attribute_name_from_keyword(kind) != NULL;
+}
+
 static struct PendingAttr parse_attribute(Parser *ps)
 {
     struct PendingAttr attr = {0};
@@ -329,6 +371,44 @@ static struct PendingAttr parse_attribute(Parser *ps)
         expect(ps, TK_RPAREN, ")");
     }
     expect(ps, TK_RBRACKET, "]");
+    return attr;
+}
+
+static struct PendingAttr parse_attribute_keyword(Parser *ps)
+{
+    struct PendingAttr attr = {0};
+    Token keyword = lexer_next(ps->lx);
+    const char *name = attribute_name_from_keyword(keyword.kind);
+    if (!name)
+    {
+        diag_error_at(lexer_source(ps->lx), keyword.line, keyword.col,
+                      "internal parser error: token is not an attribute keyword");
+        exit(1);
+    }
+
+    attr.line = keyword.line;
+    attr.col = keyword.col;
+    attr.name = xstrdup(name);
+
+    Token maybe_paren = lexer_peek(ps->lx);
+    if (maybe_paren.kind == TK_LPAREN)
+    {
+        lexer_next(ps->lx);
+        Token arg = expect(ps, TK_STRING, "string literal");
+        if (arg.length < 2)
+        {
+            diag_error_at(lexer_source(ps->lx), arg.line, arg.col,
+                          "attribute requires string literal argument");
+            exit(1);
+        }
+        int val_len = arg.length - 2;
+        attr.value = (char *)xmalloc((size_t)val_len + 1);
+        if (val_len > 0)
+            memcpy(attr.value, arg.lexeme + 1, (size_t)val_len);
+        attr.value[val_len] = '\0';
+        expect(ps, TK_RPAREN, ")");
+    }
+
     return attr;
 }
 
@@ -804,6 +884,10 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
             fn->is_entrypoint = 1;
             fn->is_preserve = 1;
         }
+        else if (strcmp(attr->name, "JumpTarget") == 0)
+        {
+            fn->is_jump_target = 1;
+        }
         else if (strcmp(attr->name, "Export") == 0)
         {
             fn->export_name = 1;
@@ -841,6 +925,17 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
         else if (strcmp(attr->name, "Inline") == 0)
         {
             fn->wants_inline = 1;
+        }
+        else if (strcmp(attr->name, "Hint") == 0)
+        {
+            /* Hints are handled by the preprocessor/parser for enabling region-scoped
+             * behaviors (e.g. implicit-void-function). Accept and ignore here. */
+            continue;
+        }
+        else if (strcmp(attr->name, "NoHint") == 0)
+        {
+            /* NoHint is similarly ignored at this stage. */
+            continue;
         }
         else
         {
@@ -1110,7 +1205,7 @@ static void parse_module_path(Parser *ps, char ***out_parts, int *out_count, cha
         *out_full_name = join_parts_with_dot(parts, count);
 }
 
-static void parse_module_decl(Parser *ps)
+static void parse_module_decl(Parser *ps, int managed_mode)
 {
     Token module_tok = expect(ps, TK_KW_MODULE, "module");
     if (ps->module_full_name)
@@ -1127,6 +1222,7 @@ static void parse_module_decl(Parser *ps)
     ps->module_part_count = count;
     ps->module_part_cap = count;
     ps->module_full_name = full;
+    ps->module_is_managed = managed_mode ? 1 : 0;
 }
 
 static int parse_bring_decl(Parser *ps)
@@ -1182,6 +1278,7 @@ static Token expect(Parser *ps, TokenKind k, const char *what)
 static Node *parse_expr(Parser *ps);
 static Node *parse_stmt(Parser *ps);
 static Node *parse_block(Parser *ps);
+static Node *parse_try_stmt(Parser *ps);
 static Node *parse_while(Parser *ps);
 static Node *parse_for(Parser *ps);
 static Node *parse_switch(Parser *ps);
@@ -1199,9 +1296,398 @@ static int parser_peek_struct_literal(Parser *ps, Token look);
 static Node *parse_initializer(Parser *ps);
 static void parse_struct_decl(Parser *ps, int is_exposed);
 static void parse_enum_decl(Parser *ps, int is_exposed);
-static void parse_module_decl(Parser *ps);
+static void parse_module_decl(Parser *ps, int managed_mode);
 static int parse_bring_decl(Parser *ps);
 static int parse_extend_decl(Parser *ps, int leading_noreturn);
+
+static Node *parser_make_var_ref(Parser *ps, const char *name, int line, int col)
+{
+    Node *n = new_node(ND_VAR);
+    n->var_ref = name;
+    n->line = line;
+    n->col = col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
+static Node *parser_make_call0(Parser *ps, const char *name, int line, int col)
+{
+    Node *call = new_node(ND_CALL);
+    call->call_name = name;
+    call->args = NULL;
+    call->arg_count = 0;
+    call->line = line;
+    call->col = col;
+    call->src = lexer_source(ps->lx);
+    return call;
+}
+
+static Node *parser_make_member(Parser *ps, Node *base, const char *field, int line, int col)
+{
+    Node *m = new_node(ND_MEMBER);
+    m->lhs = base;
+    m->field_name = field;
+    m->line = line;
+    m->col = col;
+    m->src = lexer_source(ps->lx);
+    return m;
+}
+
+static Node *parser_make_assign_stmt(Parser *ps, Node *lhs, Node *rhs, int line, int col)
+{
+    Node *as = new_node(ND_ASSIGN);
+    as->lhs = lhs;
+    as->rhs = rhs;
+    as->line = line;
+    as->col = col;
+    as->src = lexer_source(ps->lx);
+
+    Node *es = new_node(ND_EXPR_STMT);
+    es->lhs = as;
+    es->line = line;
+    es->col = col;
+    es->src = lexer_source(ps->lx);
+    return es;
+}
+
+static void parser_try_prepend_stmt(Node *block, Node *stmt)
+{
+    if (!block || !stmt || block->kind != ND_BLOCK)
+        return;
+    int old = block->stmt_count;
+    Node **grown = (Node **)realloc(block->stmts, (size_t)(old + 1) * sizeof(Node *));
+    if (!grown)
+    {
+        diag_error("out of memory while preparing catch block");
+        exit(1);
+    }
+    block->stmts = grown;
+    for (int i = old; i > 0; --i)
+        block->stmts[i] = block->stmts[i - 1];
+    block->stmts[0] = stmt;
+    block->stmt_count = old + 1;
+}
+
+static void parser_try_append_stmt(Node *block, Node *stmt)
+{
+    if (!block || !stmt || block->kind != ND_BLOCK)
+        return;
+    int old = block->stmt_count;
+    Node **grown = (Node **)realloc(block->stmts, (size_t)(old + 1) * sizeof(Node *));
+    if (!grown)
+    {
+        diag_error("out of memory while preparing catch block");
+        exit(1);
+    }
+    block->stmts = grown;
+    block->stmts[old] = stmt;
+    block->stmt_count = old + 1;
+}
+
+static Node *parser_make_empty_block(Parser *ps, int line, int col)
+{
+    Node *b = new_node(ND_BLOCK);
+    b->line = line;
+    b->col = col;
+    b->src = lexer_source(ps->lx);
+    return b;
+}
+
+static void parser_try_append_block_stmts(Node *dst, Node *src)
+{
+    if (!dst || !src || dst->kind != ND_BLOCK || src->kind != ND_BLOCK)
+        return;
+    for (int i = 0; i < src->stmt_count; ++i)
+        parser_try_append_stmt(dst, src->stmts[i]);
+}
+
+static Node *parser_make_bool_lit(Parser *ps, int value, int line, int col)
+{
+    Node *n = new_node(ND_INT);
+    n->int_val = value ? 1 : 0;
+    n->int_uval = (uint64_t)(value ? 1 : 0);
+    n->int_is_unsigned = 0;
+    n->int_width = 0;
+    n->line = line;
+    n->col = col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
+static Node *parser_make_string_lit(Parser *ps, const char *text, int line, int col)
+{
+    Node *s = new_node(ND_STRING);
+    const char *safe = text ? text : "";
+    int len = (int)strlen(safe);
+    char *heap = (char *)xmalloc((size_t)len + 1);
+    memcpy(heap, safe, (size_t)len + 1);
+    s->str_data = heap;
+    s->str_len = len;
+    s->line = line;
+    s->col = col;
+    s->src = lexer_source(ps->lx);
+    return s;
+}
+
+static Node *parser_make_call1(Parser *ps, const char *name, Node *arg0, int line, int col)
+{
+    Node *call = new_node(ND_CALL);
+    call->call_name = name;
+    call->args = (Node **)xcalloc(1, sizeof(Node *));
+    call->args[0] = arg0;
+    call->arg_count = 1;
+    call->line = line;
+    call->col = col;
+    call->src = lexer_source(ps->lx);
+    return call;
+}
+
+static Node *parser_make_not(Parser *ps, Node *expr, int line, int col)
+{
+    Node *n = new_node(ND_LNOT);
+    n->lhs = expr;
+    n->line = line;
+    n->col = col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
+static Node *parser_make_land(Parser *ps, Node *lhs, Node *rhs, int line, int col)
+{
+    Node *n = new_node(ND_LAND);
+    n->lhs = lhs;
+    n->rhs = rhs;
+    n->line = line;
+    n->col = col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
+static char *parser_catch_type_meta(Type *ty)
+{
+    if (!ty)
+        return xstrdup("RuntimeError");
+    if (ty->kind == TY_STRUCT && ty->struct_name)
+    {
+        size_t len = strlen(ty->struct_name);
+        char *s = (char *)xmalloc(len + strlen("struct:") + 1);
+        memcpy(s, "struct:", strlen("struct:"));
+        memcpy(s + strlen("struct:"), ty->struct_name, len + 1);
+        return s;
+    }
+    if (ty->kind == TY_IMPORT && ty->import_type_name)
+    {
+        size_t len = strlen(ty->import_type_name);
+        char *s = (char *)xmalloc(len + strlen("struct:") + 1);
+        memcpy(s, "struct:", strlen("struct:"));
+        memcpy(s + strlen("struct:"), ty->import_type_name, len + 1);
+        return s;
+    }
+    return xstrdup("RuntimeError");
+}
+
+static Node *parse_try_stmt(Parser *ps)
+{
+    Token try_tok = expect(ps, TK_KW_TRY, "try");
+    Node *try_block = parse_block(ps);
+
+    Node *catch_block = NULL;
+    Node *finally_block = NULL;
+    Token next = lexer_peek(ps->lx);
+    if (next.kind == TK_KW_CATCH)
+    {
+        Node *dispatch = new_node(ND_BLOCK);
+        dispatch->line = try_tok.line;
+        dispatch->col = try_tok.col;
+        dispatch->src = lexer_source(ps->lx);
+
+        char matched_name_buf[64];
+        snprintf(matched_name_buf, sizeof(matched_name_buf), "__catch_matched_%d_%d", try_tok.line, try_tok.col);
+        char *matched_name = xstrdup(matched_name_buf);
+
+        Node *matched_decl = new_node(ND_VAR_DECL);
+        matched_decl->var_name = matched_name;
+        static Type tbool = {.kind = TY_BOOL};
+        matched_decl->var_type = &tbool;
+        matched_decl->line = try_tok.line;
+        matched_decl->col = try_tok.col;
+        matched_decl->src = lexer_source(ps->lx);
+        matched_decl->rhs = parser_make_bool_lit(ps, 0, try_tok.line, try_tok.col);
+        parser_try_append_stmt(dispatch, matched_decl);
+
+        while (next.kind == TK_KW_CATCH)
+        {
+            lexer_next(ps->lx);
+            expect(ps, TK_LPAREN, "(");
+            Type *clause_type = parse_type_spec(ps);
+            const char *clause_name = NULL;
+            Node *clause_guard = NULL;
+
+            Token maybe_ident = lexer_peek(ps->lx);
+            if (maybe_ident.kind == TK_IDENT)
+            {
+                Token nm = lexer_next(ps->lx);
+                char *heap = (char *)xmalloc((size_t)nm.length + 1);
+                memcpy(heap, nm.lexeme, (size_t)nm.length);
+                heap[nm.length] = '\0';
+                clause_name = heap;
+            }
+
+            Token guard_q = lexer_peek(ps->lx);
+            if (guard_q.kind == TK_QUESTION)
+            {
+                Token guard_gt = lexer_peek_n(ps->lx, 1);
+                if (guard_gt.kind != TK_GT)
+                {
+                    diag_error_at(lexer_source(ps->lx), guard_q.line, guard_q.col,
+                                  "expected '>' after '?' in catch guard; use '?> <expr>'");
+                    exit(1);
+                }
+                lexer_next(ps->lx);
+                lexer_next(ps->lx);
+                if (!clause_name)
+                {
+                    diag_error_at(lexer_source(ps->lx), guard_q.line, guard_q.col,
+                                  "catch guard requires a catch variable name (e.g. catch (T ex ?> ...))");
+                    exit(1);
+                }
+                clause_guard = parse_expr(ps);
+            }
+
+            expect(ps, TK_RPAREN, ")");
+            Node *user_block = parse_block(ps);
+            Node *clause_block = parser_make_empty_block(ps, try_tok.line, try_tok.col);
+
+            if (clause_name && clause_block)
+            {
+                Node *decl = new_node(ND_VAR_DECL);
+                decl->var_name = clause_name;
+                decl->var_type = clause_type;
+                decl->line = try_tok.line;
+                decl->col = try_tok.col;
+                decl->src = lexer_source(ps->lx);
+                Node *init = new_node(ND_INIT_LIST);
+                init->init.is_zero = 1;
+                init->line = try_tok.line;
+                init->col = try_tok.col;
+                init->src = lexer_source(ps->lx);
+                decl->rhs = init;
+                parser_try_append_stmt(clause_block, decl);
+
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "symbol", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_symbol", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "line", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_line", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "file", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_file", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "message", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_message", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "category", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_category", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "code", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_code", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+            }
+
+            Node *mark_matched = parser_make_assign_stmt(
+                ps,
+                parser_make_var_ref(ps, matched_name, try_tok.line, try_tok.col),
+                parser_make_bool_lit(ps, 1, try_tok.line, try_tok.col),
+                try_tok.line,
+                try_tok.col);
+
+            if (clause_guard)
+            {
+                Node *guard_body = parser_make_empty_block(ps, try_tok.line, try_tok.col);
+                parser_try_append_stmt(guard_body, mark_matched);
+                parser_try_append_block_stmts(guard_body, user_block);
+
+                Node *guard_if = new_node(ND_IF);
+                guard_if->lhs = clause_guard;
+                guard_if->rhs = guard_body;
+                guard_if->body = NULL;
+                guard_if->line = try_tok.line;
+                guard_if->col = try_tok.col;
+                guard_if->src = lexer_source(ps->lx);
+                parser_try_append_stmt(clause_block, guard_if);
+            }
+            else
+            {
+                parser_try_append_stmt(clause_block, mark_matched);
+                parser_try_append_block_stmts(clause_block, user_block);
+            }
+
+            char *meta = parser_catch_type_meta(clause_type);
+            Node *match_call = parser_make_call1(ps, "__cert__exception_matches_type", parser_make_string_lit(ps, meta, try_tok.line, try_tok.col), try_tok.line, try_tok.col);
+            free(meta);
+
+            Node *cond = match_call;
+            cond = parser_make_land(ps,
+                                    parser_make_not(ps, parser_make_var_ref(ps, matched_name, try_tok.line, try_tok.col), try_tok.line, try_tok.col),
+                                    cond,
+                                    try_tok.line,
+                                    try_tok.col);
+
+            Node *if_stmt = new_node(ND_IF);
+            if_stmt->lhs = cond;
+            if_stmt->rhs = clause_block;
+            if_stmt->body = NULL;
+            if_stmt->line = try_tok.line;
+            if_stmt->col = try_tok.col;
+            if_stmt->src = lexer_source(ps->lx);
+            parser_try_append_stmt(dispatch, if_stmt);
+
+            next = lexer_peek(ps->lx);
+        }
+
+        Node *throw_unmatched = new_node(ND_THROW);
+        throw_unmatched->line = try_tok.line;
+        throw_unmatched->col = try_tok.col;
+        throw_unmatched->src = lexer_source(ps->lx);
+
+        Node *unmatched_if = new_node(ND_IF);
+        unmatched_if->lhs = parser_make_not(ps, parser_make_var_ref(ps, matched_name, try_tok.line, try_tok.col), try_tok.line, try_tok.col);
+        unmatched_if->rhs = throw_unmatched;
+        unmatched_if->body = NULL;
+        unmatched_if->line = try_tok.line;
+        unmatched_if->col = try_tok.col;
+        unmatched_if->src = lexer_source(ps->lx);
+        parser_try_append_stmt(dispatch, unmatched_if);
+
+        catch_block = dispatch;
+    }
+
+    next = lexer_peek(ps->lx);
+    if (next.kind == TK_KW_FINALLY)
+    {
+        lexer_next(ps->lx);
+        finally_block = parse_block(ps);
+    }
+
+    if (!catch_block && !finally_block)
+    {
+        diag_error_at(lexer_source(ps->lx), try_tok.line, try_tok.col,
+                      "try statement requires a catch and/or finally block");
+        exit(1);
+    }
+
+    Node *n = new_node(ND_TRY);
+    n->lhs = try_block;
+    n->rhs = catch_block;
+    n->body = finally_block;
+    n->var_type = NULL;
+    n->var_name = NULL;
+    n->type_expr = NULL;
+    n->line = try_tok.line;
+    n->col = try_tok.col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
 
 static int source_only_preprocessor_between(const SourceBuffer *src, int start_line, int end_line)
 {
@@ -1747,9 +2233,13 @@ static int is_type_start(Parser *ps, Token t)
     case TK_KW_DOUBLE:
     case TK_KW_VOID:
     case TK_KW_CHAR:
+    case TK_KW_STRING:
     case TK_KW_BOOL:
     case TK_KW_STACK:
     case TK_KW_ACTION:
+    case TK_KW_OBJECT:
+        return 1;
+    case TK_KW_REF:
         return 1;
     case TK_KW_FUN:
     {
@@ -1936,7 +2426,7 @@ static void parse_trailing_funptr_signature(Parser *ps, Type *ty)
     finalize_funptr_signature(ps, func_ty, &next);
 }
 
-static Type *parse_type_spec(Parser *ps)
+static Type *parse_type_base(Parser *ps)
 {
     if (!ps)
         return NULL;
@@ -1960,6 +2450,41 @@ static Type *parse_type_spec(Parser *ps)
     }
     Type *base = NULL;
     Token b = lexer_next(ps->lx);
+    if (b.kind == TK_KW_REF)
+    {
+        int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
+        Token look = lexer_peek(ps->lx);
+        if (look.kind == TK_QUESTION)
+        {
+            lexer_next(ps->lx);
+            nullability = 1;
+        }
+        else if (look.kind == TK_BANG)
+        {
+            lexer_next(ps->lx);
+            nullability = 2;
+        }
+        Type *pointee = parse_type_spec(ps);
+        return type_ref(pointee, nullability);
+    }
+    if (b.kind == TK_KW_REF)
+    {
+        int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
+        Token look = lexer_peek(ps->lx);
+        if (look.kind == TK_QUESTION)
+        {
+            lexer_next(ps->lx);
+            nullability = 1;
+        }
+        else if (look.kind == TK_BANG)
+        {
+            lexer_next(ps->lx);
+            nullability = 2;
+        }
+        Type *pointee = parse_type_spec(ps);
+        return type_ref(pointee, nullability);
+    }
+    
     static Type ti8 = {.kind = TY_I8}, tu8 = {.kind = TY_U8},
                 ti16 = {.kind = TY_I16}, tu16 = {.kind = TY_U16},
                 ti32 = {.kind = TY_I32}, tu32 = {.kind = TY_U32},
@@ -1967,6 +2492,7 @@ static Type *parse_type_spec(Parser *ps)
     static Type tf32 = {.kind = TY_F32}, tf64 = {.kind = TY_F64},
                 tf128 = {.kind = TY_F128};
     static Type tv = {.kind = TY_VOID}, tch = {.kind = TY_CHAR}, tbool = {.kind = TY_BOOL};
+    static Type tobject = {.kind = TY_PTR, .pointee = &tv, .is_object = 1};
     if (b.kind == TK_KW_I8)
         base = &ti8;
     else if (b.kind == TK_KW_U8)
@@ -2003,8 +2529,389 @@ static Type *parse_type_spec(Parser *ps)
         base = &tv;
     else if (b.kind == TK_KW_CHAR)
         base = &tch;
+    else if (b.kind == TK_KW_STRING)
+        base = type_ptr(&tch);
     else if (b.kind == TK_KW_BOOL)
         base = &tbool;
+    else if (b.kind == TK_KW_OBJECT)
+        base = &tobject;
+    else if (b.kind == TK_KW_LONG)
+    {
+        // check for 'long double'
+        Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_KW_DOUBLE)
+        {
+            lexer_next(ps->lx);
+            base = &tf128;
+        }
+        else
+            base = &ti64;
+    }
+    else if (b.kind == TK_KW_FUN)
+    {
+        Token star = lexer_peek(ps->lx);
+        if (star.kind != TK_STAR)
+        {
+            diag_error_at(lexer_source(ps->lx), star.line, star.col,
+                          "expected '*' after 'fun' in function pointer type");
+            exit(1);
+        }
+        lexer_next(ps->lx); // consume '*'
+        Type *func_ty = type_func();
+        Token after_star = lexer_peek(ps->lx);
+        if (after_star.kind == TK_LPAREN)
+        {
+            int ret_inside = parse_funptr_signature_parens(ps, func_ty, 1);
+            if (!ret_inside)
+            {
+                Token arrow = lexer_peek(ps->lx);
+                if (arrow.kind != TK_ARROW)
+                {
+                    diag_error_at(lexer_source(ps->lx), arrow.line, arrow.col,
+                                  "function pointer type requires '->' return type");
+                    exit(1);
+                }
+                lexer_next(ps->lx);
+                func_ty->func.ret = parse_type_spec(ps);
+            }
+            finalize_funptr_signature(ps, func_ty, &after_star);
+        }
+        base = type_ptr(func_ty);
+    }
+    else if (b.kind == TK_KW_ACTION)
+    {
+        Type *func_ty = type_func();
+        Token maybe_lparen = lexer_peek(ps->lx);
+        if (maybe_lparen.kind == TK_LPAREN)
+        {
+            int ret_inside = parse_funptr_signature_parens(ps, func_ty, 1);
+            if (!ret_inside)
+            {
+                Token arrow = lexer_peek(ps->lx);
+                if (arrow.kind != TK_ARROW)
+                {
+                    diag_error_at(lexer_source(ps->lx), arrow.line, arrow.col,
+                                  "action type requires '->' return type when signature is present");
+                    exit(1);
+                }
+                lexer_next(ps->lx);
+                func_ty->func.ret = parse_type_spec(ps);
+            }
+            finalize_funptr_signature(ps, func_ty, &maybe_lparen);
+        }
+        base = type_ptr(func_ty);
+    }
+    else if (b.kind == TK_IDENT)
+    {
+        Token local_buf[8];
+        Token *tokens = local_buf;
+        int token_count = 0;
+        int token_cap = (int)(sizeof(local_buf) / sizeof(local_buf[0]));
+        tokens[token_count++] = b;
+        Token dot = lexer_peek(ps->lx);
+        while (dot.kind == TK_DOT)
+        {
+            lexer_next(ps->lx);
+            Token next_ident = expect(ps, TK_IDENT, "identifier");
+            if (token_count == token_cap)
+            {
+                token_cap *= 2;
+                Token *grown = (Token *)xmalloc((size_t)token_cap * sizeof(Token));
+                memcpy(grown, tokens, (size_t)token_count * sizeof(Token));
+                if (tokens != local_buf)
+                    free(tokens);
+                tokens = grown;
+            }
+            tokens[token_count++] = next_ident;
+            dot = lexer_peek(ps->lx);
+        }
+
+        if (token_count >= 2)
+        {
+            int module_parts = token_count - 1;
+            Token *module_tokens = tokens;
+            Token type_tok = tokens[token_count - 1];
+            const struct ModuleImport *imp = NULL;
+            if (module_parts == 1)
+                imp = parser_find_import_by_alias(ps, module_tokens[0].lexeme, module_tokens[0].length);
+            if (!imp)
+                imp = parser_find_import_by_parts(ps, module_tokens, module_parts);
+            const char *module_full = imp ? imp->full_name : NULL;
+            if (!module_full && parser_module_tokens_match_current(ps, module_tokens, module_parts))
+                module_full = ps->module_full_name;
+            if (!module_full)
+            {
+                size_t total_len = 0;
+                for (int i = 0; i < module_parts; ++i)
+                    total_len += (size_t)module_tokens[i].length + 1;
+                char *module_name = (char *)xmalloc(total_len + 1);
+                size_t pos = 0;
+                for (int i = 0; i < module_parts; ++i)
+                {
+                    memcpy(module_name + pos, module_tokens[i].lexeme, (size_t)module_tokens[i].length);
+                    pos += (size_t)module_tokens[i].length;
+                    if (i + 1 < module_parts)
+                        module_name[pos++] = '.';
+                }
+                module_name[pos] = '\0';
+                diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                              "unknown module '%s' for qualified type", module_name);
+                free(module_name);
+                if (tokens != local_buf)
+                    free(tokens);
+                exit(1);
+            }
+
+            char *type_name = (char *)xmalloc((size_t)type_tok.length + 1);
+            memcpy(type_name, type_tok.lexeme, (size_t)type_tok.length);
+            type_name[type_tok.length] = '\0';
+
+            Type *resolved = module_registry_lookup_struct(module_full, type_name);
+            if (!resolved)
+                resolved = module_registry_lookup_enum(module_full, type_name);
+            if (resolved)
+            {
+                base = resolved;
+                free(type_name);
+            }
+            else
+            {
+                Type *imp_type = (Type *)xcalloc(1, sizeof(Type));
+                imp_type->kind = TY_IMPORT;
+                imp_type->struct_name = type_name;
+                imp_type->import_module = xstrdup(module_full);
+                imp_type->import_type_name = type_name;
+                base = imp_type;
+            }
+
+            if (tokens != local_buf)
+                free(tokens);
+        }
+        else
+        {
+            if (b.length == 7 && strncmp(b.lexeme, "va_list", 7) == 0)
+            {
+                base = type_va_list();
+            }
+            else
+            {
+                Type *generic_param = parser_lookup_generic_param(ps, &b);
+                if (generic_param)
+                {
+                    base = generic_param;
+                }
+                else
+                {
+                    int ai = alias_find(ps, b.lexeme, b.length);
+                    if (ai < 0)
+                    {
+                        Type *nt = named_type_get(ps, b.lexeme, b.length);
+                        if (nt)
+                            base = nt;
+                        else
+                        {
+                            diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
+                                          b.length, b.lexeme);
+                            exit(1);
+                        }
+                    }
+                    if (ai >= 0)
+                    {
+                        struct Alias *A = &ps->aliases[ai];
+                        if (A->is_generic)
+                        {
+                            Token lt = lexer_next(ps->lx);
+                            if (lt.kind != TK_LT)
+                            {
+                                diag_error_at(lexer_source(ps->lx), lt.line, lt.col,
+                                              "expected '<' after generic alias '%.*s'", b.length,
+                                              b.lexeme);
+                                exit(1);
+                            }
+                            Type *arg = parse_type_spec(ps);
+                            Token gt = lexer_next(ps->lx);
+                            if (gt.kind != TK_GT)
+                            {
+                                diag_error_at(lexer_source(ps->lx), gt.line, gt.col,
+                                              "expected '>' after generic argument");
+                                exit(1);
+                            }
+                            base = make_ptr_chain_dyn(arg, A->gen_ptr_depth);
+                        }
+                        else
+                        {
+                            if (A->resolved_type)
+                            {
+                                base = A->resolved_type;
+                            }
+                            else
+                            {
+                                Type *bk = NULL;
+                                switch (A->base_kind)
+                                {
+                                case TY_I8:
+                                    bk = &ti8;
+                                    break;
+                                case TY_U8:
+                                    bk = &tu8;
+                                    break;
+                                case TY_I16:
+                                    bk = &ti16;
+                                    break;
+                                case TY_U16:
+                                    bk = &tu16;
+                                    break;
+                                case TY_I32:
+                                    bk = &ti32;
+                                    break;
+                                case TY_U32:
+                                    bk = &tu32;
+                                    break;
+                                case TY_I64:
+                                    bk = &ti64;
+                                    break;
+                                case TY_U64:
+                                    bk = &tu64;
+                                    break;
+                                case TY_F32:
+                                    bk = &tf32;
+                                    break;
+                                case TY_F64:
+                                    bk = &tf64;
+                                    break;
+                                case TY_F128:
+                                    bk = &tf128;
+                                    break;
+                                case TY_VOID:
+                                    bk = &tv;
+                                    break;
+                                case TY_CHAR:
+                                    bk = &tch;
+                                    break;
+                                default:
+                                    diag_error("unsupported alias base kind");
+                                    exit(1);
+                                }
+                                base = make_ptr_chain_dyn(bk, A->ptr_depth);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    else if (b.kind == TK_KW_STRUCT)
+    {
+        // allow 'struct Name' as a type use
+        Token nm = expect(ps, TK_IDENT, "struct name");
+        Type *nt = named_type_get(ps, nm.lexeme, nm.length);
+        if (!nt)
+        {
+            diag_error_at(lexer_source(ps->lx), nm.line, nm.col, "unknown struct '%.*s'", nm.length, nm.lexeme);
+            exit(1);
+        }
+        base = nt;
+    }
+    else
+    {
+        diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                      "expected type specifier");
+        exit(1);
+    }
+    return base;
+}
+
+static Type *parse_type_spec(Parser *ps)
+{
+    if (!ps)
+        return NULL;
+    // allow leading qualifiers like 'constant' and optional 'stack'
+    int consumed_stack = 0;
+    while (1)
+    {
+        Token t = lexer_peek(ps->lx);
+        if (t.kind == TK_KW_CONSTANT)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        if (!consumed_stack && t.kind == TK_KW_STACK)
+        {
+            lexer_next(ps->lx);
+            consumed_stack = 1;
+            continue;
+        }
+        break;
+    }
+    Type *base = NULL;
+    Token b = lexer_next(ps->lx);
+    if (b.kind == TK_KW_REF)
+    {
+        int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
+        Token look = lexer_peek(ps->lx);
+        if (look.kind == TK_QUESTION)
+        {
+            lexer_next(ps->lx);
+            nullability = 1;
+        }
+        else if (look.kind == TK_BANG)
+        {
+            lexer_next(ps->lx);
+            nullability = 2;
+        }
+        Type *pointee = parse_type_spec(ps);
+        return type_ref(pointee, nullability);
+    }
+    static Type ti8 = {.kind = TY_I8}, tu8 = {.kind = TY_U8},
+                ti16 = {.kind = TY_I16}, tu16 = {.kind = TY_U16},
+                ti32 = {.kind = TY_I32}, tu32 = {.kind = TY_U32},
+                ti64 = {.kind = TY_I64}, tu64 = {.kind = TY_U64};
+    static Type tf32 = {.kind = TY_F32}, tf64 = {.kind = TY_F64},
+                tf128 = {.kind = TY_F128};
+    static Type tv = {.kind = TY_VOID}, tch = {.kind = TY_CHAR}, tbool = {.kind = TY_BOOL};
+    static Type tobject = {.kind = TY_PTR, .pointee = &tv, .is_object = 1};
+    if (b.kind == TK_KW_I8)
+        base = &ti8;
+    else if (b.kind == TK_KW_U8)
+        base = &tu8;
+    else if (b.kind == TK_KW_I16 || b.kind == TK_KW_SHORT)
+        base = &ti16;
+    else if (b.kind == TK_KW_U16 || b.kind == TK_KW_USHORT)
+        base = &tu16;
+    else if (b.kind == TK_KW_I32 || b.kind == TK_KW_INT)
+        base = &ti32;
+    else if (b.kind == TK_KW_U32 || b.kind == TK_KW_UINT)
+        base = &tu32;
+    else if (b.kind == TK_KW_BYTE)
+        base = &ti8;
+    else if (b.kind == TK_KW_UBYTE)
+        base = &tu8;
+    else if (b.kind == TK_KW_I64 || b.kind == TK_KW_LONG)
+        base = &ti64;
+    else if (b.kind == TK_KW_U64 || b.kind == TK_KW_ULONG)
+        base = &tu64;
+    else if (b.kind == TK_KW_F32 || b.kind == TK_KW_FLOAT)
+        base = &tf32;
+    else if (b.kind == TK_KW_DOUBLE)
+    {
+        // could be 'double' or part of 'long double' handled when previous token
+        // was LONG; since we consumed, treat as f64 here
+        base = &tf64;
+    }
+    else if (b.kind == TK_KW_F64)
+        base = &tf64;
+    else if (b.kind == TK_KW_F128)
+        base = &tf128;
+    else if (b.kind == TK_KW_VOID)
+        base = &tv;
+    else if (b.kind == TK_KW_CHAR)
+        base = &tch;
+    else if (b.kind == TK_KW_STRING)
+        base = type_ptr(&tch);
+    else if (b.kind == TK_KW_BOOL)
+        base = &tbool;
+    else if (b.kind == TK_KW_OBJECT)
+        base = &tobject;
     else if (b.kind == TK_KW_LONG)
     {
         // check for 'long double'
@@ -2940,6 +3847,7 @@ static Node *parse_primary(Parser *ps)
             n->src = lexer_source(ps->lx);
             return n;
         }
+
         if (t.length == 12 && strncmp(t.lexeme, "__FUNCTION__", 12) == 0)
         {
             if (!ps->current_function_name)
@@ -3258,19 +4166,38 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
         if (p.kind == TK_KW_AS)
         {
             lexer_next(ps->lx);
-            Type *ty = parse_type_spec(ps);
-            Node *cs = new_node(ND_CAST);
-            cs->lhs = e;
-            cs->type = ty;
-            cs->line = p.line;
-            cs->col = p.col;
-            cs->src = lexer_source(ps->lx);
-            e = cs;
-            continue;
+            Token next = lexer_peek(ps->lx);
+            if (next.kind == TK_KW_TYPEOF)
+            {
+                Node *type_expr = parse_expr(ps);
+                Node *cs = new_node(ND_CAST);
+                cs->lhs = e;
+                cs->type = NULL;
+                cs->type_expr = type_expr;
+                cs->line = p.line;
+                cs->col = p.col;
+                cs->src = lexer_source(ps->lx);
+                e = cs;
+                continue;
+            }
+            else
+            {
+                Type *ty = parse_type_spec(ps);
+                Node *cs = new_node(ND_CAST);
+                cs->lhs = e;
+                cs->type = ty;
+                cs->line = p.line;
+                cs->col = p.col;
+                cs->src = lexer_source(ps->lx);
+                e = cs;
+                continue;
+            }
         }
         if (p.kind == TK_ACCESS || p.kind == TK_DOT || p.kind == TK_ARROW)
         {
             if (p.kind == TK_ACCESS && ps->suppress_access_for_match > 0)
+                break;
+            if (p.kind == TK_ARROW && ps->suppress_arrow_member_for_throw > 0)
                 break;
             Token op = lexer_next(ps->lx);
             Token field = expect(ps, TK_IDENT, "member name");
@@ -3457,6 +4384,17 @@ static Node *parse_unary(Parser *ps)
         n->src = lexer_source(ps->lx);
         return n;
     }
+    if (p.kind == TK_KW_REF)
+    {
+        lexer_next(ps->lx);
+        Node *lv = parse_unary(ps);
+        Node *n = new_node(ND_ADDR);
+        n->lhs = lv;
+        n->line = p.line;
+        n->col = p.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
     if (p.kind == TK_STAR)
     {
         lexer_next(ps->lx);
@@ -3485,6 +4423,43 @@ static Node *parse_unary(Parser *ps)
         Node *operand = parse_unary(ps);
         Node *n = new_node(ND_LNOT);
         n->lhs = operand;
+        n->line = p.line;
+        n->col = p.col;
+        n->src = lexer_source(ps->lx);
+        return n;
+    }
+    if (p.kind == TK_KW_NEW)
+    {
+        lexer_next(ps->lx);
+        Type *ty = parse_type_base(ps);
+        Node *n = new_node(ND_NEW);
+        // If the parsed type was an array type (e.g., 'int[5]'),
+        // treat that array length as the count for the 'new' expression
+        // and set the node type to pointer-to-element.
+        if (ty && ty->kind == TY_ARRAY && ty->array.elem && !ty->array.is_unsized)
+        {
+            n->type = type_ptr(ty->array.elem);
+            Node *count = new_node(ND_INT);
+            count->int_val = ty->array.length;
+            count->int_uval = (uint64_t)ty->array.length;
+            count->int_width = 0;
+            count->type = type_i32(); // use default int type for integer literal
+            n->lhs = count;
+        }
+        else
+        {
+            // store the element type in node->type as pointer-to(elem)
+            n->type = type_ptr(ty);
+        }
+        // optional array form: new T[expr]
+        Token nxt = lexer_peek(ps->lx);
+        if (nxt.kind == TK_LBRACKET)
+        {
+            lexer_next(ps->lx); // consume '['
+            Node *count = parse_expr(ps);
+            expect(ps, TK_RBRACKET, "]");
+            n->lhs = count; // use lhs to hold the count expression
+        }
         n->line = p.line;
         n->col = p.col;
         n->src = lexer_source(ps->lx);
@@ -3610,6 +4585,19 @@ static Node *parse_rel(Parser *ps)
     for (;;)
     {
         Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_KW_IS)
+        {
+            Token op = lexer_next(ps->lx);
+            Type *rhs_ty = parse_type_spec(ps);
+            Node *n = new_node(ND_IS);
+            n->lhs = lhs;
+            n->is_type = rhs_ty;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
         if (p.kind == TK_GT || p.kind == TK_LT || p.kind == TK_LTE || p.kind == TK_GTE)
         {
             Token op = lexer_next(ps->lx);
@@ -3641,6 +4629,19 @@ static Node *parse_eq(Parser *ps)
     for (;;)
     {
         Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_EQEQEQ)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_rel(ps);
+            Node *n = new_node(ND_STRICT_EQ);
+            n->lhs = lhs;
+            n->rhs = rhs;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
         if (p.kind == TK_EQEQ)
         {
             Token op = lexer_next(ps->lx);
@@ -3982,6 +4983,38 @@ static Node *parse_inferred_var_decl(Parser *ps, int expect_semicolon)
 static Node *parse_stmt(Parser *ps)
 {
     Token t = lexer_peek(ps->lx);
+    if (t.kind == TK_KW_MANAGED)
+    {
+        lexer_next(ps->lx);
+        Token next = lexer_peek(ps->lx);
+        if (next.kind != TK_LBRACE)
+        {
+            diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                          "expected '{' after 'managed'");
+            exit(1);
+        }
+        ps->managed_scope_depth++;
+        Node *blk = parse_block(ps);
+        ps->managed_scope_depth--;
+        if (blk)
+            blk->is_managed = 1;
+        return blk;
+    }
+    if (t.kind == TK_KW_UNMANAGED)
+    {
+        lexer_next(ps->lx);
+        Token next = lexer_peek(ps->lx);
+        if (next.kind != TK_LBRACE)
+        {
+            diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                          "expected '{' after 'unmanaged'");
+            exit(1);
+        }
+        ps->unmanaged_scope_depth++;
+        Node *blk = parse_block(ps);
+        ps->unmanaged_scope_depth--;
+        return blk;
+    }
     if (t.kind == TK_LBRACE)
         return parse_block(ps);
     if (t.kind == TK_KW_IF)
@@ -4022,6 +5055,38 @@ static Node *parse_stmt(Parser *ps)
     if (t.kind == TK_KW_SWITCH)
     {
         return parse_switch(ps);
+    }
+    if (t.kind == TK_KW_TRY)
+    {
+        return parse_try_stmt(ps);
+    }
+    if (t.kind == TK_KW_THROW)
+    {
+        lexer_next(ps->lx);
+        Token nxt = lexer_peek(ps->lx);
+        Node *expr = NULL;
+        Node *payload = NULL;
+        if (nxt.kind != TK_SEMI)
+        {
+            ps->suppress_arrow_member_for_throw++;
+            expr = parse_expr(ps);
+            if (ps->suppress_arrow_member_for_throw > 0)
+                ps->suppress_arrow_member_for_throw--;
+            Token maybe_arrow = lexer_peek(ps->lx);
+            if (maybe_arrow.kind == TK_ARROW)
+            {
+                lexer_next(ps->lx);
+                payload = parse_expr(ps);
+            }
+        }
+        expect(ps, TK_SEMI, ";");
+        Node *th = new_node(ND_THROW);
+        th->lhs = expr;
+        th->rhs = payload;
+        th->line = t.line;
+        th->col = t.col;
+        th->src = lexer_source(ps->lx);
+        return th;
     }
     if (t.kind == TK_KW_BREAK)
     {
@@ -4066,6 +5131,38 @@ static Node *parse_stmt(Parser *ps)
         r->col = t.col;
         r->src = lexer_source(ps->lx);
         return r;
+    }
+    if (t.kind == TK_KW_JUMP)
+    {
+        lexer_next(ps->lx);
+        Node *expr = parse_expr(ps);
+        if (!expr || expr->kind != ND_CALL)
+        {
+            diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                          "'jump' requires a function-style target expression (e.g. jump target())");
+            exit(1);
+        }
+        expr->call_is_jump = 1;
+        expect(ps, TK_SEMI, ";");
+
+        Node *es = new_node(ND_EXPR_STMT);
+        es->lhs = expr;
+        es->line = expr ? expr->line : t.line;
+        es->col = expr ? expr->col : t.col;
+        es->src = lexer_source(ps->lx);
+        return es;
+    }
+    if (t.kind == TK_KW_DELETE)
+    {
+        lexer_next(ps->lx);
+        Node *expr = parse_expr(ps);
+        expect(ps, TK_SEMI, ";");
+        Node *n = new_node(ND_DELETE);
+        n->lhs = expr;
+        n->line = t.line;
+        n->col = t.col;
+        n->src = lexer_source(ps->lx);
+        return n;
     }
     if (t.kind == TK_KW_VAR)
     {
@@ -4147,6 +5244,126 @@ static Node *parse_block(Parser *ps)
     for (;;)
     {
         Token t = lexer_peek(ps->lx);
+
+        // Handle preprocessor-inserted hint markers emitted by chance_preprocess_source
+        if (t.kind == TK_IDENT && t.lexeme && t.length > 0)
+        {
+            if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_void_function(1);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_END_IMPLICIT_VOID_FUNCTION__") && strncmp(t.lexeme, "__CHANCE_HINT_END_IMPLICIT_VOID_FUNCTION__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_void_function(0);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_SIZEOF__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_SIZEOF__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_sizeof(1);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_END_IMPLICIT_SIZEOF__") && strncmp(t.lexeme, "__CHANCE_HINT_END_IMPLICIT_SIZEOF__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_sizeof(0);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_VOIDP__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_VOIDP__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_voidp(1);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_END_IMPLICIT_VOIDP__") && strncmp(t.lexeme, "__CHANCE_HINT_END_IMPLICIT_VOIDP__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_voidp(0);
+                continue;
+            }
+        }
+
+        // Handle preprocessor-inserted hint markers emitted by chance_preprocess_source
+        if (t.kind == TK_IDENT && t.lexeme && t.length > 0)
+        {
+            // compare known marker names
+            if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                // consume trailing semicolon if present
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_void_function(1);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_END_IMPLICIT_VOID_FUNCTION__") && strncmp(t.lexeme, "__CHANCE_HINT_END_IMPLICIT_VOID_FUNCTION__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_void_function(0);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_SIZEOF__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_SIZEOF__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_sizeof(1);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_END_IMPLICIT_SIZEOF__") && strncmp(t.lexeme, "__CHANCE_HINT_END_IMPLICIT_SIZEOF__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_sizeof(0);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_VOIDP__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_VOIDP__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_voidp(1);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_END_IMPLICIT_VOIDP__") && strncmp(t.lexeme, "__CHANCE_HINT_END_IMPLICIT_VOIDP__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_voidp(0);
+                continue;
+            }
+        }
         if (t.kind == TK_RBRACE)
         {
             lexer_next(ps->lx);
@@ -4520,7 +5737,7 @@ static Node *parse_for(Parser *ps)
     return wh;
 }
 
-static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, FunctionBodyKind body_kind)
+static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_managed, FunctionBodyKind body_kind, struct PendingAttr *attrs, int attr_count)
 {
     expect(ps, TK_KW_FUN, "fun");
     Token name = expect(ps, TK_IDENT, "identifier");
@@ -4652,9 +5869,37 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
         }
     }
     expect(ps, TK_RPAREN, ")");
-    expect(ps, TK_ARROW, "->");
-    // return type
-    Type *rtype = parse_type_spec(ps);
+    Token arrow_peek = lexer_peek(ps->lx);
+    Type *rtype = NULL;
+    int allow_implicit_for_this = 0;
+    if (attrs && attr_count > 0)
+    {
+        for (int i = 0; i < attr_count; ++i)
+        {
+            if (!attrs[i].name)
+                continue;
+            if (strcmp(attrs[i].name, "Hint") == 0 && attrs[i].value && strcmp(attrs[i].value, "implicit-void-function") == 0)
+            {
+                allow_implicit_for_this = 1;
+                break;
+            }
+        }
+    }
+    if (arrow_peek.kind == TK_ARROW)
+    {
+        lexer_next(ps->lx);
+        // return type
+        rtype = parse_type_spec(ps);
+    }
+    else if (allow_implicit_for_this || sema_get_allow_implicit_void_function())
+    {
+        rtype = type_void();
+    }
+    else
+    {
+        expect(ps, TK_ARROW, "->");
+        // unreachable: expect will exit
+    }
     if (is_noreturn && rtype && rtype->kind != TY_VOID)
     {
         diag_error_at(lexer_source(ps->lx), name.line, name.col,
@@ -4679,6 +5924,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
     fn->src = lexer_source(ps->lx);
     fn->is_noreturn = is_noreturn;
     fn->is_exposed = is_exposed;
+    fn->is_managed = is_managed ? 1 : 0;
     fn->metadata.declared_param_count = -1;
     fn->metadata.declared_local_count = -1;
     fn->metadata.ret_token = NULL;
@@ -5033,9 +6279,69 @@ Node *parse_unit(Parser *ps)
     {
         Token t = lexer_peek(ps->lx);
 
-        while (t.kind == TK_LBRACKET)
+        // Handle preprocessor-inserted hint markers emitted by chance_preprocess_source
+        if (t.kind == TK_IDENT && t.lexeme && t.length > 0)
         {
-            struct PendingAttr attr = parse_attribute(ps);
+            if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_void_function(1);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_END_IMPLICIT_VOID_FUNCTION__") && strncmp(t.lexeme, "__CHANCE_HINT_END_IMPLICIT_VOID_FUNCTION__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_void_function(0);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_SIZEOF__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_SIZEOF__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_sizeof(1);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_END_IMPLICIT_SIZEOF__") && strncmp(t.lexeme, "__CHANCE_HINT_END_IMPLICIT_SIZEOF__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_sizeof(0);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_VOIDP__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_VOIDP__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_voidp(1);
+                continue;
+            }
+            if (t.length == (int)strlen("__CHANCE_HINT_END_IMPLICIT_VOIDP__") && strncmp(t.lexeme, "__CHANCE_HINT_END_IMPLICIT_VOIDP__", t.length) == 0)
+            {
+                lexer_next(ps->lx);
+                Token semi = lexer_peek(ps->lx);
+                if (semi.kind == TK_SEMI)
+                    lexer_next(ps->lx);
+                sema_set_allow_implicit_voidp(0);
+                continue;
+            }
+        }
+
+        while (t.kind == TK_LBRACKET || token_is_attribute_keyword(t.kind))
+        {
+            struct PendingAttr attr =
+                (t.kind == TK_LBRACKET) ? parse_attribute(ps) : parse_attribute_keyword(ps);
             if (attr_count == attr_cap)
             {
                 int new_cap = attr_cap ? attr_cap * 2 : 4;
@@ -5052,6 +6358,16 @@ Node *parse_unit(Parser *ps)
             t = lexer_peek(ps->lx);
         }
 
+        int managed_override_present = 0;
+        int managed_override_value = 0;
+        if (t.kind == TK_KW_MANAGED || t.kind == TK_KW_UNMANAGED)
+        {
+            Token managed_tok = lexer_next(ps->lx);
+            managed_override_present = 1;
+            managed_override_value = (managed_tok.kind == TK_KW_MANAGED) ? 1 : 0;
+            t = lexer_peek(ps->lx);
+        }
+
         if (t.kind == TK_KW_MODULE)
         {
             if (attr_count > 0)
@@ -5060,7 +6376,7 @@ Node *parse_unit(Parser *ps)
                               "attributes are not supported on module declarations");
                 exit(1);
             }
-            parse_module_decl(ps);
+            parse_module_decl(ps, managed_override_present ? managed_override_value : 0);
             continue;
         }
         if (t.kind == TK_KW_BRING)
@@ -5134,6 +6450,13 @@ Node *parse_unit(Parser *ps)
             diag_error_at(lexer_source(ps->lx), err_tok.line, err_tok.col,
                           "unexpected end of file after '%.*s'",
                           err_tok.length, err_tok.lexeme);
+            exit(1);
+        }
+
+        if (managed_override_present && t.kind != TK_KW_FUN)
+        {
+            diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                          "'managed'/'unmanaged' is only valid before 'module' or 'fun' declarations");
             exit(1);
         }
 
@@ -5267,7 +6590,9 @@ Node *parse_unit(Parser *ps)
                 body_kind = FN_BODY_CHANCECODE;
             else if (has_literal)
                 body_kind = FN_BODY_LITERAL;
-            Node *fn = parse_function(ps, leading_noreturn, visibility, body_kind);
+            (void)0;
+            int function_is_managed = managed_override_present ? managed_override_value : ps->module_is_managed;
+            Node *fn = parse_function(ps, leading_noreturn, visibility, function_is_managed, body_kind, attrs, attr_count);
             apply_function_attributes(ps, fn, attrs, attr_count);
             clear_pending_attrs(attrs, attr_count);
             attr_count = 0;
@@ -5425,6 +6750,7 @@ Node *parse_unit(Parser *ps)
         u->module_path.part_count = ps->module_part_count;
         u->module_path.full_name = ps->module_full_name;
     }
+    u->module_is_managed = ps->module_is_managed;
 
     if (ps->import_count > 0)
     {
@@ -5455,7 +6781,7 @@ Node *parse_unit(Parser *ps)
             Node *fn = decls[i];
             if (!fn || fn->kind != ND_FUNC)
                 continue;
-            if (fn->metadata.backend_name || fn->is_entrypoint)
+            if (fn->metadata.backend_name || fn->is_entrypoint || fn->export_name)
                 continue;
             char *backend = NULL;
             if (ps->module_full_name && *ps->module_full_name)

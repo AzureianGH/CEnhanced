@@ -1,0 +1,72 @@
+//#define DEBUGABLE
+#ifdef DEBUGABLE
+extend from "C" int printf(constant char* format, ...);
+#endif
+
+extend fun __cert__panic(char* message) -> void;
+extend fun __cert__realloc(void* ptr, u64 size) -> void*;
+extend fun __cert__malloc(u64 size) -> void*;
+extend fun __cert__free(void* ptr) -> void*;
+
+hide void** gpi = null;
+hide u64 gpi_count = 0;
+hide u64 gpi_top = 0;
+
+[Export]
+expose fun __cert__GC__prep_exit() -> void {
+    #ifdef DEBUGABLE
+    printf("Preparing to exit, freeing %d pointers...\n", gpi_count);
+    #endif
+    for (int i = 0; i < gpi_count; i++) {
+        if (gpi[i] != null) {
+            __cert__free(gpi[i]);
+            #ifdef DEBUGABLE
+            printf("Freed pointer %d\n", i);
+            #endif
+        }
+    }
+    if (gpi != null) {
+        __cert__free(gpi as void*);
+        gpi = null;
+        gpi_count = 0;
+        #ifdef DEBUGABLE
+        printf("Freed pointer array\n");
+        #endif
+    }
+}
+
+[Export]
+expose fun __cert__GC__prep_enter() -> void {
+    #ifdef DEBUGABLE
+    printf("Preparing to enter, allocating pointer array...\n");
+    #endif
+    gpi_top = 8;
+    gpi = __cert__malloc(gpi_top * sizeof(void*) as u64) as void**;
+    gpi_count = 0;
+}
+
+[Export]
+expose fun __cert__GC__add_ptr(void* ptr) -> void {
+    // inc top by 8 and alloc more if needed
+    if (gpi_count >= gpi_top) {
+        gpi_top += 8;
+        gpi = __cert__realloc(gpi as void*, gpi_top * sizeof(void*) as u64) as void**;
+    }
+    gpi[gpi_count] = ptr;
+    gpi_count++;
+}
+
+[Export]
+expose fun __cert__GC__remove_ptr(void* ptr) -> void {
+    for (int i = 0; i < gpi_count; i++) {
+        if (gpi[i] == ptr) {
+            // shift left all pointers after this one
+            for (int j = i; j < gpi_count - 1; j++) {
+                gpi[j] = gpi[j + 1];
+            }
+            gpi[gpi_count - 1] = null;
+            gpi_count--;
+            break;
+        }
+    }
+}

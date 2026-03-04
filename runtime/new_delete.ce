@@ -1,0 +1,41 @@
+#define DEBUGABLE
+
+#ifdef DEBUGABLE
+extend from "C" int printf(constant char* format, ...);
+#endif
+
+extend fun __cert__runtime_error(char* category, char* message) -> void;
+extend fun __cert__malloc(u64 size) -> void*;
+extend fun __cert__free(void* ptr) -> void*;
+
+extend fun __cert__GC__add_ptr(void* ptr) -> void;
+extend fun __cert__GC__remove_ptr(void* ptr) -> void;
+
+[Export]
+expose fun __cert__new(u64 size) -> void* {
+    #ifdef DEBUGABLE
+    printf("Allocating %d bytes...\n", size);
+    #endif
+    void* ptr = __cert__malloc(size);
+    if (ptr == null) {
+        __cert__runtime_error("OutOfMemory", "allocation failed in __cert__new");
+    }
+
+    // track ptr for GC
+    __cert__GC__add_ptr(ptr);
+
+    ret ptr;
+}
+
+[Export]
+expose fun __cert__delete(void* ptr) -> void {
+    #ifdef DEBUGABLE
+    printf("Freeing pointer %p...\n", ptr);
+    #endif
+    if (ptr != null) { // Means that whatever passed was not allocated by us, so we ignore it
+        // untrack ptr for GC
+        __cert__GC__remove_ptr(ptr);
+
+        __cert__free(ptr);
+    }
+}
