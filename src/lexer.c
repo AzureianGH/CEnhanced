@@ -519,6 +519,8 @@ static Token lex_ident_or_kw(Lexer *lx)
     else if ((len == 6 && strncmp(p, "struct", 6) == 0) ||
              (len == 5 && strncmp(p, "struc", 5) == 0))
         k = TK_KW_STRUCT;
+    else if (len == 5 && strncmp(p, "union", 5) == 0)
+        k = TK_KW_UNION;
     else if (len == 6 && strncmp(p, "extend", 6) == 0)
         k = TK_KW_EXTEND;
     else if (len == 3 && strncmp(p, "new", 3) == 0)
@@ -629,6 +631,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_JUMPTARGET;
     else if (len == 6 && strncmp(p, "export", 6) == 0)
         k = TK_KW_EXPORT;
+    else if (len == 3 && strncmp(p, "raw", 3) == 0)
+        k = TK_KW_RAW;
     else if (len == 8 && strncmp(p, "preserve", 8) == 0)
         k = TK_KW_PRESERVE;
     else if (len == 7 && strncmp(p, "section", 7) == 0)

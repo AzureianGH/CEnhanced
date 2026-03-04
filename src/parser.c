@@ -10,6 +10,8 @@
 
 static int parser_disable_formatting_notes = 0;
 
+#define RAW_EXPORT_PREFIX "__cc_raw_export__"
+
 void parser_set_disable_formatting_notes(int disable)
 {
     parser_disable_formatting_notes = disable ? 1 : 0;
@@ -318,6 +320,8 @@ static const char *attribute_name_from_keyword(TokenKind kind)
         return "JumpTarget";
     case TK_KW_EXPORT:
         return "Export";
+    case TK_KW_RAW:
+        return "Raw";
     case TK_KW_PRESERVE:
         return "Preserve";
     case TK_KW_SECTION:
@@ -846,6 +850,19 @@ static void apply_override_metadata(Parser *ps, Node *fn, const struct PendingAt
     exit(1);
 }
 
+static char *make_raw_export_backend_name(const char *base_name)
+{
+    if (!base_name || !*base_name)
+        return NULL;
+    size_t prefix_len = strlen(RAW_EXPORT_PREFIX);
+    size_t base_len = strlen(base_name);
+    char *out = (char *)xmalloc(prefix_len + base_len + 1);
+    memcpy(out, RAW_EXPORT_PREFIX, prefix_len);
+    memcpy(out + prefix_len, base_name, base_len);
+    out[prefix_len + base_len] = '\0';
+    return out;
+}
+
 static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *attrs, int attr_count)
 {
     if (!attrs || attr_count <= 0)
@@ -891,6 +908,16 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
         else if (strcmp(attr->name, "Export") == 0)
         {
             fn->export_name = 1;
+        }
+        else if (strcmp(attr->name, "Raw") == 0)
+        {
+            if (attr->value && *attr->value)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'Raw' attribute does not take arguments");
+                exit(1);
+            }
+            fn->raw_export_name = 1;
         }
         else if (strcmp(attr->name, "Preserve") == 0)
         {
@@ -944,6 +971,32 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
             exit(1);
         }
     }
+
+    if (fn->raw_export_name && !fn->export_name)
+    {
+        diag_error_at(lexer_source(ps->lx), fn->line, fn->col,
+                      "'Raw' is only valid together with 'Export'");
+        exit(1);
+    }
+
+    if (fn->raw_export_name)
+    {
+        const char *raw_base = (fn->metadata.backend_name && fn->metadata.backend_name[0])
+                                   ? fn->metadata.backend_name
+                                   : fn->name;
+        if (!raw_base || !*raw_base)
+        {
+            diag_error_at(lexer_source(ps->lx), fn->line, fn->col,
+                          "raw export function is missing a symbol name");
+            exit(1);
+        }
+        if (strncmp(raw_base, RAW_EXPORT_PREFIX, strlen(RAW_EXPORT_PREFIX)) != 0)
+        {
+            char *raw_backend = make_raw_export_backend_name(raw_base);
+            free(fn->metadata.backend_name);
+            fn->metadata.backend_name = raw_backend;
+        }
+    }
 }
 
 static void apply_global_attributes(Parser *ps, Node *decl, struct PendingAttr *attrs, int attr_count)
@@ -979,9 +1032,47 @@ static void apply_global_attributes(Parser *ps, Node *decl, struct PendingAttr *
             continue;
         }
 
+        if (strcmp(attr->name, "Raw") == 0)
+        {
+            if (attr->value && *attr->value)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'Raw' attribute does not take arguments");
+                exit(1);
+            }
+            decl->raw_export_name = 1;
+            continue;
+        }
+
         diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
                       "attribute '%s' is not supported on global variables", attr->name);
         exit(1);
+    }
+
+    if (decl->raw_export_name && !decl->export_name)
+    {
+        diag_error_at(lexer_source(ps->lx), decl->line, decl->col,
+                      "'Raw' is only valid together with 'Export'");
+        exit(1);
+    }
+
+    if (decl->raw_export_name)
+    {
+        const char *raw_base = (decl->metadata.backend_name && decl->metadata.backend_name[0])
+                                   ? decl->metadata.backend_name
+                                   : decl->var_name;
+        if (!raw_base || !*raw_base)
+        {
+            diag_error_at(lexer_source(ps->lx), decl->line, decl->col,
+                          "raw export global is missing a symbol name");
+            exit(1);
+        }
+        if (strncmp(raw_base, RAW_EXPORT_PREFIX, strlen(RAW_EXPORT_PREFIX)) != 0)
+        {
+            char *raw_backend = make_raw_export_backend_name(raw_base);
+            free(decl->metadata.backend_name);
+            decl->metadata.backend_name = raw_backend;
+        }
     }
 }
 
@@ -1294,11 +1385,12 @@ static Node *parse_brace_initializer(Parser *ps);
 static int parser_peek_struct_literal(Parser *ps, Token look);
 
 static Node *parse_initializer(Parser *ps);
-static void parse_struct_decl(Parser *ps, int is_exposed);
+static void parse_struct_decl(Parser *ps, int is_exposed, int is_union);
 static void parse_enum_decl(Parser *ps, int is_exposed);
 static void parse_module_decl(Parser *ps, int managed_mode);
 static int parse_bring_decl(Parser *ps);
 static int parse_extend_decl(Parser *ps, int leading_noreturn);
+static Type *parse_inline_union_type(Parser *ps);
 
 static Node *parser_make_var_ref(Parser *ps, const char *name, int line, int col)
 {
@@ -2247,6 +2339,7 @@ static int is_type_start(Parser *ps, Token t)
         return next.kind == TK_STAR;
     }
     case TK_KW_STRUCT:
+    case TK_KW_UNION:
         return 1;
     default:
         break;
@@ -2800,14 +2893,31 @@ static Type *parse_type_base(Parser *ps)
             }
         }
     }
-    else if (b.kind == TK_KW_STRUCT)
+    else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_UNION)
     {
-        // allow 'struct Name' as a type use
-        Token nm = expect(ps, TK_IDENT, "struct name");
+        int want_union = (b.kind == TK_KW_UNION);
+        Token look = lexer_peek(ps->lx);
+        if (want_union && look.kind == TK_LBRACE)
+        {
+            base = parse_inline_union_type(ps);
+            return base;
+        }
+        // allow 'struct Name' / 'union Name' as a type use
+        Token nm = expect(ps, TK_IDENT, want_union ? "union name" : "struct name");
         Type *nt = named_type_get(ps, nm.lexeme, nm.length);
         if (!nt)
         {
-            diag_error_at(lexer_source(ps->lx), nm.line, nm.col, "unknown struct '%.*s'", nm.length, nm.lexeme);
+            diag_error_at(lexer_source(ps->lx), nm.line, nm.col,
+                          "unknown %s '%.*s'", want_union ? "union" : "struct",
+                          nm.length, nm.lexeme);
+            exit(1);
+        }
+        if (!!nt->is_union != want_union)
+        {
+            diag_error_at(lexer_source(ps->lx), nm.line, nm.col,
+                          "type '%.*s' is declared as %s",
+                          nm.length, nm.lexeme,
+                          nt->is_union ? "union" : "struct");
             exit(1);
         }
         base = nt;
@@ -3177,17 +3287,36 @@ static Type *parse_type_spec(Parser *ps)
             }
         }
     }
-    else if (b.kind == TK_KW_STRUCT)
+    else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_UNION)
     {
-        // allow 'struct Name' as a type use
-        Token nm = expect(ps, TK_IDENT, "struct name");
-        Type *nt = named_type_get(ps, nm.lexeme, nm.length);
-        if (!nt)
+        int want_union = (b.kind == TK_KW_UNION);
+        Token look = lexer_peek(ps->lx);
+        if (want_union && look.kind == TK_LBRACE)
         {
-            diag_error_at(lexer_source(ps->lx), nm.line, nm.col, "unknown struct '%.*s'", nm.length, nm.lexeme);
-            exit(1);
+            base = parse_inline_union_type(ps);
         }
-        base = nt;
+        else
+        {
+            // allow 'struct Name' / 'union Name' as a type use
+            Token nm = expect(ps, TK_IDENT, want_union ? "union name" : "struct name");
+            Type *nt = named_type_get(ps, nm.lexeme, nm.length);
+            if (!nt)
+            {
+                diag_error_at(lexer_source(ps->lx), nm.line, nm.col,
+                              "unknown %s '%.*s'", want_union ? "union" : "struct",
+                              nm.length, nm.lexeme);
+                exit(1);
+            }
+            if (!!nt->is_union != want_union)
+            {
+                diag_error_at(lexer_source(ps->lx), nm.line, nm.col,
+                              "type '%.*s' is declared as %s",
+                              nm.length, nm.lexeme,
+                              nt->is_union ? "union" : "struct");
+                exit(1);
+            }
+            base = nt;
+        }
     }
     else
     {
@@ -3969,7 +4098,7 @@ static Node *parse_primary(Parser *ps)
 
 // Forward decls for new top-level decls
 static void parse_enum_decl(Parser *ps, int is_exposed);
-static void parse_struct_decl(Parser *ps, int is_exposed);
+static void parse_struct_decl(Parser *ps, int is_exposed, int is_union);
 static int parser_call_type_args_ahead(Parser *ps)
 {
     if (!ps)
@@ -5963,9 +6092,10 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
 
 static int parse_extend_decl(Parser *ps, int leading_noreturn)
 {
-    // Two forms:
+    // Three forms:
     // 1) extend from "C" i32 printf(char*, _vaargs_);
-    // 2) extend fun name(params) -> ret;   // default ABI "C"
+    // 2) extend from "C" Config g_config_blob;
+    // 3) extend fun name(params) -> ret;   // default ABI "C"
     Token extend_tok = expect(ps, TK_KW_EXTEND, "extend");
     int is_noreturn = leading_noreturn;
     Token next = lexer_peek(ps->lx);
@@ -6105,6 +6235,52 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
     // Simple approach: call parse_type_spec and ignore its optional 'stack'
     Type *ret_ty = parse_type_spec(ps);
     Token name = expect(ps, TK_IDENT, "identifier");
+    Token after_name = lexer_peek(ps->lx);
+    if (after_name.kind == TK_SEMI)
+    {
+        if (is_noreturn)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "'noreturn' is only valid on function declarations");
+            exit(1);
+        }
+
+        lexer_next(ps->lx); // consume ';'
+
+        Symbol s = {0};
+        s.kind = SYM_GLOBAL;
+        char *nm = (char *)xmalloc((size_t)name.length + 1);
+        memcpy(nm, name.lexeme, (size_t)name.length);
+        nm[name.length] = '\0';
+        s.name = nm;
+        s.backend_name = s.name;
+        s.is_extern = 1;
+        s.var_type = ret_ty;
+        s.is_const = 0;
+        if (abi.kind == TK_STRING)
+        {
+            char *ab = (char *)xmalloc((size_t)abi.length - 1);
+            memcpy(ab, abi.lexeme + 1, (size_t)abi.length - 2);
+            ab[abi.length - 2] = '\0';
+            s.abi = ab;
+        }
+        else
+        {
+            char *ab = (char *)xmalloc((size_t)abi.length + 1);
+            memcpy(ab, abi.lexeme, (size_t)abi.length);
+            ab[abi.length] = '\0';
+            s.abi = ab;
+        }
+
+        if (ps->ext_count == ps->ext_cap)
+        {
+            ps->ext_cap = ps->ext_cap ? ps->ext_cap * 2 : 8;
+            ps->externs = (Symbol *)realloc(ps->externs, ps->ext_cap * sizeof(Symbol));
+        }
+        ps->externs[ps->ext_count++] = s;
+        return extend_tok.line;
+    }
+
     expect(ps, TK_LPAREN, "(");
     int is_varargs = 0;
     Type **param_types = NULL;
@@ -6533,7 +6709,24 @@ Node *parse_unit(Parser *ps)
                               "'noreturn' is only valid before functions or extern declarations");
                 exit(1);
             }
-            parse_struct_decl(ps, visibility);
+            parse_struct_decl(ps, visibility, 0);
+            continue;
+        }
+        if (t.kind == TK_KW_UNION)
+        {
+            if (bring_seen)
+                bring_block_done = 1;
+            if (extend_seen)
+                extend_block_done = 1;
+            if (global_seen)
+                global_block_done = 1;
+            if (leading_noreturn)
+            {
+                diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
+                              "'noreturn' is only valid before functions or extern declarations");
+                exit(1);
+            }
+            parse_struct_decl(ps, visibility, 1);
             continue;
         }
         if (t.kind == TK_KW_ALIAS)
@@ -6983,12 +7176,95 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
     }
 }
 
-static void parse_struct_decl(Parser *ps, int is_exposed)
+static Type *parse_inline_union_type(Parser *ps)
 {
-    expect(ps, TK_KW_STRUCT, "struct");
-    Token name = expect(ps, TK_IDENT, "struct name");
+    expect(ps, TK_LBRACE, "{");
+    Type *ut = (Type *)xcalloc(1, sizeof(Type));
+    ut->kind = TY_STRUCT;
+    ut->is_union = 1;
+    ut->strct.field_names = NULL;
+    ut->strct.field_types = NULL;
+    ut->strct.field_offsets = NULL;
+    ut->strct.field_count = 0;
+    ut->strct.size_bytes = 0;
+
+    const char **fnames = NULL;
+    Type **ftypes = NULL;
+    int *foff = NULL;
+    int fcnt = 0, fcap = 0;
+    int max_size = 0;
+    int max_align = 1;
+
+    while (1)
+    {
+        Token t = lexer_peek(ps->lx);
+        if (t.kind == TK_RBRACE)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
+        if (!(t.kind == TK_KW_CONSTANT || is_type_start(ps, t)))
+        {
+            diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                          "expected union field declaration or '}'");
+            exit(1);
+        }
+        if (t.kind == TK_KW_CONSTANT)
+            lexer_next(ps->lx);
+        Type *fty = parse_type_spec(ps);
+        Token fname = expect(ps, TK_IDENT, "field name");
+        expect(ps, TK_SEMI, ";");
+
+        if (fcnt == fcap)
+        {
+            fcap = fcap ? fcap * 2 : 4;
+            fnames = (const char **)realloc(fnames, sizeof(char *) * fcap);
+            ftypes = (Type **)realloc(ftypes, sizeof(Type *) * fcap);
+            foff = (int *)realloc(foff, sizeof(int) * fcap);
+        }
+        char *nm = (char *)xmalloc((size_t)fname.length + 1);
+        memcpy(nm, fname.lexeme, (size_t)fname.length);
+        nm[fname.length] = '\0';
+        fnames[fcnt] = nm;
+        ftypes[fcnt] = fty;
+        foff[fcnt] = 0;
+
+        int field_align = type_align_simple(fty);
+        if (field_align > max_align)
+            max_align = field_align;
+        int sz = type_sizeof_simple(fty);
+        if (fty && fty->kind == TY_STRUCT && sz == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), fname.line, fname.col,
+                          "union field '%.*s' has incomplete type", fname.length,
+                          fname.lexeme);
+            exit(1);
+        }
+        if (sz > max_size)
+            max_size = sz;
+        fcnt++;
+    }
+
+    ut->strct.field_names = fnames;
+    ut->strct.field_types = ftypes;
+    ut->strct.field_offsets = foff;
+    ut->strct.field_count = fcnt;
+    ut->strct.size_bytes = align_up(max_size, max_align > 0 ? max_align : 1);
+    return ut;
+}
+
+static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
+{
+    Token kw = lexer_next(ps->lx);
+    if (kw.kind != (is_union ? TK_KW_UNION : TK_KW_STRUCT))
+    {
+        diag_error_at(lexer_source(ps->lx), kw.line, kw.col,
+                      "expected %s declaration", is_union ? "union" : "struct");
+        exit(1);
+    }
+    Token name = expect(ps, TK_IDENT, is_union ? "union name" : "struct name");
     Token after_name = lexer_peek(ps->lx);
-    // Forward declaration: 'struct Name;'
+    // Forward declaration: 'struct Name;' / 'union Name;'
     if (after_name.kind == TK_SEMI)
     {
         lexer_next(ps->lx);
@@ -6998,8 +7274,16 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
             if (existing->kind != TY_STRUCT)
             {
                 diag_error_at(lexer_source(ps->lx), name.line, name.col,
-                              "type '%.*s' already declared with non-struct kind",
+                              "type '%.*s' already declared with non-aggregate kind",
                               name.length, name.lexeme);
+                exit(1);
+            }
+            if (!!existing->is_union != !!is_union)
+            {
+                diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                              "type '%.*s' already declared as %s",
+                              name.length, name.lexeme,
+                              existing->is_union ? "union" : "struct");
                 exit(1);
             }
             if (is_exposed && !existing->is_exposed)
@@ -7008,6 +7292,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
         }
         Type *forward = (Type *)xcalloc(1, sizeof(Type));
         forward->kind = TY_STRUCT;
+        forward->is_union = !!is_union;
         forward->struct_name = (char *)xmalloc((size_t)name.length + 1);
         memcpy((char *)forward->struct_name, name.lexeme, (size_t)name.length);
         ((char *)forward->struct_name)[name.length] = '\0';
@@ -7027,14 +7312,23 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
         if (st->kind != TY_STRUCT)
         {
             diag_error_at(lexer_source(ps->lx), name.line, name.col,
-                          "type '%.*s' already declared with non-struct kind",
+                          "type '%.*s' already declared with non-aggregate kind",
                           name.length, name.lexeme);
+            exit(1);
+        }
+        if (!!st->is_union != !!is_union)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "type '%.*s' already declared as %s",
+                          name.length, name.lexeme,
+                          st->is_union ? "union" : "struct");
             exit(1);
         }
         if (st->strct.field_count > 0)
         {
             diag_error_at(lexer_source(ps->lx), name.line, name.col,
-                          "redefinition of struct '%.*s'", name.length, name.lexeme);
+                          "redefinition of %s '%.*s'",
+                          is_union ? "union" : "struct", name.length, name.lexeme);
             exit(1);
         }
     }
@@ -7042,11 +7336,13 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
     {
         st = (Type *)xcalloc(1, sizeof(Type));
         st->kind = TY_STRUCT;
+        st->is_union = !!is_union;
         st->struct_name = (char *)xmalloc((size_t)name.length + 1);
         memcpy((char *)st->struct_name, name.lexeme, (size_t)name.length);
         ((char *)st->struct_name)[name.length] = '\0';
         is_new_struct = 1;
     }
+    st->is_union = !!is_union;
     st->is_exposed = st->is_exposed || is_exposed;
     // Ensure name is registered before parsing fields so self-references work.
     if (is_new_struct)
@@ -7065,6 +7361,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
     int *foff = NULL;
     int fcnt = 0, fcap = 0;
     int offset = 0;
+    int max_size = 0;
     int max_align = 1;
     while (1)
     {
@@ -7095,9 +7392,10 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
             {
                 const char *hidden_name = fty->struct_name ? fty->struct_name : "<anonymous>";
                 diag_error_at(lexer_source(ps->lx), fname.line, fname.col,
-                              "exposed struct '%.*s' field '%.*s' uses hidden struct '%s'",
+                              "exposed %s '%.*s' field '%.*s' uses hidden %s '%s'",
+                              is_union ? "union" : "struct",
                               name.length, name.lexeme, fname.length, fname.lexeme,
-                              hidden_name);
+                              fty->is_union ? "union" : "struct", hidden_name);
                 exit(1);
             }
         }
@@ -7118,25 +7416,40 @@ static void parse_struct_decl(Parser *ps, int is_exposed)
         int field_align = type_align_simple(fty);
         if (field_align > max_align)
             max_align = field_align;
-        offset = align_up(offset, field_align);
         int sz = type_sizeof_simple(fty);
         if (fty && fty->kind == TY_STRUCT && sz == 0)
         {
             diag_error_at(lexer_source(ps->lx), fname.line, fname.col,
-                          "struct field '%.*s' has incomplete type", fname.length,
+                          "%s field '%.*s' has incomplete type",
+                          is_union ? "union" : "struct", fname.length,
                           fname.lexeme);
             exit(1);
         }
-        foff[fcnt - 1] = offset;
-        offset += sz;
+        if (is_union)
+        {
+            foff[fcnt - 1] = 0;
+            if (sz > max_size)
+                max_size = sz;
+        }
+        else
+        {
+            offset = align_up(offset, field_align);
+            foff[fcnt - 1] = offset;
+            offset += sz;
+        }
     }
     st->strct.field_names = fnames;
     st->strct.field_types = ftypes;
     st->strct.field_offsets = foff;
     st->strct.field_count = fcnt;
     int struct_align = max_align > 0 ? max_align : 1;
-    offset = align_up(offset, struct_align);
-    st->strct.size_bytes = offset;
+    if (is_union)
+        st->strct.size_bytes = align_up(max_size, struct_align);
+    else
+    {
+        offset = align_up(offset, struct_align);
+        st->strct.size_bytes = offset;
+    }
     // named type already registered above
     if (is_exposed && ps->module_full_name)
         module_registry_register_struct(ps->module_full_name, st);

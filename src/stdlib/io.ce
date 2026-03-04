@@ -101,6 +101,29 @@ hide fun u32_to_hex(u32 val, char* out, i32 cap) -> i32
     ret idx;
 }
 
+hide fun u64_to_hex(u64 val, char* out, i32 cap) -> i32
+{
+    if (cap <= 1)
+        ret 0;
+    constant char* digits = "0123456789abcdef";
+    if (val == 0)
+    {
+        out[0] = '0';
+        out[1] = 0;
+        ret 1;
+    }
+    i32 idx = 0;
+    while (val > 0 && idx < cap - 1)
+    {
+        u64 nibble = val & 0xF;
+        out[idx++] = digits[nibble];
+        val = val >> 4;
+    }
+    reverse_range(out, 0, idx);
+    out[idx] = 0;
+    ret idx;
+}
+
 hide fun u64_to_str(u64 val, char* out, i32 cap) -> i32
 {
     if (cap <= 1)
@@ -312,9 +335,54 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
             i++;
             continue;
         }
+        if (spec == 'f')
+        {
+            char[64] fbuf = {};
+            f64 v = va_arg(*list, f64);
+            i32 flen = f64_to_str(v, fbuf, 64);
+            append_bytes(out, 1024, &out_idx, fbuf, flen, &written);
+            i++;
+            continue;
+        }
         if (spec == 'l')
         {
             char next = fmt[i + 1];
+            if (next == 'x')
+            {
+                char[32] numbuf = {};
+                u64 v = va_arg(*list, u64);
+                i32 nlen = u64_to_hex(v, numbuf, 32);
+                append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+                i = i + 2;
+                continue;
+            }
+            if (next == 'u')
+            {
+                char[32] numbuf = {};
+                u64 v = va_arg(*list, u64);
+                i32 nlen = u64_to_str(v, numbuf, 32);
+                append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+                i = i + 2;
+                continue;
+            }
+            if (next == 'l' && fmt[i + 2] == 'x')
+            {
+                char[32] numbuf = {};
+                u64 v = va_arg(*list, u64);
+                i32 nlen = u64_to_hex(v, numbuf, 32);
+                append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+                i = i + 3;
+                continue;
+            }
+            if (next == 'l' && fmt[i + 2] == 'u')
+            {
+                char[32] numbuf = {};
+                u64 v = va_arg(*list, u64);
+                i32 nlen = u64_to_str(v, numbuf, 32);
+                append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+                i = i + 3;
+                continue;
+            }
             if (next == 'f')
             {
                 char[64] fbuf = {};
@@ -432,9 +500,54 @@ expose fun sprintf(char* buf, i32 cap, char* fmt, ...) -> i32
             i++;
             continue;
         }
+        if (spec == 'f')
+        {
+            char[64] fbuf = {};
+            f64 v = va_arg(list, f64);
+            i32 flen = f64_to_str(v, fbuf, 64);
+            append_bytes(out, 1024, &out_idx, fbuf, flen, &total_written);
+            i++;
+            continue;
+        }
         if (spec == 'l')
         {
             char next = fmt[i + 1];
+            if (next == 'x')
+            {
+                char[32] numbuf = {};
+                u64 v = va_arg(list, u64);
+                i32 nlen = u64_to_hex(v, numbuf, 32);
+                append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
+                i = i + 2;
+                continue;
+            }
+            if (next == 'u')
+            {
+                char[32] numbuf = {};
+                u64 v = va_arg(list, u64);
+                i32 nlen = u64_to_str(v, numbuf, 32);
+                append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
+                i = i + 2;
+                continue;
+            }
+            if (next == 'l' && fmt[i + 2] == 'x')
+            {
+                char[32] numbuf = {};
+                u64 v = va_arg(list, u64);
+                i32 nlen = u64_to_hex(v, numbuf, 32);
+                append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
+                i = i + 3;
+                continue;
+            }
+            if (next == 'l' && fmt[i + 2] == 'u')
+            {
+                char[32] numbuf = {};
+                u64 v = va_arg(list, u64);
+                i32 nlen = u64_to_str(v, numbuf, 32);
+                append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
+                i = i + 3;
+                continue;
+            }
             if (next == 'f')
             {
                 char[64] fbuf = {};

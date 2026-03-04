@@ -3631,7 +3631,9 @@ static int collect_functions_from_unit(const Node *unit,
     out.name = xstrdup(fn->name);
     const char *backend = NULL;
     if (fn->export_name)
-      backend = fn->name;
+      backend = (fn->raw_export_name && fn->metadata.backend_name && fn->metadata.backend_name[0])
+                    ? fn->metadata.backend_name
+                    : fn->name;
     else
       backend = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
     out.backend_name = backend ? xstrdup(backend) : NULL;
@@ -5570,59 +5572,62 @@ int main(int argc, char **argv)
 #define DEFAULT_RUNTIME ""
 #endif
 
-  if (!freestanding_requested)
+  if (!no_link)
   {
-    char stdlib_path[1024];
-    if (!locate_cclib_path(exe_dir, "stdlib", "stdlib.cclib", DEFAULT_STDLIB,
-                           stdlib_path, sizeof(stdlib_path)))
+    if (!freestanding_requested)
     {
-      (void)locate_cclib_path(exe_dir, "src/stdlib", "stdlib.cclib",
-                              DEFAULT_STDLIB, stdlib_path,
-                              sizeof(stdlib_path));
+      char stdlib_path[1024];
+      if (!locate_cclib_path(exe_dir, "stdlib", "stdlib.cclib", DEFAULT_STDLIB,
+                             stdlib_path, sizeof(stdlib_path)))
+      {
+        (void)locate_cclib_path(exe_dir, "src/stdlib", "stdlib.cclib",
+                                DEFAULT_STDLIB, stdlib_path,
+                                sizeof(stdlib_path));
+      }
+
+      if (stdlib_path[0] && is_regular_file(stdlib_path))
+      {
+        ProjectInputList cclib_list = {&cclib_inputs, &cclib_count, &cclib_cap,
+                                       &owned_cclib_inputs, &owned_cclib_count,
+                                       &owned_cclib_cap, NULL};
+        if (push_input_entry(stdlib_path, cclib_list, 1) != 0)
+          goto fail;
+      }
+      else
+      {
+        freestanding = 1;
+        fprintf(stderr,
+                "warning: stdlib not found at '%s'; enabling freestanding (--nostdlib)\n",
+                stdlib_path[0] ? stdlib_path : "<unknown>");
+      }
     }
 
-    if (stdlib_path[0] && is_regular_file(stdlib_path))
     {
-      ProjectInputList cclib_list = {&cclib_inputs, &cclib_count, &cclib_cap,
-                                     &owned_cclib_inputs, &owned_cclib_count,
-                                     &owned_cclib_cap, NULL};
-      if (push_input_entry(stdlib_path, cclib_list, 1) != 0)
+      char runtime_path[1024];
+      if (!locate_cclib_path(exe_dir, "runtime", "runtime.cclib",
+                             DEFAULT_RUNTIME, runtime_path,
+                             sizeof(runtime_path)))
+      {
+        (void)locate_cclib_path(exe_dir, "stdlib", "runtime.cclib",
+                                DEFAULT_RUNTIME, runtime_path,
+                                sizeof(runtime_path));
+      }
+
+      if (runtime_path[0] && is_regular_file(runtime_path))
+      {
+        ProjectInputList cclib_list = {&cclib_inputs, &cclib_count, &cclib_cap,
+                                       &owned_cclib_inputs, &owned_cclib_count,
+                                       &owned_cclib_cap, NULL};
+        if (push_input_entry(runtime_path, cclib_list, 1) != 0)
+          goto fail;
+      }
+      else
+      {
+        fprintf(stderr,
+                "error: runtime.cclib not found at '%s'\n",
+                runtime_path[0] ? runtime_path : "<unknown>");
         goto fail;
-    }
-    else
-    {
-      freestanding = 1;
-      fprintf(stderr,
-              "warning: stdlib not found at '%s'; enabling freestanding (--nostdlib)\n",
-              stdlib_path[0] ? stdlib_path : "<unknown>");
-    }
-  }
-
-  {
-    char runtime_path[1024];
-    if (!locate_cclib_path(exe_dir, "runtime", "runtime.cclib",
-                           DEFAULT_RUNTIME, runtime_path,
-                           sizeof(runtime_path)))
-    {
-      (void)locate_cclib_path(exe_dir, "stdlib", "runtime.cclib",
-                              DEFAULT_RUNTIME, runtime_path,
-                              sizeof(runtime_path));
-    }
-
-    if (runtime_path[0] && is_regular_file(runtime_path))
-    {
-      ProjectInputList cclib_list = {&cclib_inputs, &cclib_count, &cclib_cap,
-                                     &owned_cclib_inputs, &owned_cclib_count,
-                                     &owned_cclib_cap, NULL};
-      if (push_input_entry(runtime_path, cclib_list, 1) != 0)
-        goto fail;
-    }
-    else
-    {
-      fprintf(stderr,
-              "error: runtime.cclib not found at '%s'\n",
-              runtime_path[0] ? runtime_path : "<unknown>");
-      goto fail;
+      }
     }
   }
 
@@ -6733,7 +6738,7 @@ int main(int argc, char **argv)
       }
     }
   }
-  if (!rc && !emit_library &&
+  if (!rc && !emit_library && !no_link &&
       (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
        target_arch == ARCH_BSLASH) &&
       !stop_after_ccb)
