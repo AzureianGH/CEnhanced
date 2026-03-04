@@ -22,6 +22,7 @@ typedef enum
     TK_KW_REG,
     TK_KW_STRUCT,
     TK_KW_STRUC, // alias accepted
+    TK_KW_UNION,
     TK_KW_EXTEND,
     TK_KW_FROM,
     TK_KW_I32,
@@ -72,6 +73,7 @@ typedef enum
     TK_KW_ENTRYPOINT,
     TK_KW_JUMPTARGET,
     TK_KW_EXPORT,
+    TK_KW_RAW,
     TK_KW_PRESERVE,
     TK_KW_SECTION,
     TK_KW_FORCEINLINE,
@@ -209,6 +211,7 @@ typedef struct Type
     int ref_nullability;
     // For TY_STRUCT
     const char *struct_name;
+    int is_union;
     struct
     {
         const char **field_names;
@@ -512,6 +515,7 @@ struct Node
     // Declaration visibility flag (used for ND_FUNC and other decl nodes)
     int is_exposed;
     int export_name; // New export_name field to track the [Export] attribute
+    int raw_export_name;
 };
 
 typedef struct Lexer Lexer;

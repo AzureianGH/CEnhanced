@@ -2177,7 +2177,9 @@ static void populate_symbol_from_function(Symbol *s, Node *fn)
             fn->metadata.backend_name = generated;
     }
     if (fn->export_name)
-        s->backend_name = fn->name;
+        s->backend_name = (fn->raw_export_name && fn->metadata.backend_name && fn->metadata.backend_name[0])
+                              ? fn->metadata.backend_name
+                              : fn->name;
     else
         s->backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
     s->is_extern = 0;
