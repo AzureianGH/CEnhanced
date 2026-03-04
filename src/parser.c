@@ -6092,9 +6092,10 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
 
 static int parse_extend_decl(Parser *ps, int leading_noreturn)
 {
-    // Two forms:
+    // Three forms:
     // 1) extend from "C" i32 printf(char*, _vaargs_);
-    // 2) extend fun name(params) -> ret;   // default ABI "C"
+    // 2) extend from "C" Config g_config_blob;
+    // 3) extend fun name(params) -> ret;   // default ABI "C"
     Token extend_tok = expect(ps, TK_KW_EXTEND, "extend");
     int is_noreturn = leading_noreturn;
     Token next = lexer_peek(ps->lx);
@@ -6234,6 +6235,52 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
     // Simple approach: call parse_type_spec and ignore its optional 'stack'
     Type *ret_ty = parse_type_spec(ps);
     Token name = expect(ps, TK_IDENT, "identifier");
+    Token after_name = lexer_peek(ps->lx);
+    if (after_name.kind == TK_SEMI)
+    {
+        if (is_noreturn)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "'noreturn' is only valid on function declarations");
+            exit(1);
+        }
+
+        lexer_next(ps->lx); // consume ';'
+
+        Symbol s = {0};
+        s.kind = SYM_GLOBAL;
+        char *nm = (char *)xmalloc((size_t)name.length + 1);
+        memcpy(nm, name.lexeme, (size_t)name.length);
+        nm[name.length] = '\0';
+        s.name = nm;
+        s.backend_name = s.name;
+        s.is_extern = 1;
+        s.var_type = ret_ty;
+        s.is_const = 0;
+        if (abi.kind == TK_STRING)
+        {
+            char *ab = (char *)xmalloc((size_t)abi.length - 1);
+            memcpy(ab, abi.lexeme + 1, (size_t)abi.length - 2);
+            ab[abi.length - 2] = '\0';
+            s.abi = ab;
+        }
+        else
+        {
+            char *ab = (char *)xmalloc((size_t)abi.length + 1);
+            memcpy(ab, abi.lexeme, (size_t)abi.length);
+            ab[abi.length] = '\0';
+            s.abi = ab;
+        }
+
+        if (ps->ext_count == ps->ext_cap)
+        {
+            ps->ext_cap = ps->ext_cap ? ps->ext_cap * 2 : 8;
+            ps->externs = (Symbol *)realloc(ps->externs, ps->ext_cap * sizeof(Symbol));
+        }
+        ps->externs[ps->ext_count++] = s;
+        return extend_tok.line;
+    }
+
     expect(ps, TK_LPAREN, "(");
     int is_varargs = 0;
     Type **param_types = NULL;

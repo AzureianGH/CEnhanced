@@ -679,7 +679,7 @@ static int ccb_emit_symbol_list(CcbModule *mod, const Symbol *syms, int count, S
     for (int i = 0; i < count; ++i)
     {
         const Symbol *sym = &syms[i];
-        if (!sym || !sym->is_extern)
+        if (!sym || !sym->is_extern || sym->kind != SYM_FUNC)
             continue;
         const char *symbol_name = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
         if (!symbol_name || !*symbol_name)
