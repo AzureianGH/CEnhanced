@@ -2944,6 +2944,19 @@ static int can_assign(Type *target, Node *rhs)
     }
     if (rhs->type && type_equal(canon_target, rhs->type))
         return 1;
+    {
+        Type *rhs_ty = canonicalize_type_deep(rhs->type);
+        if (canon_target->kind == TY_PTR && rhs_ty && rhs_ty->kind == TY_ARRAY)
+        {
+            Type *target_elem = canonicalize_type_deep(canon_target->pointee);
+            Type *rhs_elem = canonicalize_type_deep(rhs_ty->array.elem);
+            if (target_elem && rhs_elem && type_equal(target_elem, rhs_elem))
+            {
+                rhs->type = canon_target;
+                return 1;
+            }
+        }
+    }
     if (canon_target->kind == TY_PTR && canon_target->pointee && canon_target->pointee->kind == TY_FUNC)
     {
         Type *rhs_ty = canonicalize_type_deep(rhs->type);
@@ -4986,7 +4999,7 @@ static void check_expr(SemaContext *sc, Node *e)
         {
             elem_type = canonicalize_type_deep(lhs_type->pointee);
         }
-        else if (lhs_type->kind == TY_ARRAY && !lhs_type->array.is_unsized)
+        else if (lhs_type->kind == TY_ARRAY)
         {
             elem_type = canonicalize_type_deep(lhs_type->array.elem);
             e->lhs->type = type_ptr(elem_type ? elem_type : &ty_i32);
