@@ -106,6 +106,10 @@ struct Parser
     int import_count;
     int import_cap;
     int suppress_access_for_match;
+    int suppress_arrow_member_for_throw;
+    int module_is_managed;
+    int managed_scope_depth;
+    int unmanaged_scope_depth;
 };
 
 static void parser_push_access_suppression(Parser *ps)
@@ -298,6 +302,44 @@ static void clear_pending_attrs(struct PendingAttr *attrs, int count)
         pending_attr_cleanup(&attrs[i]);
 }
 
+static const char *attribute_name_from_keyword(TokenKind kind)
+{
+    switch (kind)
+    {
+    case TK_KW_OVERRIDEMETADATA:
+        return "OverrideMetadata";
+    case TK_KW_CHANCECODE:
+        return "ChanceCode";
+    case TK_KW_LITERAL:
+        return "Literal";
+    case TK_KW_ENTRYPOINT:
+        return "EntryPoint";
+    case TK_KW_JUMPTARGET:
+        return "JumpTarget";
+    case TK_KW_EXPORT:
+        return "Export";
+    case TK_KW_PRESERVE:
+        return "Preserve";
+    case TK_KW_SECTION:
+        return "Section";
+    case TK_KW_FORCEINLINE:
+        return "ForceInline";
+    case TK_KW_INLINE:
+        return "Inline";
+    case TK_KW_HINT:
+        return "Hint";
+    case TK_KW_NOHINT:
+        return "NoHint";
+    default:
+        return NULL;
+    }
+}
+
+static int token_is_attribute_keyword(TokenKind kind)
+{
+    return attribute_name_from_keyword(kind) != NULL;
+}
+
 static struct PendingAttr parse_attribute(Parser *ps)
 {
     struct PendingAttr attr = {0};
@@ -329,6 +371,44 @@ static struct PendingAttr parse_attribute(Parser *ps)
         expect(ps, TK_RPAREN, ")");
     }
     expect(ps, TK_RBRACKET, "]");
+    return attr;
+}
+
+static struct PendingAttr parse_attribute_keyword(Parser *ps)
+{
+    struct PendingAttr attr = {0};
+    Token keyword = lexer_next(ps->lx);
+    const char *name = attribute_name_from_keyword(keyword.kind);
+    if (!name)
+    {
+        diag_error_at(lexer_source(ps->lx), keyword.line, keyword.col,
+                      "internal parser error: token is not an attribute keyword");
+        exit(1);
+    }
+
+    attr.line = keyword.line;
+    attr.col = keyword.col;
+    attr.name = xstrdup(name);
+
+    Token maybe_paren = lexer_peek(ps->lx);
+    if (maybe_paren.kind == TK_LPAREN)
+    {
+        lexer_next(ps->lx);
+        Token arg = expect(ps, TK_STRING, "string literal");
+        if (arg.length < 2)
+        {
+            diag_error_at(lexer_source(ps->lx), arg.line, arg.col,
+                          "attribute requires string literal argument");
+            exit(1);
+        }
+        int val_len = arg.length - 2;
+        attr.value = (char *)xmalloc((size_t)val_len + 1);
+        if (val_len > 0)
+            memcpy(attr.value, arg.lexeme + 1, (size_t)val_len);
+        attr.value[val_len] = '\0';
+        expect(ps, TK_RPAREN, ")");
+    }
+
     return attr;
 }
 
@@ -804,6 +884,10 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
             fn->is_entrypoint = 1;
             fn->is_preserve = 1;
         }
+        else if (strcmp(attr->name, "JumpTarget") == 0)
+        {
+            fn->is_jump_target = 1;
+        }
         else if (strcmp(attr->name, "Export") == 0)
         {
             fn->export_name = 1;
@@ -1121,7 +1205,7 @@ static void parse_module_path(Parser *ps, char ***out_parts, int *out_count, cha
         *out_full_name = join_parts_with_dot(parts, count);
 }
 
-static void parse_module_decl(Parser *ps)
+static void parse_module_decl(Parser *ps, int managed_mode)
 {
     Token module_tok = expect(ps, TK_KW_MODULE, "module");
     if (ps->module_full_name)
@@ -1138,6 +1222,7 @@ static void parse_module_decl(Parser *ps)
     ps->module_part_count = count;
     ps->module_part_cap = count;
     ps->module_full_name = full;
+    ps->module_is_managed = managed_mode ? 1 : 0;
 }
 
 static int parse_bring_decl(Parser *ps)
@@ -1193,6 +1278,7 @@ static Token expect(Parser *ps, TokenKind k, const char *what)
 static Node *parse_expr(Parser *ps);
 static Node *parse_stmt(Parser *ps);
 static Node *parse_block(Parser *ps);
+static Node *parse_try_stmt(Parser *ps);
 static Node *parse_while(Parser *ps);
 static Node *parse_for(Parser *ps);
 static Node *parse_switch(Parser *ps);
@@ -1210,9 +1296,398 @@ static int parser_peek_struct_literal(Parser *ps, Token look);
 static Node *parse_initializer(Parser *ps);
 static void parse_struct_decl(Parser *ps, int is_exposed);
 static void parse_enum_decl(Parser *ps, int is_exposed);
-static void parse_module_decl(Parser *ps);
+static void parse_module_decl(Parser *ps, int managed_mode);
 static int parse_bring_decl(Parser *ps);
 static int parse_extend_decl(Parser *ps, int leading_noreturn);
+
+static Node *parser_make_var_ref(Parser *ps, const char *name, int line, int col)
+{
+    Node *n = new_node(ND_VAR);
+    n->var_ref = name;
+    n->line = line;
+    n->col = col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
+static Node *parser_make_call0(Parser *ps, const char *name, int line, int col)
+{
+    Node *call = new_node(ND_CALL);
+    call->call_name = name;
+    call->args = NULL;
+    call->arg_count = 0;
+    call->line = line;
+    call->col = col;
+    call->src = lexer_source(ps->lx);
+    return call;
+}
+
+static Node *parser_make_member(Parser *ps, Node *base, const char *field, int line, int col)
+{
+    Node *m = new_node(ND_MEMBER);
+    m->lhs = base;
+    m->field_name = field;
+    m->line = line;
+    m->col = col;
+    m->src = lexer_source(ps->lx);
+    return m;
+}
+
+static Node *parser_make_assign_stmt(Parser *ps, Node *lhs, Node *rhs, int line, int col)
+{
+    Node *as = new_node(ND_ASSIGN);
+    as->lhs = lhs;
+    as->rhs = rhs;
+    as->line = line;
+    as->col = col;
+    as->src = lexer_source(ps->lx);
+
+    Node *es = new_node(ND_EXPR_STMT);
+    es->lhs = as;
+    es->line = line;
+    es->col = col;
+    es->src = lexer_source(ps->lx);
+    return es;
+}
+
+static void parser_try_prepend_stmt(Node *block, Node *stmt)
+{
+    if (!block || !stmt || block->kind != ND_BLOCK)
+        return;
+    int old = block->stmt_count;
+    Node **grown = (Node **)realloc(block->stmts, (size_t)(old + 1) * sizeof(Node *));
+    if (!grown)
+    {
+        diag_error("out of memory while preparing catch block");
+        exit(1);
+    }
+    block->stmts = grown;
+    for (int i = old; i > 0; --i)
+        block->stmts[i] = block->stmts[i - 1];
+    block->stmts[0] = stmt;
+    block->stmt_count = old + 1;
+}
+
+static void parser_try_append_stmt(Node *block, Node *stmt)
+{
+    if (!block || !stmt || block->kind != ND_BLOCK)
+        return;
+    int old = block->stmt_count;
+    Node **grown = (Node **)realloc(block->stmts, (size_t)(old + 1) * sizeof(Node *));
+    if (!grown)
+    {
+        diag_error("out of memory while preparing catch block");
+        exit(1);
+    }
+    block->stmts = grown;
+    block->stmts[old] = stmt;
+    block->stmt_count = old + 1;
+}
+
+static Node *parser_make_empty_block(Parser *ps, int line, int col)
+{
+    Node *b = new_node(ND_BLOCK);
+    b->line = line;
+    b->col = col;
+    b->src = lexer_source(ps->lx);
+    return b;
+}
+
+static void parser_try_append_block_stmts(Node *dst, Node *src)
+{
+    if (!dst || !src || dst->kind != ND_BLOCK || src->kind != ND_BLOCK)
+        return;
+    for (int i = 0; i < src->stmt_count; ++i)
+        parser_try_append_stmt(dst, src->stmts[i]);
+}
+
+static Node *parser_make_bool_lit(Parser *ps, int value, int line, int col)
+{
+    Node *n = new_node(ND_INT);
+    n->int_val = value ? 1 : 0;
+    n->int_uval = (uint64_t)(value ? 1 : 0);
+    n->int_is_unsigned = 0;
+    n->int_width = 0;
+    n->line = line;
+    n->col = col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
+static Node *parser_make_string_lit(Parser *ps, const char *text, int line, int col)
+{
+    Node *s = new_node(ND_STRING);
+    const char *safe = text ? text : "";
+    int len = (int)strlen(safe);
+    char *heap = (char *)xmalloc((size_t)len + 1);
+    memcpy(heap, safe, (size_t)len + 1);
+    s->str_data = heap;
+    s->str_len = len;
+    s->line = line;
+    s->col = col;
+    s->src = lexer_source(ps->lx);
+    return s;
+}
+
+static Node *parser_make_call1(Parser *ps, const char *name, Node *arg0, int line, int col)
+{
+    Node *call = new_node(ND_CALL);
+    call->call_name = name;
+    call->args = (Node **)xcalloc(1, sizeof(Node *));
+    call->args[0] = arg0;
+    call->arg_count = 1;
+    call->line = line;
+    call->col = col;
+    call->src = lexer_source(ps->lx);
+    return call;
+}
+
+static Node *parser_make_not(Parser *ps, Node *expr, int line, int col)
+{
+    Node *n = new_node(ND_LNOT);
+    n->lhs = expr;
+    n->line = line;
+    n->col = col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
+static Node *parser_make_land(Parser *ps, Node *lhs, Node *rhs, int line, int col)
+{
+    Node *n = new_node(ND_LAND);
+    n->lhs = lhs;
+    n->rhs = rhs;
+    n->line = line;
+    n->col = col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
+static char *parser_catch_type_meta(Type *ty)
+{
+    if (!ty)
+        return xstrdup("RuntimeError");
+    if (ty->kind == TY_STRUCT && ty->struct_name)
+    {
+        size_t len = strlen(ty->struct_name);
+        char *s = (char *)xmalloc(len + strlen("struct:") + 1);
+        memcpy(s, "struct:", strlen("struct:"));
+        memcpy(s + strlen("struct:"), ty->struct_name, len + 1);
+        return s;
+    }
+    if (ty->kind == TY_IMPORT && ty->import_type_name)
+    {
+        size_t len = strlen(ty->import_type_name);
+        char *s = (char *)xmalloc(len + strlen("struct:") + 1);
+        memcpy(s, "struct:", strlen("struct:"));
+        memcpy(s + strlen("struct:"), ty->import_type_name, len + 1);
+        return s;
+    }
+    return xstrdup("RuntimeError");
+}
+
+static Node *parse_try_stmt(Parser *ps)
+{
+    Token try_tok = expect(ps, TK_KW_TRY, "try");
+    Node *try_block = parse_block(ps);
+
+    Node *catch_block = NULL;
+    Node *finally_block = NULL;
+    Token next = lexer_peek(ps->lx);
+    if (next.kind == TK_KW_CATCH)
+    {
+        Node *dispatch = new_node(ND_BLOCK);
+        dispatch->line = try_tok.line;
+        dispatch->col = try_tok.col;
+        dispatch->src = lexer_source(ps->lx);
+
+        char matched_name_buf[64];
+        snprintf(matched_name_buf, sizeof(matched_name_buf), "__catch_matched_%d_%d", try_tok.line, try_tok.col);
+        char *matched_name = xstrdup(matched_name_buf);
+
+        Node *matched_decl = new_node(ND_VAR_DECL);
+        matched_decl->var_name = matched_name;
+        static Type tbool = {.kind = TY_BOOL};
+        matched_decl->var_type = &tbool;
+        matched_decl->line = try_tok.line;
+        matched_decl->col = try_tok.col;
+        matched_decl->src = lexer_source(ps->lx);
+        matched_decl->rhs = parser_make_bool_lit(ps, 0, try_tok.line, try_tok.col);
+        parser_try_append_stmt(dispatch, matched_decl);
+
+        while (next.kind == TK_KW_CATCH)
+        {
+            lexer_next(ps->lx);
+            expect(ps, TK_LPAREN, "(");
+            Type *clause_type = parse_type_spec(ps);
+            const char *clause_name = NULL;
+            Node *clause_guard = NULL;
+
+            Token maybe_ident = lexer_peek(ps->lx);
+            if (maybe_ident.kind == TK_IDENT)
+            {
+                Token nm = lexer_next(ps->lx);
+                char *heap = (char *)xmalloc((size_t)nm.length + 1);
+                memcpy(heap, nm.lexeme, (size_t)nm.length);
+                heap[nm.length] = '\0';
+                clause_name = heap;
+            }
+
+            Token guard_q = lexer_peek(ps->lx);
+            if (guard_q.kind == TK_QUESTION)
+            {
+                Token guard_gt = lexer_peek_n(ps->lx, 1);
+                if (guard_gt.kind != TK_GT)
+                {
+                    diag_error_at(lexer_source(ps->lx), guard_q.line, guard_q.col,
+                                  "expected '>' after '?' in catch guard; use '?> <expr>'");
+                    exit(1);
+                }
+                lexer_next(ps->lx);
+                lexer_next(ps->lx);
+                if (!clause_name)
+                {
+                    diag_error_at(lexer_source(ps->lx), guard_q.line, guard_q.col,
+                                  "catch guard requires a catch variable name (e.g. catch (T ex ?> ...))");
+                    exit(1);
+                }
+                clause_guard = parse_expr(ps);
+            }
+
+            expect(ps, TK_RPAREN, ")");
+            Node *user_block = parse_block(ps);
+            Node *clause_block = parser_make_empty_block(ps, try_tok.line, try_tok.col);
+
+            if (clause_name && clause_block)
+            {
+                Node *decl = new_node(ND_VAR_DECL);
+                decl->var_name = clause_name;
+                decl->var_type = clause_type;
+                decl->line = try_tok.line;
+                decl->col = try_tok.col;
+                decl->src = lexer_source(ps->lx);
+                Node *init = new_node(ND_INIT_LIST);
+                init->init.is_zero = 1;
+                init->line = try_tok.line;
+                init->col = try_tok.col;
+                init->src = lexer_source(ps->lx);
+                decl->rhs = init;
+                parser_try_append_stmt(clause_block, decl);
+
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "symbol", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_symbol", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "line", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_line", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "file", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_file", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "message", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_message", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "category", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_category", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
+                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "code", try_tok.line, try_tok.col),
+                    parser_make_call0(ps, "__cert__exception_get_code", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
+            }
+
+            Node *mark_matched = parser_make_assign_stmt(
+                ps,
+                parser_make_var_ref(ps, matched_name, try_tok.line, try_tok.col),
+                parser_make_bool_lit(ps, 1, try_tok.line, try_tok.col),
+                try_tok.line,
+                try_tok.col);
+
+            if (clause_guard)
+            {
+                Node *guard_body = parser_make_empty_block(ps, try_tok.line, try_tok.col);
+                parser_try_append_stmt(guard_body, mark_matched);
+                parser_try_append_block_stmts(guard_body, user_block);
+
+                Node *guard_if = new_node(ND_IF);
+                guard_if->lhs = clause_guard;
+                guard_if->rhs = guard_body;
+                guard_if->body = NULL;
+                guard_if->line = try_tok.line;
+                guard_if->col = try_tok.col;
+                guard_if->src = lexer_source(ps->lx);
+                parser_try_append_stmt(clause_block, guard_if);
+            }
+            else
+            {
+                parser_try_append_stmt(clause_block, mark_matched);
+                parser_try_append_block_stmts(clause_block, user_block);
+            }
+
+            char *meta = parser_catch_type_meta(clause_type);
+            Node *match_call = parser_make_call1(ps, "__cert__exception_matches_type", parser_make_string_lit(ps, meta, try_tok.line, try_tok.col), try_tok.line, try_tok.col);
+            free(meta);
+
+            Node *cond = match_call;
+            cond = parser_make_land(ps,
+                                    parser_make_not(ps, parser_make_var_ref(ps, matched_name, try_tok.line, try_tok.col), try_tok.line, try_tok.col),
+                                    cond,
+                                    try_tok.line,
+                                    try_tok.col);
+
+            Node *if_stmt = new_node(ND_IF);
+            if_stmt->lhs = cond;
+            if_stmt->rhs = clause_block;
+            if_stmt->body = NULL;
+            if_stmt->line = try_tok.line;
+            if_stmt->col = try_tok.col;
+            if_stmt->src = lexer_source(ps->lx);
+            parser_try_append_stmt(dispatch, if_stmt);
+
+            next = lexer_peek(ps->lx);
+        }
+
+        Node *throw_unmatched = new_node(ND_THROW);
+        throw_unmatched->line = try_tok.line;
+        throw_unmatched->col = try_tok.col;
+        throw_unmatched->src = lexer_source(ps->lx);
+
+        Node *unmatched_if = new_node(ND_IF);
+        unmatched_if->lhs = parser_make_not(ps, parser_make_var_ref(ps, matched_name, try_tok.line, try_tok.col), try_tok.line, try_tok.col);
+        unmatched_if->rhs = throw_unmatched;
+        unmatched_if->body = NULL;
+        unmatched_if->line = try_tok.line;
+        unmatched_if->col = try_tok.col;
+        unmatched_if->src = lexer_source(ps->lx);
+        parser_try_append_stmt(dispatch, unmatched_if);
+
+        catch_block = dispatch;
+    }
+
+    next = lexer_peek(ps->lx);
+    if (next.kind == TK_KW_FINALLY)
+    {
+        lexer_next(ps->lx);
+        finally_block = parse_block(ps);
+    }
+
+    if (!catch_block && !finally_block)
+    {
+        diag_error_at(lexer_source(ps->lx), try_tok.line, try_tok.col,
+                      "try statement requires a catch and/or finally block");
+        exit(1);
+    }
+
+    Node *n = new_node(ND_TRY);
+    n->lhs = try_block;
+    n->rhs = catch_block;
+    n->body = finally_block;
+    n->var_type = NULL;
+    n->var_name = NULL;
+    n->type_expr = NULL;
+    n->line = try_tok.line;
+    n->col = try_tok.col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
 
 static int source_only_preprocessor_between(const SourceBuffer *src, int start_line, int end_line)
 {
@@ -1758,9 +2233,11 @@ static int is_type_start(Parser *ps, Token t)
     case TK_KW_DOUBLE:
     case TK_KW_VOID:
     case TK_KW_CHAR:
+    case TK_KW_STRING:
     case TK_KW_BOOL:
     case TK_KW_STACK:
     case TK_KW_ACTION:
+    case TK_KW_OBJECT:
         return 1;
     case TK_KW_REF:
         return 1;
@@ -2015,6 +2492,7 @@ static Type *parse_type_base(Parser *ps)
     static Type tf32 = {.kind = TY_F32}, tf64 = {.kind = TY_F64},
                 tf128 = {.kind = TY_F128};
     static Type tv = {.kind = TY_VOID}, tch = {.kind = TY_CHAR}, tbool = {.kind = TY_BOOL};
+    static Type tobject = {.kind = TY_PTR, .pointee = &tv, .is_object = 1};
     if (b.kind == TK_KW_I8)
         base = &ti8;
     else if (b.kind == TK_KW_U8)
@@ -2051,8 +2529,12 @@ static Type *parse_type_base(Parser *ps)
         base = &tv;
     else if (b.kind == TK_KW_CHAR)
         base = &tch;
+    else if (b.kind == TK_KW_STRING)
+        base = type_ptr(&tch);
     else if (b.kind == TK_KW_BOOL)
         base = &tbool;
+    else if (b.kind == TK_KW_OBJECT)
+        base = &tobject;
     else if (b.kind == TK_KW_LONG)
     {
         // check for 'long double'
@@ -2387,6 +2869,7 @@ static Type *parse_type_spec(Parser *ps)
     static Type tf32 = {.kind = TY_F32}, tf64 = {.kind = TY_F64},
                 tf128 = {.kind = TY_F128};
     static Type tv = {.kind = TY_VOID}, tch = {.kind = TY_CHAR}, tbool = {.kind = TY_BOOL};
+    static Type tobject = {.kind = TY_PTR, .pointee = &tv, .is_object = 1};
     if (b.kind == TK_KW_I8)
         base = &ti8;
     else if (b.kind == TK_KW_U8)
@@ -2423,8 +2906,12 @@ static Type *parse_type_spec(Parser *ps)
         base = &tv;
     else if (b.kind == TK_KW_CHAR)
         base = &tch;
+    else if (b.kind == TK_KW_STRING)
+        base = type_ptr(&tch);
     else if (b.kind == TK_KW_BOOL)
         base = &tbool;
+    else if (b.kind == TK_KW_OBJECT)
+        base = &tobject;
     else if (b.kind == TK_KW_LONG)
     {
         // check for 'long double'
@@ -3710,6 +4197,8 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
         {
             if (p.kind == TK_ACCESS && ps->suppress_access_for_match > 0)
                 break;
+            if (p.kind == TK_ARROW && ps->suppress_arrow_member_for_throw > 0)
+                break;
             Token op = lexer_next(ps->lx);
             Token field = expect(ps, TK_IDENT, "member name");
             // Check for enum scoped constant: EnumType=>Value
@@ -4096,6 +4585,19 @@ static Node *parse_rel(Parser *ps)
     for (;;)
     {
         Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_KW_IS)
+        {
+            Token op = lexer_next(ps->lx);
+            Type *rhs_ty = parse_type_spec(ps);
+            Node *n = new_node(ND_IS);
+            n->lhs = lhs;
+            n->is_type = rhs_ty;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
         if (p.kind == TK_GT || p.kind == TK_LT || p.kind == TK_LTE || p.kind == TK_GTE)
         {
             Token op = lexer_next(ps->lx);
@@ -4127,6 +4629,19 @@ static Node *parse_eq(Parser *ps)
     for (;;)
     {
         Token p = lexer_peek(ps->lx);
+        if (p.kind == TK_EQEQEQ)
+        {
+            Token op = lexer_next(ps->lx);
+            Node *rhs = parse_rel(ps);
+            Node *n = new_node(ND_STRICT_EQ);
+            n->lhs = lhs;
+            n->rhs = rhs;
+            n->line = op.line;
+            n->col = op.col;
+            n->src = lexer_source(ps->lx);
+            lhs = n;
+            continue;
+        }
         if (p.kind == TK_EQEQ)
         {
             Token op = lexer_next(ps->lx);
@@ -4468,6 +4983,38 @@ static Node *parse_inferred_var_decl(Parser *ps, int expect_semicolon)
 static Node *parse_stmt(Parser *ps)
 {
     Token t = lexer_peek(ps->lx);
+    if (t.kind == TK_KW_MANAGED)
+    {
+        lexer_next(ps->lx);
+        Token next = lexer_peek(ps->lx);
+        if (next.kind != TK_LBRACE)
+        {
+            diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                          "expected '{' after 'managed'");
+            exit(1);
+        }
+        ps->managed_scope_depth++;
+        Node *blk = parse_block(ps);
+        ps->managed_scope_depth--;
+        if (blk)
+            blk->is_managed = 1;
+        return blk;
+    }
+    if (t.kind == TK_KW_UNMANAGED)
+    {
+        lexer_next(ps->lx);
+        Token next = lexer_peek(ps->lx);
+        if (next.kind != TK_LBRACE)
+        {
+            diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                          "expected '{' after 'unmanaged'");
+            exit(1);
+        }
+        ps->unmanaged_scope_depth++;
+        Node *blk = parse_block(ps);
+        ps->unmanaged_scope_depth--;
+        return blk;
+    }
     if (t.kind == TK_LBRACE)
         return parse_block(ps);
     if (t.kind == TK_KW_IF)
@@ -4508,6 +5055,38 @@ static Node *parse_stmt(Parser *ps)
     if (t.kind == TK_KW_SWITCH)
     {
         return parse_switch(ps);
+    }
+    if (t.kind == TK_KW_TRY)
+    {
+        return parse_try_stmt(ps);
+    }
+    if (t.kind == TK_KW_THROW)
+    {
+        lexer_next(ps->lx);
+        Token nxt = lexer_peek(ps->lx);
+        Node *expr = NULL;
+        Node *payload = NULL;
+        if (nxt.kind != TK_SEMI)
+        {
+            ps->suppress_arrow_member_for_throw++;
+            expr = parse_expr(ps);
+            if (ps->suppress_arrow_member_for_throw > 0)
+                ps->suppress_arrow_member_for_throw--;
+            Token maybe_arrow = lexer_peek(ps->lx);
+            if (maybe_arrow.kind == TK_ARROW)
+            {
+                lexer_next(ps->lx);
+                payload = parse_expr(ps);
+            }
+        }
+        expect(ps, TK_SEMI, ";");
+        Node *th = new_node(ND_THROW);
+        th->lhs = expr;
+        th->rhs = payload;
+        th->line = t.line;
+        th->col = t.col;
+        th->src = lexer_source(ps->lx);
+        return th;
     }
     if (t.kind == TK_KW_BREAK)
     {
@@ -4552,6 +5131,26 @@ static Node *parse_stmt(Parser *ps)
         r->col = t.col;
         r->src = lexer_source(ps->lx);
         return r;
+    }
+    if (t.kind == TK_KW_JUMP)
+    {
+        lexer_next(ps->lx);
+        Node *expr = parse_expr(ps);
+        if (!expr || expr->kind != ND_CALL)
+        {
+            diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                          "'jump' requires a function-style target expression (e.g. jump target())");
+            exit(1);
+        }
+        expr->call_is_jump = 1;
+        expect(ps, TK_SEMI, ";");
+
+        Node *es = new_node(ND_EXPR_STMT);
+        es->lhs = expr;
+        es->line = expr ? expr->line : t.line;
+        es->col = expr ? expr->col : t.col;
+        es->src = lexer_source(ps->lx);
+        return es;
     }
     if (t.kind == TK_KW_DELETE)
     {
@@ -5138,7 +5737,7 @@ static Node *parse_for(Parser *ps)
     return wh;
 }
 
-static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, FunctionBodyKind body_kind, struct PendingAttr *attrs, int attr_count)
+static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_managed, FunctionBodyKind body_kind, struct PendingAttr *attrs, int attr_count)
 {
     expect(ps, TK_KW_FUN, "fun");
     Token name = expect(ps, TK_IDENT, "identifier");
@@ -5325,6 +5924,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, Functio
     fn->src = lexer_source(ps->lx);
     fn->is_noreturn = is_noreturn;
     fn->is_exposed = is_exposed;
+    fn->is_managed = is_managed ? 1 : 0;
     fn->metadata.declared_param_count = -1;
     fn->metadata.declared_local_count = -1;
     fn->metadata.ret_token = NULL;
@@ -5738,9 +6338,10 @@ Node *parse_unit(Parser *ps)
             }
         }
 
-        while (t.kind == TK_LBRACKET)
+        while (t.kind == TK_LBRACKET || token_is_attribute_keyword(t.kind))
         {
-            struct PendingAttr attr = parse_attribute(ps);
+            struct PendingAttr attr =
+                (t.kind == TK_LBRACKET) ? parse_attribute(ps) : parse_attribute_keyword(ps);
             if (attr_count == attr_cap)
             {
                 int new_cap = attr_cap ? attr_cap * 2 : 4;
@@ -5757,6 +6358,16 @@ Node *parse_unit(Parser *ps)
             t = lexer_peek(ps->lx);
         }
 
+        int managed_override_present = 0;
+        int managed_override_value = 0;
+        if (t.kind == TK_KW_MANAGED || t.kind == TK_KW_UNMANAGED)
+        {
+            Token managed_tok = lexer_next(ps->lx);
+            managed_override_present = 1;
+            managed_override_value = (managed_tok.kind == TK_KW_MANAGED) ? 1 : 0;
+            t = lexer_peek(ps->lx);
+        }
+
         if (t.kind == TK_KW_MODULE)
         {
             if (attr_count > 0)
@@ -5765,7 +6376,7 @@ Node *parse_unit(Parser *ps)
                               "attributes are not supported on module declarations");
                 exit(1);
             }
-            parse_module_decl(ps);
+            parse_module_decl(ps, managed_override_present ? managed_override_value : 0);
             continue;
         }
         if (t.kind == TK_KW_BRING)
@@ -5839,6 +6450,13 @@ Node *parse_unit(Parser *ps)
             diag_error_at(lexer_source(ps->lx), err_tok.line, err_tok.col,
                           "unexpected end of file after '%.*s'",
                           err_tok.length, err_tok.lexeme);
+            exit(1);
+        }
+
+        if (managed_override_present && t.kind != TK_KW_FUN)
+        {
+            diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                          "'managed'/'unmanaged' is only valid before 'module' or 'fun' declarations");
             exit(1);
         }
 
@@ -5973,7 +6591,8 @@ Node *parse_unit(Parser *ps)
             else if (has_literal)
                 body_kind = FN_BODY_LITERAL;
             (void)0;
-            Node *fn = parse_function(ps, leading_noreturn, visibility, body_kind, attrs, attr_count);
+            int function_is_managed = managed_override_present ? managed_override_value : ps->module_is_managed;
+            Node *fn = parse_function(ps, leading_noreturn, visibility, function_is_managed, body_kind, attrs, attr_count);
             apply_function_attributes(ps, fn, attrs, attr_count);
             clear_pending_attrs(attrs, attr_count);
             attr_count = 0;
@@ -6131,6 +6750,7 @@ Node *parse_unit(Parser *ps)
         u->module_path.part_count = ps->module_part_count;
         u->module_path.full_name = ps->module_full_name;
     }
+    u->module_is_managed = ps->module_is_managed;
 
     if (ps->import_count > 0)
     {

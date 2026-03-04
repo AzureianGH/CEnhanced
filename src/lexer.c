@@ -557,6 +557,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_VOID;
     else if (len == 4 && strncmp(p, "char", 4) == 0)
         k = TK_KW_CHAR;
+    else if (len == 6 && strncmp(p, "string", 6) == 0)
+        k = TK_KW_STRING;
     else if (len == 4 && strncmp(p, "bool", 4) == 0)
         k = TK_KW_BOOL;
     else if (len == 3 && strncmp(p, "ref", 3) == 0)
@@ -603,10 +605,44 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_WHILE;
     else if (len == 5 && strncmp(p, "match", 5) == 0)
         k = TK_KW_MATCH;
+    else if (len == 3 && strncmp(p, "try", 3) == 0)
+        k = TK_KW_TRY;
+    else if (len == 5 && strncmp(p, "catch", 5) == 0)
+        k = TK_KW_CATCH;
+    else if (len == 7 && strncmp(p, "finally", 7) == 0)
+        k = TK_KW_FINALLY;
+    else if (len == 5 && strncmp(p, "throw", 5) == 0)
+        k = TK_KW_THROW;
     else if (len == 5 && strncmp(p, "break", 5) == 0)
         k = TK_KW_BREAK;
     else if (len == 8 && strncmp(p, "continue", 8) == 0)
         k = TK_KW_CONTINUE;
+    else if (len == 4 && strncmp(p, "jump", 4) == 0)
+        k = TK_KW_JUMP;
+    else if (len == 10 && strncmp(p, "chancecode", 10) == 0)
+        k = TK_KW_CHANCECODE;
+    else if (len == 7 && strncmp(p, "literal", 7) == 0)
+        k = TK_KW_LITERAL;
+    else if (len == 10 && strncmp(p, "entrypoint", 10) == 0)
+        k = TK_KW_ENTRYPOINT;
+    else if (len == 10 && strncmp(p, "jumptarget", 10) == 0)
+        k = TK_KW_JUMPTARGET;
+    else if (len == 6 && strncmp(p, "export", 6) == 0)
+        k = TK_KW_EXPORT;
+    else if (len == 8 && strncmp(p, "preserve", 8) == 0)
+        k = TK_KW_PRESERVE;
+    else if (len == 7 && strncmp(p, "section", 7) == 0)
+        k = TK_KW_SECTION;
+    else if (len == 11 && strncmp(p, "forceinline", 11) == 0)
+        k = TK_KW_FORCEINLINE;
+    else if (len == 6 && strncmp(p, "inline", 6) == 0)
+        k = TK_KW_INLINE;
+    else if (len == 4 && strncmp(p, "hint", 4) == 0)
+        k = TK_KW_HINT;
+    else if (len == 6 && strncmp(p, "nohint", 6) == 0)
+        k = TK_KW_NOHINT;
+    else if (len == 16 && strncmp(p, "overridemetadata", 16) == 0)
+        k = TK_KW_OVERRIDEMETADATA;
     else if (len == 4 && strncmp(p, "enum", 4) == 0)
         k = TK_KW_ENUM;
     else if (len == 3 && strncmp(p, "for", 3) == 0)
@@ -615,6 +651,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_ALIAS;
     else if (len == 2 && strncmp(p, "as", 2) == 0)
         k = TK_KW_AS;
+    else if (len == 2 && strncmp(p, "is", 2) == 0)
+        k = TK_KW_IS;
     else if (len == 6 && strncmp(p, "sizeof", 6) == 0)
         k = TK_KW_SIZEOF;
     else if (len == 6 && strncmp(p, "typeof", 6) == 0)
@@ -623,6 +661,12 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_ALIGNOF;
     else if (len == 8 && strncmp(p, "offsetof", 8) == 0)
         k = TK_KW_OFFSETOF;
+    else if (len == 7 && strncmp(p, "managed", 7) == 0)
+        k = TK_KW_MANAGED;
+    else if (len == 9 && strncmp(p, "unmanaged", 9) == 0)
+        k = TK_KW_UNMANAGED;
+    else if (len == 6 && strncmp(p, "object", 6) == 0)
+        k = TK_KW_OBJECT;
     return make_tok(lx, k, p, len);
 }
 
@@ -867,6 +911,13 @@ Token lexer_next(Lexer *lx)
     }
     if (c == '=')
     {
+        if (lx->idx + 2 < lx->src.length && lx->src.src[lx->idx + 1] == '=' && lx->src.src[lx->idx + 2] == '=')
+        {
+            getc2(lx);
+            getc2(lx);
+            getc2(lx);
+            return make_tok(lx, TK_EQEQEQ, lx->src.src + lx->idx - 3, 3);
+        }
         if (lx->idx + 1 < lx->src.length && lx->src.src[lx->idx + 1] == '=')
         {
             getc2(lx);

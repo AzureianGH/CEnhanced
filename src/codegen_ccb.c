@@ -1,4 +1,5 @@
 #include "ast.h"
+#include "ccsim.h"
 #include "cc/bytecode.h"
 
 #include <errno.h>
@@ -361,6 +362,9 @@ typedef struct
     StringList lines;
     StringList debug_files;
     StringList defined_funcs;
+    StringList interned_string_keys;
+    StringList interned_string_symbols;
+    int next_interned_string_id;
     bool emit_debug;
 } CcbModule;
 
@@ -417,6 +421,7 @@ static bool ccb_store_array_bytes(const Type *array_type, const Node *expr, uint
 static bool ccb_flatten_array_initializer(const Type *array_type, const Node *init, uint8_t **out_bytes, size_t *out_size);
 static bool ccb_flatten_struct_initializer(const Type *struct_type, const Node *init, uint8_t **out_bytes, size_t *out_size);
 static char *ccb_encode_bytes_literal(const uint8_t *data, size_t len);
+static const char *ccb_module_intern_hidden_byte_string(CcbModule *mod, const char *base, const uint8_t *data, size_t len);
 static bool ccb_is_string_ptr_type(const Type *ty);
 static char *ccb_make_string_symbol(const char *base, int index);
 static bool ccb_emit_string_ptr_array_global(CcbModule *mod, const char *name, const Type *array_type, const Node *init,
@@ -432,8 +437,11 @@ static int ccb_emit_convert_between(CcbFunctionBuilder *fb, CCValueType from_ty,
 static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCValueType *out_elem_ty, const Type **out_elem_type);
 static int ccb_emit_member_address(CcbFunctionBuilder *fb, const Node *expr, CCValueType *out_field_ty, const Type **out_field_type);
 static size_t ccb_pointer_elem_size(const Type *ptr_type);
+static char *ccb_escape_string_literal(const char *data, int len);
 static int ccb_emit_pointer_add_like(CcbFunctionBuilder *fb, const Node *expr, bool is_add);
 static int ccb_emit_pointer_difference(CcbFunctionBuilder *fb, const Node *expr);
+static int ccb_emit_string_equality_compare(CcbFunctionBuilder *fb, const Node *expr);
+static int ccb_emit_string_length_expr(CcbFunctionBuilder *fb, const Node *expr);
 static int ccb_emit_struct_zero(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *struct_type);
 static int ccb_emit_struct_initializer(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *struct_type, const Node *init);
 static int ccb_emit_array_zero(CcbFunctionBuilder *fb, const Node *var_decl, const char *var_name, const Type *array_type);
@@ -474,10 +482,13 @@ static void ccb_opt_propagate_local_values(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_dead_local_stores(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_dead_local_copies(CcbFunctionBuilder *fb);
 static void ccb_opt_simplify_addr_local_temp(CcbFunctionBuilder *fb);
+static void ccb_opt_simplify_bool_normalization(CcbFunctionBuilder *fb);
 static void ccb_opt_simplify_const_branches(CcbFunctionBuilder *fb);
+static void ccb_opt_remove_unreachable_fallthrough(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_redundant_jumps(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_unused_labels(CcbFunctionBuilder *fb);
 static void ccb_opt_inline_const_str_locals(CcbFunctionBuilder *fb);
+static void ccb_opt_remove_nops(CcbFunctionBuilder *fb);
 static const char *ccb_trim_leading_ws(const char *line);
 static const char *ccb_binop_symbol(const char *op);
 static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, const Node *target_fn);
@@ -489,6 +500,9 @@ static void ccb_module_init(CcbModule *mod)
     string_list_init(&mod->lines);
     string_list_init(&mod->debug_files);
     string_list_init(&mod->defined_funcs);
+    string_list_init(&mod->interned_string_keys);
+    string_list_init(&mod->interned_string_symbols);
+    mod->next_interned_string_id = 0;
     mod->emit_debug = false;
 }
 
@@ -502,6 +516,9 @@ static void ccb_module_free(CcbModule *mod)
     string_list_free(&mod->lines);
     string_list_free(&mod->debug_files);
     string_list_free(&mod->defined_funcs);
+    string_list_free(&mod->interned_string_keys);
+    string_list_free(&mod->interned_string_symbols);
+    mod->next_interned_string_id = 0;
     mod->emit_debug = false;
 }
 
@@ -1692,6 +1709,118 @@ static int ccb_module_has_function(const CcbModule *mod, const char *name)
         if (symbol[0] != '\0' && strcmp(symbol, name) == 0)
             return 1;
     }
+    return 0;
+}
+
+static bool ccb_type_is_object_ast(const Type *ty)
+{
+    const Type *t = ty;
+    while (t && t->kind == TY_REF)
+        t = t->pointee;
+    return t && t->is_object;
+}
+
+static void ccb_type_metadata_name(const Type *ty, char *buffer, size_t bufsz)
+{
+    if (!buffer || bufsz == 0)
+        return;
+    const Type *t = ty;
+    while (t && t->kind == TY_REF)
+        t = t->pointee;
+    if (!t)
+    {
+        snprintf(buffer, bufsz, "unknown");
+        return;
+    }
+    if (t->is_object)
+    {
+        snprintf(buffer, bufsz, "object");
+        return;
+    }
+    switch (t->kind)
+    {
+    case TY_I8:
+        snprintf(buffer, bufsz, "i8");
+        return;
+    case TY_U8:
+        snprintf(buffer, bufsz, "u8");
+        return;
+    case TY_I16:
+        snprintf(buffer, bufsz, "i16");
+        return;
+    case TY_U16:
+        snprintf(buffer, bufsz, "u16");
+        return;
+    case TY_I32:
+        snprintf(buffer, bufsz, "i32");
+        return;
+    case TY_U32:
+        snprintf(buffer, bufsz, "u32");
+        return;
+    case TY_I64:
+        snprintf(buffer, bufsz, "i64");
+        return;
+    case TY_U64:
+        snprintf(buffer, bufsz, "u64");
+        return;
+    case TY_F32:
+        snprintf(buffer, bufsz, "f32");
+        return;
+    case TY_F64:
+        snprintf(buffer, bufsz, "f64");
+        return;
+    case TY_CHAR:
+        snprintf(buffer, bufsz, "char");
+        return;
+    case TY_BOOL:
+        snprintf(buffer, bufsz, "bool");
+        return;
+    case TY_PTR:
+        if (t->pointee && t->pointee->kind == TY_STRUCT && t->pointee->struct_name)
+        {
+            snprintf(buffer, bufsz, "ptr(struct:%s)", t->pointee->struct_name);
+            return;
+        }
+        if (t->pointee && t->pointee->kind == TY_CHAR)
+        {
+            snprintf(buffer, bufsz, "string");
+            return;
+        }
+        snprintf(buffer, bufsz, "ptr");
+        return;
+    case TY_STRUCT:
+        snprintf(buffer, bufsz, "struct:%s", t->struct_name ? t->struct_name : "anon");
+        return;
+    case TY_ARRAY:
+        snprintf(buffer, bufsz, "array");
+        return;
+    default:
+        snprintf(buffer, bufsz, "%s", cc_type_name(map_type_to_cc(t)));
+        return;
+    }
+}
+
+static int ccb_emit_const_str_lit(CcbFunctionBuilder *fb, const char *text)
+{
+    if (!fb)
+        return 1;
+    const char *safe = text ? text : "";
+    char *escaped = ccb_escape_string_literal(safe, (int)strlen(safe));
+    if (!escaped)
+        return 1;
+    bool ok = string_list_appendf(&fb->body, "  const_str \"%s\"", escaped);
+    free(escaped);
+    return ok ? 0 : 1;
+}
+
+static int ccb_ensure_runtime_extern(CcbFunctionBuilder *fb, const char *name, const char *ret_ty, const char *params)
+{
+    if (!fb || !fb->module || !name || !ret_ty || !params)
+        return 1;
+    if (ccb_module_has_function(fb->module, name) || ccb_module_has_extern(fb->module, name))
+        return 0;
+    if (!ccb_module_appendf(fb->module, ".extern %s params=%s returns=%s", name, params, ret_ty))
+        return 1;
     return 0;
 }
 
@@ -3626,7 +3755,7 @@ static void ccb_opt_fold_string_copy_loop(CcbFunctionBuilder *fb)
         !ccb_module_has_extern(fb->module, "__cert__strlen"))
     {
         if (!ccb_module_appendf(fb->module,
-                                ".extern __cert__strlen params=(ptr) returns=u64"))
+                                ".extern __cert__strlen params=(ptr,ptr,u64,ptr) returns=u64"))
             return;
     }
     if (!ccb_module_has_function(fb->module, "__cert__memcpy") &&
@@ -3639,7 +3768,10 @@ static void ccb_opt_fold_string_copy_loop(CcbFunctionBuilder *fb)
 
     string_list_remove_range(body, 0, body->count);
     string_list_append(body, "  load_param 0");
-    string_list_append(body, "  call __cert__strlen u64 (ptr)");
+    string_list_append(body, "  const ptr null");
+    string_list_append(body, "  const u64 0");
+    string_list_append(body, "  const ptr null");
+    string_list_append(body, "  call __cert__strlen u64 (ptr,ptr,u64,ptr)");
     string_list_append(body, "  convert trunc u64 i32");
     string_list_append(body, "  store_local 0");
     string_list_append(body, "  load_param 1");
@@ -3840,6 +3972,7 @@ static bool ccb_instruction_is_control_barrier(const char *line)
         return true;
     return strncmp(line, "label ", 6) == 0 ||
            strncmp(line, "jump ", 5) == 0 ||
+           strncmp(line, "jump_indirect", 13) == 0 ||
            strncmp(line, "branch ", 7) == 0 ||
            strncmp(line, "ret", 3) == 0;
 }
@@ -3850,6 +3983,7 @@ static bool ccb_instruction_is_terminator(const char *line)
     if (!line || *line == '\0')
         return false;
     return strncmp(line, "jump ", 5) == 0 ||
+           strncmp(line, "jump_indirect", 13) == 0 ||
            strncmp(line, "branch ", 7) == 0 ||
            strncmp(line, "ret", 3) == 0;
 }
@@ -4027,6 +4161,175 @@ static void ccb_opt_simplify_const_branches(CcbFunctionBuilder *fb)
         string_list_remove_range(body, i, 1);
         if (i > 0)
             --i;
+    }
+}
+
+static void ccb_opt_simplify_bool_normalization(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+
+    StringList *body = &fb->body;
+    size_t i = 0;
+    while (i + 1 < body->count)
+    {
+        if (i == 0)
+        {
+            ++i;
+            continue;
+        }
+
+        CcbConstInfo cinfo;
+        if (!ccb_parse_const_info(body->items[i], &cinfo) || strcmp(cinfo.type, "i1") != 0 || cinfo.u != 0)
+        {
+            ++i;
+            continue;
+        }
+
+        char op[16] = {0};
+        char type_name[16] = {0};
+        bool is_unsigned = false;
+        if (!ccb_parse_compare_info(body->items[i + 1], op, sizeof(op), type_name,
+                                    sizeof(type_name), &is_unsigned) ||
+            is_unsigned || strcmp(op, "ne") != 0 || strcmp(type_name, "i1") != 0)
+        {
+            ++i;
+            continue;
+        }
+
+        string_list_remove_range(body, i, 2);
+        if (i > 0)
+            --i;
+    }
+}
+
+static void ccb_opt_remove_unreachable_fallthrough(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+
+    StringList *body = &fb->body;
+    if (body->count == 0)
+        return;
+
+    StringList referenced;
+    string_list_init(&referenced);
+
+    for (size_t i = 0; i < body->count; ++i)
+    {
+        char jump_label[64] = {0};
+        if (ccb_parse_jump_target(body->items[i], jump_label, sizeof(jump_label)))
+        {
+            if (!string_list_contains(&referenced, jump_label))
+                string_list_append(&referenced, jump_label);
+            continue;
+        }
+
+        char true_label[64] = {0};
+        char false_label[64] = {0};
+        if (!ccb_parse_branch_targets(body->items[i], true_label, sizeof(true_label),
+                                      false_label, sizeof(false_label)))
+            continue;
+
+        if (!string_list_contains(&referenced, true_label))
+            string_list_append(&referenced, true_label);
+        if (!string_list_contains(&referenced, false_label))
+            string_list_append(&referenced, false_label);
+    }
+
+    bool reachable = true;
+    for (size_t i = 0; i < body->count;)
+    {
+        char label[64] = {0};
+        if (ccb_parse_label_name(body->items[i], label, sizeof(label)))
+        {
+            bool has_inbound = string_list_contains(&referenced, label) != 0;
+            if (!reachable && !has_inbound)
+            {
+                string_list_remove_range(body, i, 1);
+                continue;
+            }
+            reachable = reachable || has_inbound;
+            ++i;
+            continue;
+        }
+
+        if (!reachable)
+        {
+            string_list_remove_range(body, i, 1);
+            continue;
+        }
+
+        if (ccb_instruction_is_terminator(body->items[i]))
+            reachable = false;
+        ++i;
+    }
+
+    string_list_free(&referenced);
+}
+
+static bool ccb_rewrite_label_target(StringList *body, const char *from_label, const char *to_label)
+{
+    if (!body || !from_label || !to_label || strcmp(from_label, to_label) == 0)
+        return false;
+
+    bool changed = false;
+    for (size_t i = 0; i < body->count; ++i)
+    {
+        char jump_label[64] = {0};
+        if (ccb_parse_jump_target(body->items[i], jump_label, sizeof(jump_label)))
+        {
+            if (strcmp(jump_label, from_label) == 0)
+            {
+                if (ccb_replace_linef(body, i, "  jump %s", to_label))
+                    changed = true;
+            }
+            continue;
+        }
+
+        char true_label[64] = {0};
+        char false_label[64] = {0};
+        if (!ccb_parse_branch_targets(body->items[i], true_label, sizeof(true_label),
+                                      false_label, sizeof(false_label)))
+            continue;
+
+        bool rewrite_true = strcmp(true_label, from_label) == 0;
+        bool rewrite_false = strcmp(false_label, from_label) == 0;
+        if (!rewrite_true && !rewrite_false)
+            continue;
+
+        const char *new_true = rewrite_true ? to_label : true_label;
+        const char *new_false = rewrite_false ? to_label : false_label;
+        if (ccb_replace_linef(body, i, "  branch %s %s", new_true, new_false))
+            changed = true;
+    }
+
+    return changed;
+}
+
+static void ccb_opt_merge_consecutive_labels(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+
+    StringList *body = &fb->body;
+    if (body->count < 2)
+        return;
+
+    size_t i = 0;
+    while (i + 1 < body->count)
+    {
+        char keep_label[64] = {0};
+        char merge_label[64] = {0};
+        if (!ccb_parse_label_name(body->items[i], keep_label, sizeof(keep_label)) ||
+            !ccb_parse_label_name(body->items[i + 1], merge_label, sizeof(merge_label)))
+        {
+            ++i;
+            continue;
+        }
+
+        ccb_rewrite_label_target(body, merge_label, keep_label);
+        string_list_remove_range(body, i + 1, 1);
     }
 }
 
@@ -4235,6 +4538,23 @@ static void ccb_opt_remove_unused_labels(CcbFunctionBuilder *fb)
     string_list_free(&referenced);
 }
 
+static void ccb_opt_remove_nops(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+    StringList *body = &fb->body;
+    for (size_t i = 0; i < body->count;)
+    {
+        const char *line = ccb_trim_leading_ws(body->items[i]);
+        if (line && strcmp(line, "nop") == 0)
+        {
+            string_list_remove_range(body, i, 1);
+            continue;
+        }
+        ++i;
+    }
+}
+
 static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *opts)
 {
     if (!fb || !opts || opts->opt_level <= 0)
@@ -4342,10 +4662,25 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
             compiler_verbose_logf("optimizer", "pass fold test_null constants");
         ccb_opt_fold_const_test_null(fb);
         if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass simplify bool normalization");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass simplify bool normalization");
+        ccb_opt_simplify_bool_normalization(fb);
+        if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass simplify const branches");
         if (compiler_verbose_enabled())
             compiler_verbose_logf("optimizer", "pass simplify const branches");
         ccb_opt_simplify_const_branches(fb);
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass remove unreachable fallthrough");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass remove unreachable fallthrough");
+        ccb_opt_remove_unreachable_fallthrough(fb);
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass merge consecutive labels");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass merge consecutive labels");
+        ccb_opt_merge_consecutive_labels(fb);
         if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass remove redundant jumps");
         if (compiler_verbose_enabled())
@@ -4414,6 +4749,52 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
         if (compiler_verbose_enabled())
             compiler_verbose_logf("optimizer", "pass fold zero-init memset");
         ccb_opt_fold_zero_init_memset(fb);
+
+        if (compiler_verbose_deep_enabled())
+            fprintf(stderr, "\x1b[31m& CCSim hardcore simulation\x1b[0m\n");
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass ccsim (final)");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass ccsim (final)");
+        CcsimOptions ccsim_options;
+        ccsim_options.opt_level = opts->opt_level;
+        ccsim_options.aggressive = (fb->fn && !fb->fn->is_exposed && !fb->fn->export_name) ? 1 : 0;
+        CcsimStats ccsim_stats;
+        memset(&ccsim_stats, 0, sizeof(ccsim_stats));
+        if (fb->module)
+        {
+            const char *vm_fn_name = (fb->fn && fb->fn->metadata.backend_name) ? fb->fn->metadata.backend_name :
+                                     ((fb->fn && fb->fn->name) ? fb->fn->name : NULL);
+            if (fb->fn && fb->fn->export_name && fb->fn->name)
+                vm_fn_name = fb->fn->name;
+            if (vm_fn_name)
+            {
+                int vm_collapsed = ccsim_vm_collapse_hidden_function(fb->body.items, fb->body.count,
+                                                                      vm_fn_name,
+                                                                      fb->module->lines.items, fb->module->lines.count,
+                                                                      &ccsim_options, &ccsim_stats);
+                if (vm_collapsed && compiler_verbose_deep_enabled())
+                    compiler_verbose_treef("ccsim-vm", "|-", "collapsed '%s'", vm_fn_name);
+                else if (vm_collapsed && compiler_verbose_enabled())
+                    compiler_verbose_logf("ccsim-vm", "collapsed '%s'", vm_fn_name);
+            }
+            ccsim_collapse_hidden_calls(fb->body.items, fb->body.count,
+                                        fb->module->lines.items, fb->module->lines.count,
+                                        &ccsim_options, &ccsim_stats);
+        }
+        ccsim_optimize_lines(fb->body.items, fb->body.count, &ccsim_options, &ccsim_stats);
+        ccb_opt_remove_nops(fb);
+        ccb_opt_remove_unreachable_fallthrough(fb);
+        ccb_opt_remove_unused_labels(fb);
+        ccb_opt_remove_redundant_jumps(fb);
+        if (compiler_verbose_enabled() && (ccsim_stats.vm_collapsed_functions || ccsim_stats.rewritten_load_locals || ccsim_stats.const_folds || ccsim_stats.collapsed_hidden_calls))
+            compiler_verbose_logf("optimizer", "ccsim: passes=%zu vm-collapses=%zu call-collapses=%zu rewrites=%zu folds=%zu barriers=%zu",
+                                  ccsim_stats.passes,
+                                  ccsim_stats.vm_collapsed_functions,
+                                  ccsim_stats.collapsed_hidden_calls,
+                                  ccsim_stats.rewritten_load_locals,
+                                  ccsim_stats.const_folds,
+                                  ccsim_stats.simulation_barriers);
     }
 
     if (compiler_verbose_enabled())
@@ -5501,6 +5882,134 @@ static int ccb_emit_pointer_difference(CcbFunctionBuilder *fb, const Node *expr)
     return 0;
 }
 
+static int ccb_emit_string_equality_compare(CcbFunctionBuilder *fb, const Node *expr)
+{
+    if (!fb || !expr || !expr->lhs || !expr->rhs)
+        return 1;
+
+    Type *lhs_type = expr->lhs->type ? expr->lhs->type : type_ptr(type_char());
+    Type *rhs_type = expr->rhs->type ? expr->rhs->type : type_ptr(type_char());
+
+    CcbLocal *lhs_local = ccb_local_add(fb, NULL, lhs_type, false, false);
+    if (!lhs_local)
+        return 1;
+    int lhs_local_index = lhs_local->index;
+    bool lhs_local_is_param = lhs_local->is_param;
+    if (ccb_emit_expr_basic(fb, expr->lhs))
+        return 1;
+    if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->lhs), CC_TYPE_PTR, expr->lhs))
+        return 1;
+    if (expr->lhs->type && expr->lhs->type->kind == TY_REF)
+    {
+        if (!ccb_emit_load_indirect(&fb->body, CC_TYPE_PTR))
+            return 1;
+    }
+    if (!ccb_emit_store_local(fb, lhs_local))
+        return 1;
+
+    CcbLocal *rhs_local = ccb_local_add(fb, NULL, rhs_type, false, false);
+    if (!rhs_local)
+        return 1;
+    int rhs_local_index = rhs_local->index;
+    bool rhs_local_is_param = rhs_local->is_param;
+    if (ccb_emit_expr_basic(fb, expr->rhs))
+        return 1;
+    if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->rhs), CC_TYPE_PTR, expr->rhs))
+        return 1;
+    if (expr->rhs->type && expr->rhs->type->kind == TY_REF)
+    {
+        if (!ccb_emit_load_indirect(&fb->body, CC_TYPE_PTR))
+            return 1;
+    }
+    if (!ccb_emit_store_local(fb, rhs_local))
+        return 1;
+
+    if (!ccb_module_has_function(fb->module, "__cert__strcmp") && !ccb_module_has_extern(fb->module, "__cert__strcmp"))
+    {
+        if (!ccb_module_appendf(fb->module, ".extern __cert__strcmp params=(ptr,ptr) returns=i32"))
+            return 1;
+    }
+
+    if (!string_list_appendf(&fb->body, lhs_local_is_param ? "  load_param %d" : "  load_local %d", lhs_local_index))
+        return 1;
+    if (!string_list_appendf(&fb->body, rhs_local_is_param ? "  load_param %d" : "  load_local %d", rhs_local_index))
+        return 1;
+    if (!string_list_appendf(&fb->body, "  call __cert__strcmp i32 (ptr,ptr)"))
+        return 1;
+    if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+        return 1;
+    if (!string_list_appendf(&fb->body, "  compare %s %s", expr->kind == ND_EQ ? "eq" : "ne", cc_type_name(CC_TYPE_I32)))
+        return 1;
+
+    return 0;
+}
+
+static int ccb_emit_string_length_expr(CcbFunctionBuilder *fb, const Node *expr)
+{
+    if (!fb || !expr || expr->kind != ND_MEMBER || !expr->lhs)
+        return 1;
+
+    if (!expr->field_name || strcmp(expr->field_name, "length") != 0)
+        return 1;
+    if (!ccb_is_string_ptr_type(expr->lhs->type))
+        return 1;
+
+    if (!ccb_module_has_function(fb->module, "__cert__strlen") && !ccb_module_has_extern(fb->module, "__cert__strlen"))
+    {
+        if (!ccb_module_appendf(fb->module, ".extern __cert__strlen params=(ptr,ptr,u64,ptr) returns=u64"))
+            return 1;
+    }
+
+    if (ccb_emit_expr_basic(fb, expr->lhs))
+        return 1;
+    if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->lhs), CC_TYPE_PTR, expr->lhs))
+        return 1;
+    if (expr->lhs->type && expr->lhs->type->kind == TY_REF)
+    {
+        if (!ccb_emit_load_indirect(&fb->body, CC_TYPE_PTR))
+            return 1;
+    }
+
+    const char *file_name = (expr->src && expr->src->filename) ? expr->src->filename : "";
+    const char *symbol_name = "<string>";
+    if (expr->lhs->kind == ND_VAR && expr->lhs->var_ref && *expr->lhs->var_ref)
+        symbol_name = expr->lhs->var_ref;
+
+    size_t file_len = strlen(file_name);
+    uint8_t *file_bytes = (uint8_t *)malloc(file_len + 1);
+    if (!file_bytes)
+        return 1;
+    memcpy(file_bytes, file_name, file_len);
+    file_bytes[file_len] = 0;
+    const char *file_sym = ccb_module_intern_hidden_byte_string(fb->module, "file", file_bytes, file_len + 1);
+    free(file_bytes);
+    if (!file_sym)
+        return 1;
+
+    size_t symbol_len = strlen(symbol_name);
+    uint8_t *name_bytes = (uint8_t *)malloc(symbol_len + 1);
+    if (!name_bytes)
+        return 1;
+    memcpy(name_bytes, symbol_name, symbol_len);
+    name_bytes[symbol_len] = 0;
+    const char *name_sym = ccb_module_intern_hidden_byte_string(fb->module, "name", name_bytes, symbol_len + 1);
+    free(name_bytes);
+    if (!name_sym)
+        return 1;
+
+    if (!ccb_emit_addr_global(&fb->body, file_sym))
+        return 1;
+    if (!ccb_emit_const_u64(&fb->body, CC_TYPE_U64, (uint64_t)expr->line))
+        return 1;
+    if (!ccb_emit_addr_global(&fb->body, name_sym))
+        return 1;
+
+    if (!string_list_appendf(&fb->body, "  call __cert__strlen u64 (ptr,ptr,u64,ptr)"))
+        return 1;
+
+    return 0;
+}
+
 static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCValueType *out_elem_ty, const Type **out_elem_type)
 {
     if (!fb || !expr || expr->kind != ND_DEREF)
@@ -5588,51 +6097,31 @@ static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
 
         // file literal global
         const char *fname = expr->src && expr->src->filename ? expr->src->filename : "";
-        char *file_sym = ccb_make_string_symbol("file", (int)fb->local_count);
-        if (!file_sym)
-            return 1;
         size_t flen = strlen(fname);
         uint8_t *fbytes = (uint8_t *)malloc(flen + 1);
         if (!fbytes)
             return 1;
         memcpy(fbytes, fname, flen);
         fbytes[flen] = 0;
-        char *file_literal = ccb_encode_bytes_literal(fbytes, flen + 1);
+        const char *file_sym = ccb_module_intern_hidden_byte_string(fb->module, "file", fbytes, flen + 1);
         free(fbytes);
-        if (!file_literal)
+        if (!file_sym)
             return 1;
-        if (!ccb_module_appendf(fb->module, ".global %s type=%s size=%zu align=1 data=%s const hidden", file_sym, cc_type_name(CC_TYPE_U8), flen + 1, file_literal))
-        {
-            free(file_literal);
-            free(file_sym);
-            return 1;
-        }
-        free(file_literal);
 
         // name literal (var name if available)
         const char *vname = "";
         if (base->kind == ND_VAR && base->var_ref)
             vname = base->var_ref;
-        char *name_sym = ccb_make_string_symbol("name", (int)fb->local_count + 1);
-        if (!name_sym)
-            return 1;
         size_t nlen = strlen(vname);
         uint8_t *nbytes = (uint8_t *)malloc(nlen + 1);
         if (!nbytes)
             return 1;
         memcpy(nbytes, vname, nlen);
         nbytes[nlen] = 0;
-        char *name_literal = ccb_encode_bytes_literal(nbytes, nlen + 1);
+        const char *name_sym = ccb_module_intern_hidden_byte_string(fb->module, "name", nbytes, nlen + 1);
         free(nbytes);
-        if (!name_literal)
+        if (!name_sym)
             return 1;
-        if (!ccb_module_appendf(fb->module, ".global %s type=%s size=%zu align=1 data=%s const hidden", name_sym, cc_type_name(CC_TYPE_U8), nlen + 1, name_literal))
-        {
-            free(name_literal);
-            free(name_sym);
-            return 1;
-        }
-        free(name_literal);
 
         // push file ptr, line u64, name ptr then call
         if (!ccb_emit_addr_global(&fb->body, file_sym))
@@ -5648,9 +6137,6 @@ static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
         if (!string_list_appendf(&fb->body, "label %s", cont_label))
             return 1;
 
-        // free symbol names allocated
-        free(file_sym);
-        free(name_sym);
     }
     return 0;
 }
@@ -8170,6 +8656,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
     case ND_LE:
     case ND_GE:
     case ND_EQ:
+    case ND_STRICT_EQ:
     case ND_NE:
     {
         if (!expr->lhs || !expr->rhs)
@@ -8178,6 +8665,10 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                           "comparison missing operand");
             return 1;
         }
+
+        if ((expr->kind == ND_EQ || expr->kind == ND_NE) &&
+            ccb_is_string_ptr_type(expr->lhs->type) && ccb_is_string_ptr_type(expr->rhs->type))
+            return ccb_emit_string_equality_compare(fb, expr);
 
         CCValueType lhs_ty = ccb_type_for_expr(expr->lhs);
         CCValueType rhs_ty = ccb_type_for_expr(expr->rhs);
@@ -8281,6 +8772,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             cmp_op = "ge";
             break;
         case ND_EQ:
+        case ND_STRICT_EQ:
             cmp_op = "eq";
             break;
         case ND_NE:
@@ -8300,6 +8792,43 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         else
         {
             if (!string_list_appendf(&fb->body, "  compare %s %s", cmp_op, cc_type_name(op_ty)))
+                return 1;
+        }
+        return 0;
+    }
+    case ND_IS:
+    {
+        if (!expr->lhs || !expr->is_type)
+        {
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "invalid 'is' expression");
+            return 1;
+        }
+
+        if (ccb_emit_expr_basic(fb, expr->lhs))
+            return 1;
+
+        CCValueType lhs_ty = ccb_type_for_expr(expr->lhs);
+        if (lhs_ty != CC_TYPE_PTR)
+        {
+            if (ccb_emit_convert_between(fb, lhs_ty, CC_TYPE_PTR, expr->lhs))
+                return 1;
+        }
+
+        char target_meta[128];
+        ccb_type_metadata_name(expr->is_type, target_meta, sizeof(target_meta));
+        if (ccb_emit_const_str_lit(fb, target_meta))
+            return 1;
+
+        if (ccb_ensure_runtime_extern(fb, "__cert__object_is_type", "i32", "(ptr,ptr)"))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  call __cert__object_is_type i32 (ptr,ptr)"))
+            return 1;
+
+        CCValueType result_ty = map_type_to_cc(expr->type);
+        if (result_ty == CC_TYPE_I1)
+        {
+            if (ccb_emit_convert_between(fb, CC_TYPE_I32, CC_TYPE_I1, expr))
                 return 1;
         }
         return 0;
@@ -8439,18 +8968,19 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         }
 
-        CcbLocal *temp = ccb_local_add(fb, NULL, result_type, false, false);
-        if (!temp)
-            return 1;
-        CCValueType result_cc = temp->value_type;
+        CCValueType result_cc = map_type_to_cc(result_type);
+        if (result_cc == CC_TYPE_VOID || result_cc == CC_TYPE_INVALID)
+            result_cc = ccb_type_for_expr(expr->rhs);
+        if (result_cc == CC_TYPE_VOID || result_cc == CC_TYPE_INVALID)
+            result_cc = ccb_type_for_expr(expr->body);
+        if (result_cc == CC_TYPE_VOID || result_cc == CC_TYPE_INVALID)
+            result_cc = CC_TYPE_I32;
 
         if (!string_list_appendf(&fb->body, "label %s", true_label))
             return 1;
         if (ccb_emit_expr_basic(fb, expr->rhs))
             return 1;
         if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->rhs), result_cc, expr->rhs))
-            return 1;
-        if (!ccb_emit_store_local(fb, temp))
             return 1;
         if (!string_list_appendf(&fb->body, "  jump %s", end_label))
             return 1;
@@ -8461,12 +8991,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->body), result_cc, expr->body))
             return 1;
-        if (!ccb_emit_store_local(fb, temp))
-            return 1;
 
         if (!string_list_appendf(&fb->body, "label %s", end_label))
-            return 1;
-        if (!ccb_emit_load_local(fb, temp))
             return 1;
         return 0;
     }
@@ -8702,6 +9228,10 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
     }
     case ND_MEMBER:
     {
+        if (expr->field_name && strcmp(expr->field_name, "length") == 0 &&
+            !expr->is_pointer_deref && ccb_is_string_ptr_type(expr->lhs ? expr->lhs->type : NULL))
+            return ccb_emit_string_length_expr(fb, expr);
+
         CCValueType field_ty = CC_TYPE_I32;
         const Type *field_type = NULL;
         if (ccb_emit_member_address(fb, expr, &field_ty, &field_type))
@@ -9306,6 +9836,138 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         }
 
+        const Type *from_ast = expr->lhs ? expr->lhs->type : NULL;
+        const Type *to_ast = expr->type;
+        const int from_is_object = ccb_type_is_object_ast(from_ast);
+        const int to_is_object = ccb_type_is_object_ast(to_ast);
+        char from_meta[128];
+        char to_meta[128];
+        ccb_type_metadata_name(from_ast, from_meta, sizeof(from_meta));
+        ccb_type_metadata_name(to_ast, to_meta, sizeof(to_meta));
+
+        if (to_is_object && !from_is_object)
+        {
+            if (ccb_value_type_is_integer(from_ty))
+            {
+                if (from_ty != CC_TYPE_I64)
+                {
+                    if (ccb_emit_convert_between(fb, from_ty, CC_TYPE_I64, expr->lhs))
+                        return 1;
+                }
+                if (ccb_emit_const_str_lit(fb, from_meta))
+                    return 1;
+                if (ccb_ensure_runtime_extern(fb, "__cert__box_i64", "ptr", "(i64,ptr)"))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  call __cert__box_i64 ptr (i64,ptr)"))
+                    return 1;
+                return 0;
+            }
+            if (ccb_value_type_is_float(from_ty))
+            {
+                if (from_ty != CC_TYPE_F64)
+                {
+                    if (ccb_emit_convert_between(fb, from_ty, CC_TYPE_F64, expr->lhs))
+                        return 1;
+                }
+                if (ccb_emit_const_str_lit(fb, from_meta))
+                    return 1;
+                if (ccb_ensure_runtime_extern(fb, "__cert__box_f64", "ptr", "(f64,ptr)"))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  call __cert__box_f64 ptr (f64,ptr)"))
+                    return 1;
+                return 0;
+            }
+            if (from_ty == CC_TYPE_PTR)
+            {
+                if (ccb_emit_const_str_lit(fb, from_meta))
+                    return 1;
+                if (ccb_ensure_runtime_extern(fb, "__cert__box_ptr", "ptr", "(ptr,ptr)"))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  call __cert__box_ptr ptr (ptr,ptr)"))
+                    return 1;
+                return 0;
+            }
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "unsupported runtime boxing source type");
+            return 1;
+        }
+
+        if (from_is_object && !to_is_object)
+        {
+            if (from_ty != CC_TYPE_PTR)
+            {
+                if (ccb_emit_convert_between(fb, from_ty, CC_TYPE_PTR, expr->lhs))
+                    return 1;
+            }
+
+            const char *cast_file = (expr->src && expr->src->filename) ? expr->src->filename : "<unknown>";
+            int64_t cast_line = (expr->line > 0) ? (int64_t)expr->line : 0;
+            const char *cast_symbol = to_meta;
+
+            if (ccb_value_type_is_integer(to_ty))
+            {
+                if (ccb_emit_const_str_lit(fb, to_meta))
+                    return 1;
+                if (ccb_emit_const_str_lit(fb, cast_file))
+                    return 1;
+                if (!ccb_emit_const(&fb->body, CC_TYPE_U64, cast_line))
+                    return 1;
+                if (ccb_emit_const_str_lit(fb, cast_symbol))
+                    return 1;
+                if (ccb_ensure_runtime_extern(fb, "__cert__unbox_i64", "i64", "(ptr,ptr,ptr,u64,ptr)"))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  call __cert__unbox_i64 i64 (ptr,ptr,ptr,u64,ptr)"))
+                    return 1;
+                if (to_ty != CC_TYPE_I64)
+                {
+                    if (ccb_emit_convert_between(fb, CC_TYPE_I64, to_ty, expr))
+                        return 1;
+                }
+                return 0;
+            }
+            if (ccb_value_type_is_float(to_ty))
+            {
+                if (ccb_emit_const_str_lit(fb, to_meta))
+                    return 1;
+                if (ccb_emit_const_str_lit(fb, cast_file))
+                    return 1;
+                if (!ccb_emit_const(&fb->body, CC_TYPE_U64, cast_line))
+                    return 1;
+                if (ccb_emit_const_str_lit(fb, cast_symbol))
+                    return 1;
+                if (ccb_ensure_runtime_extern(fb, "__cert__unbox_f64", "f64", "(ptr,ptr,ptr,u64,ptr)"))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  call __cert__unbox_f64 f64 (ptr,ptr,ptr,u64,ptr)"))
+                    return 1;
+                if (to_ty != CC_TYPE_F64)
+                {
+                    if (ccb_emit_convert_between(fb, CC_TYPE_F64, to_ty, expr))
+                        return 1;
+                }
+                return 0;
+            }
+            if (to_ty == CC_TYPE_PTR)
+            {
+                if (ccb_emit_const_str_lit(fb, to_meta))
+                    return 1;
+                if (ccb_emit_const_str_lit(fb, cast_file))
+                    return 1;
+                if (!ccb_emit_const(&fb->body, CC_TYPE_U64, cast_line))
+                    return 1;
+                if (ccb_emit_const_str_lit(fb, cast_symbol))
+                    return 1;
+                if (ccb_ensure_runtime_extern(fb, "__cert__unbox_ptr", "ptr", "(ptr,ptr,ptr,u64,ptr)"))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  call __cert__unbox_ptr ptr (ptr,ptr,ptr,u64,ptr)"))
+                    return 1;
+                return 0;
+            }
+
+            diag_error_at(expr->src, expr->line, expr->col,
+                          "unsupported runtime unboxing target type");
+            return 1;
+        }
+
         if (to_ty == CC_TYPE_VOID)
         {
             if (!ccb_emit_drop_for_type(&fb->body, from_ty))
@@ -9380,6 +10042,44 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
     case ND_EXPR_STMT:
         if (stmt->lhs)
         {
+            if (stmt->lhs->kind == ND_CALL && stmt->lhs->call_is_jump)
+            {
+                const Node *jump_call = stmt->lhs;
+
+                if (jump_call->call_is_indirect)
+                {
+                    if (!jump_call->lhs)
+                    {
+                        diag_error_at(jump_call->src, jump_call->line, jump_call->col,
+                                      "jump call missing target expression");
+                        return 1;
+                    }
+                    if (ccb_emit_expr_basic(fb, jump_call->lhs))
+                        return 1;
+                    CCValueType target_ty = ccb_type_for_expr(jump_call->lhs);
+                    if (target_ty != CC_TYPE_PTR)
+                    {
+                        if (ccb_emit_convert_between(fb, target_ty, CC_TYPE_PTR, jump_call->lhs))
+                            return 1;
+                    }
+                }
+                else
+                {
+                    if (!jump_call->call_name || !*jump_call->call_name)
+                    {
+                        diag_error_at(jump_call->src, jump_call->line, jump_call->col,
+                                      "jump call missing target symbol");
+                        return 1;
+                    }
+                    if (!ccb_emit_addr_global(&fb->body, jump_call->call_name))
+                        return 1;
+                }
+
+                if (!string_list_append(&fb->body, "  jump_indirect"))
+                    return 1;
+                return 0;
+            }
+
             if (ccb_is_compound_assign_kind(stmt->lhs->kind))
                 return ccb_emit_compound_assign_stmt_noresult(fb, stmt->lhs);
             if (ccb_emit_expr_basic(fb, stmt->lhs))
@@ -9497,6 +10197,262 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
             return 1;
         CCValueType seq_ty = ccb_type_for_expr(stmt);
         if (!ccb_emit_drop_for_type(&fb->body, seq_ty))
+            return 1;
+        return 0;
+    }
+    case ND_TRY:
+    {
+        if (!stmt->lhs)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "try statement missing try block");
+            return 1;
+        }
+
+        if (ccb_ensure_runtime_extern(fb, "__cert__exception_enter_try", "void", "()"))
+            return 1;
+        if (ccb_ensure_runtime_extern(fb, "__cert__exception_leave_try", "void", "()"))
+            return 1;
+        if (ccb_ensure_runtime_extern(fb, "__cert__exception_has_pending", "i32", "()"))
+            return 1;
+        if (ccb_ensure_runtime_extern(fb, "__cert__exception_clear", "void", "()"))
+            return 1;
+        if (ccb_ensure_runtime_extern(fb, "__cert__exception_matches_type", "i32", "(ptr)"))
+            return 1;
+        if (ccb_ensure_runtime_extern(fb, "__cert__exception_propagate", "void", "()"))
+            return 1;
+
+        char try_error_label[32];
+        char try_after_label[32];
+        char catch_match_label[32];
+        char catch_label[32];
+        char catch_clear_label[32];
+        char catch_rethrow_label[32];
+        char uncaught_label[32];
+        char no_pending_label[32];
+        char finally_label[32];
+        char done_label[32];
+        ccb_make_label(fb, try_error_label, sizeof(try_error_label), "try_err");
+        ccb_make_label(fb, try_after_label, sizeof(try_after_label), "try_after");
+        ccb_make_label(fb, catch_match_label, sizeof(catch_match_label), "try_catch_match");
+        ccb_make_label(fb, catch_label, sizeof(catch_label), "try_catch");
+        ccb_make_label(fb, catch_clear_label, sizeof(catch_clear_label), "try_catch_clear");
+        ccb_make_label(fb, catch_rethrow_label, sizeof(catch_rethrow_label), "try_catch_rethrow");
+        ccb_make_label(fb, uncaught_label, sizeof(uncaught_label), "try_uncaught");
+        ccb_make_label(fb, no_pending_label, sizeof(no_pending_label), "try_nopending");
+        ccb_make_label(fb, finally_label, sizeof(finally_label), "try_finally");
+        ccb_make_label(fb, done_label, sizeof(done_label), "try_done");
+
+        if (!string_list_appendf(&fb->body, "  call __cert__exception_enter_try void ()"))
+            return 1;
+
+        if (stmt->lhs->kind == ND_BLOCK)
+        {
+            for (int i = 0; i < stmt->lhs->stmt_count; ++i)
+            {
+                char step_continue_label[32];
+                ccb_make_label(fb, step_continue_label, sizeof(step_continue_label), "try_cont");
+                if (ccb_emit_stmt_basic(fb, stmt->lhs->stmts[i]))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  call __cert__exception_has_pending i32 ()"))
+                    return 1;
+                if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  compare ne i32"))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  branch %s %s", try_error_label, step_continue_label))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "label %s", step_continue_label))
+                    return 1;
+            }
+        }
+        else
+        {
+            if (ccb_emit_stmt_basic(fb, stmt->lhs))
+                return 1;
+        }
+
+        if (!string_list_appendf(&fb->body, "  jump %s", try_after_label))
+            return 1;
+        if (!string_list_appendf(&fb->body, "label %s", try_error_label))
+            return 1;
+        if (!string_list_appendf(&fb->body, "label %s", try_after_label))
+            return 1;
+
+        if (!string_list_appendf(&fb->body, "  call __cert__exception_leave_try void ()"))
+            return 1;
+
+        if (!string_list_appendf(&fb->body, "  call __cert__exception_has_pending i32 ()"))
+            return 1;
+        if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  compare ne i32"))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  branch %s %s", catch_label, no_pending_label))
+            return 1;
+
+        if (!string_list_appendf(&fb->body, "label %s", catch_label))
+            return 1;
+
+        if (stmt->rhs)
+        {
+            if (stmt->var_type)
+            {
+                char catch_meta[128];
+                ccb_type_metadata_name(stmt->var_type, catch_meta, sizeof(catch_meta));
+                if (ccb_emit_const_str_lit(fb, catch_meta))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  call __cert__exception_matches_type i32 (ptr)"))
+                    return 1;
+                if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  compare ne i32"))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "  branch %s %s", catch_match_label, uncaught_label))
+                    return 1;
+                if (!string_list_appendf(&fb->body, "label %s", catch_match_label))
+                    return 1;
+            }
+
+            if (ccb_emit_stmt_basic(fb, stmt->rhs))
+                return 1;
+
+            if (!string_list_appendf(&fb->body, "  call __cert__exception_has_pending i32 ()"))
+                return 1;
+            if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  compare ne i32"))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  branch %s %s", catch_rethrow_label, catch_clear_label))
+                return 1;
+
+            if (!string_list_appendf(&fb->body, "label %s", catch_clear_label))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  call __cert__exception_clear void ()"))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  jump %s", finally_label))
+                return 1;
+
+            if (!string_list_appendf(&fb->body, "label %s", catch_rethrow_label))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  jump %s", finally_label))
+                return 1;
+        }
+        else
+        {
+            if (!string_list_appendf(&fb->body, "  jump %s", uncaught_label))
+                return 1;
+        }
+
+        if (!string_list_appendf(&fb->body, "label %s", uncaught_label))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  call __cert__exception_propagate void ()"))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  jump %s", finally_label))
+            return 1;
+
+        if (!string_list_appendf(&fb->body, "label %s", no_pending_label))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  jump %s", finally_label))
+            return 1;
+
+        if (!string_list_appendf(&fb->body, "label %s", finally_label))
+            return 1;
+        if (stmt->body)
+        {
+            if (ccb_emit_stmt_basic(fb, stmt->body))
+                return 1;
+        }
+        if (!string_list_appendf(&fb->body, "label %s", done_label))
+            return 1;
+        return 0;
+    }
+    case ND_THROW:
+    {
+        if (!stmt->lhs)
+        {
+            if (ccb_ensure_runtime_extern(fb, "__cert__exception_has_pending", "i32", "()"))
+                return 1;
+            if (ccb_ensure_runtime_extern(fb, "__cert__runtime_error_ex", "void", "(i32,ptr,ptr,ptr,i64,ptr)"))
+                return 1;
+
+            char has_exception_label[32];
+            char no_exception_label[32];
+            char done_label[32];
+            ccb_make_label(fb, has_exception_label, sizeof(has_exception_label), "throw_hasexc");
+            ccb_make_label(fb, no_exception_label, sizeof(no_exception_label), "throw_noexc");
+            ccb_make_label(fb, done_label, sizeof(done_label), "throw_done");
+
+            if (!string_list_appendf(&fb->body, "  call __cert__exception_has_pending i32 ()"))
+                return 1;
+            if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  compare ne i32"))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  branch %s %s", has_exception_label, no_exception_label))
+                return 1;
+
+            if (!string_list_appendf(&fb->body, "label %s", has_exception_label))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  jump %s", done_label))
+                return 1;
+
+            if (!string_list_appendf(&fb->body, "label %s", no_exception_label))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  const i32 1"))
+                return 1;
+            if (ccb_emit_const_str_lit(fb, "RuntimeError"))
+                return 1;
+            if (ccb_emit_const_str_lit(fb, "throw; requires an active exception to rethrow"))
+                return 1;
+            if (ccb_emit_const_str_lit(fb, (stmt->src && stmt->src->filename) ? stmt->src->filename : ""))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  const i64 %lld", (long long)stmt->line))
+                return 1;
+            if (ccb_emit_const_str_lit(fb, "throw"))
+                return 1;
+            if (!string_list_appendf(&fb->body, "  call __cert__runtime_error_ex void (i32,ptr,ptr,ptr,i64,ptr)"))
+                return 1;
+            if (!string_list_appendf(&fb->body, "label %s", done_label))
+                return 1;
+            return 0;
+        }
+
+        if (ccb_ensure_runtime_extern(fb, "__cert__runtime_error_ex", "void", "(i32,ptr,ptr,ptr,i64,ptr)"))
+            return 1;
+
+        const char *category = "RuntimeError";
+        if (stmt->var_type && stmt->var_type->kind == TY_STRUCT && stmt->var_type->struct_name)
+            category = stmt->var_type->struct_name;
+
+        if (!string_list_appendf(&fb->body, "  const i32 1"))
+            return 1;
+        if (ccb_emit_const_str_lit(fb, category))
+            return 1;
+
+        if (stmt->rhs)
+        {
+            if (ccb_emit_expr_basic(fb, stmt->rhs))
+                return 1;
+        }
+        else if (stmt->var_type)
+        {
+            if (ccb_emit_const_str_lit(fb, "exception thrown"))
+                return 1;
+        }
+        else
+        {
+            if (ccb_emit_expr_basic(fb, stmt->lhs))
+                return 1;
+        }
+
+        if (ccb_emit_const_str_lit(fb, (stmt->src && stmt->src->filename) ? stmt->src->filename : ""))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  const i64 %lld", (long long)stmt->line))
+            return 1;
+        if (ccb_emit_const_str_lit(fb, "throw"))
+            return 1;
+        if (!string_list_appendf(&fb->body, "  call __cert__runtime_error_ex void (i32,ptr,ptr,ptr,i64,ptr)"))
             return 1;
         return 0;
     }
@@ -10287,6 +11243,7 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
     else
     {
         const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
+        const char *jump_target_suffix = fn->is_jump_target ? " jump-target" : "";
         const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
         const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
         char *section_literal = NULL;
@@ -10300,10 +11257,10 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
         bool ok = section_literal
                       ? ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu section=%s%s%s%s",
                                            backend_name, ret_name, param_count, local_count, section_literal,
-                                           varargs_suffix, force_inline_suffix, hidden_suffix)
-                      : ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s",
+                                           varargs_suffix, jump_target_suffix, force_inline_suffix, hidden_suffix)
+                      : ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s%s",
                                            backend_name, ret_name, param_count, local_count,
-                                           varargs_suffix, force_inline_suffix, hidden_suffix);
+                                           varargs_suffix, jump_target_suffix, force_inline_suffix, hidden_suffix);
         free(section_literal);
         if (!ok)
             return 1;
@@ -10395,10 +11352,11 @@ static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const Codeg
     else
     {
         const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
+        const char *jump_target_suffix = fn->is_jump_target ? " jump-target" : "";
         const char *force_inline_suffix = fn->force_inline_literal ? " force-inline-literal" : "";
         const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
-        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s",
-                                backend_name, ret_name, param_count, local_count, varargs_suffix, force_inline_suffix, hidden_suffix))
+        if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s%s",
+                    backend_name, ret_name, param_count, local_count, varargs_suffix, jump_target_suffix, force_inline_suffix, hidden_suffix))
             return 1;
     }
 
@@ -10512,9 +11470,10 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         else
         {
             const char *varargs_suffix = fn->is_varargs ? " varargs" : "";
+            const char *jump_target_suffix = fn->is_jump_target ? " jump-target" : "";
             const char *hidden_suffix = fn->is_exposed ? "" : " hidden";
-            if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s", backend_name,
-                                    cc_type_name(fb.ret_type), fb.param_count, fb.local_count, varargs_suffix, hidden_suffix))
+            if (!ccb_module_appendf(mod, ".func %s ret=%s params=%zu locals=%zu%s%s%s", backend_name,
+                                    cc_type_name(fb.ret_type), fb.param_count, fb.local_count, varargs_suffix, jump_target_suffix, hidden_suffix))
                 rc = 1;
         }
 
@@ -10608,6 +11567,8 @@ static CCValueType map_type_to_cc(const Type *ty)
     case TY_F64:
         return CC_TYPE_F64;
     case TY_PTR:
+        return CC_TYPE_PTR;
+    case TY_REF:
         return CC_TYPE_PTR;
     case TY_ARRAY:
         return CC_TYPE_PTR;
@@ -11044,6 +12005,8 @@ static char *ccb_encode_bytes_literal(const uint8_t *data, size_t len)
 
 static bool ccb_is_string_ptr_type(const Type *ty)
 {
+    while (ty && ty->kind == TY_REF)
+        ty = ty->pointee;
     if (!ty || ty->kind != TY_PTR || !ty->pointee)
         return false;
     TypeKind pointee = ty->pointee->kind;
@@ -11062,6 +12025,71 @@ static char *ccb_make_string_symbol(const char *base, int index)
         return NULL;
     snprintf(name, len + 1, "__ccb_str_%s_%d", safe, index);
     return name;
+}
+
+static const char *ccb_module_intern_hidden_byte_string(CcbModule *mod, const char *base, const uint8_t *data, size_t len)
+{
+    if (!mod)
+        return NULL;
+
+    const char *safe = (base && *base) ? base : "str";
+    char *literal = ccb_encode_bytes_literal(data, len);
+    if (!literal)
+        return NULL;
+
+    int key_len = snprintf(NULL, 0, "%s|%s", safe, literal);
+    if (key_len < 0)
+    {
+        free(literal);
+        return NULL;
+    }
+
+    char *key = (char *)malloc((size_t)key_len + 1);
+    if (!key)
+    {
+        free(literal);
+        return NULL;
+    }
+    snprintf(key, (size_t)key_len + 1, "%s|%s", safe, literal);
+
+    for (size_t i = 0; i < mod->interned_string_keys.count; ++i)
+    {
+        const char *existing_key = mod->interned_string_keys.items[i];
+        if (existing_key && strcmp(existing_key, key) == 0)
+        {
+            const char *existing_sym = (i < mod->interned_string_symbols.count) ? mod->interned_string_symbols.items[i] : NULL;
+            free(key);
+            free(literal);
+            return existing_sym;
+        }
+    }
+
+    char *sym = ccb_make_string_symbol(safe, mod->next_interned_string_id++);
+    if (!sym)
+    {
+        free(key);
+        free(literal);
+        return NULL;
+    }
+
+    if (!ccb_module_appendf(mod, ".global %s type=%s size=%zu align=1 data=%s const hidden",
+                            sym, cc_type_name(CC_TYPE_U8), len, literal))
+    {
+        free(sym);
+        free(key);
+        free(literal);
+        return NULL;
+    }
+
+    bool ok = string_list_append(&mod->interned_string_keys, key) &&
+              string_list_append(&mod->interned_string_symbols, sym);
+    free(key);
+    free(literal);
+    free(sym);
+    if (!ok)
+        return NULL;
+
+    return mod->interned_string_symbols.items[mod->interned_string_symbols.count - 1];
 }
 
 static bool ccb_emit_string_ptr_array_global(CcbModule *mod, const char *name, const Type *array_type, const Node *init,

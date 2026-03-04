@@ -18,6 +18,7 @@ add_library(chance_core
     src/includes.c
     src/preproc.c
     src/codegen_ccb.c
+    src/ccsim.c
     src/module_registry.c
     src/cclib.c
     src/util.c

@@ -4,7 +4,9 @@ extend from "C" void free(void* ptr);
 extend from "C" void* memcpy(void* dest, constant void* src, u64 n);
 extend from "C" void* memset(void* s, i32 c, u64 n);
 extend from "C" u64 strlen(constant char* s);
-extend from "C" u64 strlen(constant char* s);
+extend from "C" i32 strcmp(constant char* s1, constant char* s2);
+extend fun __cert__null_deref(char* file, u64 line, char* name_of_ref_obj) -> void;
+
 
 extend fun __cert__runtime_error(char* category, char* message) -> void;
 
@@ -44,6 +46,15 @@ expose fun __cert__memset(void* s, i32 c, u64 n) -> void* {
 }
 
 [Export]
-expose fun __cert__strlen(constant char* s) -> u64 {
+expose fun __cert__strlen(constant char* s, char* file, u64 line, char* name_of_ref_obj) -> u64 {
+    if (s == null) __cert__null_deref(file, line, name_of_ref_obj);
     ret strlen(s);
+}
+
+[Export]
+expose fun __cert__strcmp(constant char* s1, constant char* s2) -> i32 {
+    if (s1 == null && s2 == null) ret 0;
+    else if (s1 == null) ret -1;
+    else if (s2 == null) ret 1;
+    else ret strcmp(s1, s2);
 }

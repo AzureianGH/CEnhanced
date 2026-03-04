@@ -49,6 +49,7 @@ typedef enum
     TK_KW_CONSTANT,
     TK_KW_VOID,
     TK_KW_CHAR,
+    TK_KW_STRING,
     TK_KW_BOOL,
     TK_KW_REF,
     TK_KW_VAR,
@@ -61,13 +62,34 @@ typedef enum
     TK_KW_MATCH,
     TK_KW_BREAK,
     TK_KW_CONTINUE,
+    TK_KW_TRY,
+    TK_KW_CATCH,
+    TK_KW_FINALLY,
+    TK_KW_THROW,
+    TK_KW_JUMP,
+    TK_KW_CHANCECODE,
+    TK_KW_LITERAL,
+    TK_KW_ENTRYPOINT,
+    TK_KW_JUMPTARGET,
+    TK_KW_EXPORT,
+    TK_KW_PRESERVE,
+    TK_KW_SECTION,
+    TK_KW_FORCEINLINE,
+    TK_KW_INLINE,
+    TK_KW_HINT,
+    TK_KW_NOHINT,
+    TK_KW_OVERRIDEMETADATA,
     TK_KW_ENUM,
     TK_KW_ALIAS,
     TK_KW_AS,
+    TK_KW_IS,
     TK_KW_SIZEOF,
     TK_KW_TYPEOF,
     TK_KW_ALIGNOF,
     TK_KW_OFFSETOF,
+    TK_KW_MANAGED,
+    TK_KW_UNMANAGED,
+    TK_KW_OBJECT,
     TK_KW_NULL,
     TK_KW_NORETURN,
     TK_KW_MODULE,
@@ -108,6 +130,7 @@ typedef enum
     TK_MINUSMINUS, // --
     TK_MINUSEQ,    // -=
     TK_ASSIGN,     // =
+    TK_EQEQEQ,     // ===
     TK_EQEQ,       // ==
     TK_BANG,       // !
     TK_BANGEQ,     // !=
@@ -209,6 +232,7 @@ typedef struct Type
         int has_signature;
     } func;
     int is_exposed; // visibility flag for module system
+    int is_object;  // true when originating from the 'object' keyword
     const char *import_module;
     const char *import_type_name;
     struct Type *import_resolved;
@@ -284,7 +308,9 @@ typedef enum
     ND_ALIGNOF,
     ND_OFFSETOF,
     ND_EQ,
+    ND_STRICT_EQ,
     ND_NE,
+    ND_IS,
     ND_COND,      // ternary conditional expr: lhs ? rhs : body
     ND_MEMBER,    // struct/enum member access
     ND_INIT_LIST, // brace initializer
@@ -297,6 +323,8 @@ typedef enum
     ND_BITXOR,    // ^
     ND_BITNOT,    // ~
     ND_SWITCH,
+    ND_TRY,
+    ND_THROW,
     ND_MATCH,
     ND_LAMBDA,
     ND_SEQ,
@@ -359,6 +387,7 @@ struct Node
     const SourceBuffer *src;
     // Typed nodes
     Type *type; // inferred/declared type
+    Type *is_type; // target type used by ND_IS operator
     // Optional expression used as a dynamic type (e.g. 'as typeof(x)')
     struct Node *type_expr;
     // For ND_FUNC
@@ -376,6 +405,7 @@ struct Node
     int is_varargs;
     int is_chancecode;
     int is_literal;
+    int is_managed;
     int force_inline_literal;
     struct
     {
@@ -420,6 +450,7 @@ struct Node
     Type *call_func_type;           // canonicalized function signature when available
     int call_is_indirect;           // 1 for pointer-based calls
     int call_is_varargs;            // 1 when call accepts varargs (used for indirect calls)
+    int call_is_jump;               // 1 when call is emitted as a jump transfer (jump fn())
     const struct Node *call_target; // resolved direct call target when available
     // For ND_VAR_DECL
     const char *var_name;
@@ -456,6 +487,7 @@ struct Node
     const char *var_ref;
     int is_noreturn;
     int is_entrypoint;
+    int is_jump_target;
     int is_preserve;
     // For ND_MEMBER
     const char *field_name;
@@ -474,6 +506,7 @@ struct Node
     } init;
     // Module metadata (only valid for ND_UNIT)
     ModulePath module_path;
+    int module_is_managed;
     ModulePath *imports;
     int import_count;
     // Declaration visibility flag (used for ND_FUNC and other decl nodes)

@@ -65,7 +65,6 @@ extend from "C" int test();
 extend fun test_chance() -> i32;
 extend from "C" i32 remove(char*);
 
-hide alias string = char*;
 hide alias uint32_t = u32;
 
 hide struct NLGraphicsVertex {
@@ -289,7 +288,7 @@ expose fun main() -> i32
     Std.IO.print("Calling extended C function test(): %d\n", test());
 
     TC.SmallTest vari = {};
-    vari.smallValue = 3;
+    vari.smallValue = 3; 
     vari.testVar = 44;
     
     TC.SmallTest another = {

@@ -496,8 +496,12 @@ const char *node_kind_name(NodeKind kind)
         return "typeof expression";
     case ND_EQ:
         return "equality comparison";
+    case ND_STRICT_EQ:
+        return "strict equality comparison";
     case ND_NE:
         return "inequality comparison";
+    case ND_IS:
+        return "runtime type comparison";
     case ND_COND:
         return "conditional expression";
     case ND_MEMBER:
@@ -518,6 +522,8 @@ const char *node_kind_name(NodeKind kind)
         return "bitwise NOT expression";
     case ND_SWITCH:
         return "switch statement";
+    case ND_THROW:
+        return "throw statement";
     case ND_MATCH:
         return "match expression";
     case ND_LAMBDA:

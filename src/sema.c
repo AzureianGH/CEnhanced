@@ -852,6 +852,67 @@ static int type_is_int(Type *t)
     }
 }
 
+static int type_is_string_ptr(Type *t)
+{
+    t = canonicalize_type_deep(t);
+    while (t && t->kind == TY_REF)
+        t = canonicalize_type_deep(t->pointee);
+    if (!t || t->kind != TY_PTR || !t->pointee)
+        return 0;
+    Type *pointee = canonicalize_type_deep(t->pointee);
+    if (!pointee)
+        return 0;
+    return (pointee->kind == TY_CHAR || pointee->kind == TY_I8 || pointee->kind == TY_U8);
+}
+
+static int type_is_pointer_like(Type *t)
+{
+    t = canonicalize_type_deep(t);
+    if (!t)
+        return 0;
+    return (t->kind == TY_PTR || t->kind == TY_REF);
+}
+
+static int type_is_object(Type *t)
+{
+    t = canonicalize_type_deep(t);
+    if (!t)
+        return 0;
+    if (t->kind == TY_REF && t->pointee)
+        t = canonicalize_type_deep(t->pointee);
+    return t && t->is_object;
+}
+
+static int type_is_boxable(Type *t)
+{
+    t = canonicalize_type_deep(t);
+    if (!t)
+        return 0;
+    if (type_is_int(t) || type_is_float(t) || type_is_pointer_like(t))
+        return 1;
+    if (t->kind == TY_STRUCT || t->kind == TY_ARRAY)
+        return 1;
+    return 0;
+}
+
+static void sema_wrap_node_with_cast(Node *node, Type *target_type)
+{
+    if (!node || !target_type)
+        return;
+    Node *inner = (Node *)xcalloc(1, sizeof(Node));
+    *inner = *node;
+
+    node->kind = ND_CAST;
+    node->lhs = inner;
+    node->rhs = NULL;
+    node->body = NULL;
+    node->type = target_type;
+    node->type_expr = NULL;
+    node->line = inner->line;
+    node->col = inner->col;
+    node->src = inner->src;
+}
+
 static int template_param_allows(Type *t, TemplateConstraintKind want)
 {
     t = canonicalize_type_deep(t);
@@ -2798,6 +2859,27 @@ static int can_assign(Type *target, Node *rhs)
         rhs->type = canon_target;
         return 1;
     }
+    if (type_is_object(canon_target))
+    {
+        Type *rhs_ty = canonicalize_type_deep(rhs->type);
+        if (rhs->kind == ND_NULL || type_is_boxable(rhs_ty))
+        {
+            if (rhs->kind != ND_NULL && rhs_ty && !type_is_object(rhs_ty))
+                sema_wrap_node_with_cast(rhs, canon_target);
+            rhs->type = canon_target;
+            return 1;
+        }
+    }
+    if (type_is_boxable(canon_target))
+    {
+        Type *rhs_ty = canonicalize_type_deep(rhs->type);
+        if (type_is_object(rhs_ty))
+        {
+            sema_wrap_node_with_cast(rhs, canon_target);
+            rhs->type = canon_target;
+            return 1;
+        }
+    }
     if (canon_target->kind == TY_REF)
     {
         /* Assigning to a reference variable can rebind from ptr/ref and (if nullable) null. */
@@ -3412,6 +3494,8 @@ static const char *nodekind_name(NodeKind k)
         return "ND_WHILE";
     case ND_EXPR_STMT:
         return "ND_EXPR_STMT";
+    case ND_THROW:
+        return "ND_THROW";
     case ND_VAR:
         return "ND_VAR";
     case ND_UNIT:
@@ -3432,6 +3516,10 @@ static const char *nodekind_name(NodeKind k)
         return "ND_ALIGNOF";
     case ND_OFFSETOF:
         return "ND_OFFSETOF";
+    case ND_STRICT_EQ:
+        return "ND_STRICT_EQ";
+    case ND_IS:
+        return "ND_IS";
     default:
         return "<unknown-node>";
     }
@@ -4351,7 +4439,16 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
 
-        Type *base = canonicalize_type_deep(e->lhs->type);
+        Type *base = sema_resolve_import_type(canonicalize_type_deep(e->lhs->type));
+
+        if (!e->is_pointer_deref && base && type_is_string_ptr(base) && e->field_name && strcmp(e->field_name, "length") == 0)
+        {
+            e->type = &ty_u64;
+            e->field_index = -1;
+            e->field_offset = 0;
+            return;
+        }
+
         if (e->is_pointer_deref)
         {
             if (!base || base->kind != TY_PTR || !base->pointee)
@@ -4360,7 +4457,7 @@ static void check_expr(SemaContext *sc, Node *e)
                               "'->' requires pointer to struct");
                 exit(1);
             }
-            base = canonicalize_type_deep(base->pointee);
+            base = sema_resolve_import_type(canonicalize_type_deep(base->pointee));
         }
         else
         {
@@ -4729,8 +4826,8 @@ static void check_expr(SemaContext *sc, Node *e)
         int rhs_is_int = type_is_int(e->rhs->type);
         int lhs_is_float = type_is_float(e->lhs->type);
         int rhs_is_float = type_is_float(e->rhs->type);
-        int lhs_is_ptr = (e->lhs->type && e->lhs->type->kind == TY_PTR);
-        int rhs_is_ptr = (e->rhs->type && e->rhs->type->kind == TY_PTR);
+        int lhs_is_ptr = type_is_pointer_like(e->lhs->type);
+        int rhs_is_ptr = type_is_pointer_like(e->rhs->type);
         if (!((lhs_is_int && rhs_is_int) || (lhs_is_float && rhs_is_float) || (lhs_is_ptr && rhs_is_ptr)))
         {
             diag_error_at(e->src, e->line, e->col, "relational operator requires integer, floating-point, or pointer operands of the same category");
@@ -4752,7 +4849,7 @@ static void check_expr(SemaContext *sc, Node *e)
         e->type = type_bool();
         return;
     }
-    if (e->kind == ND_EQ || e->kind == ND_NE)
+    if (e->kind == ND_EQ || e->kind == ND_NE || e->kind == ND_STRICT_EQ)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
@@ -4761,12 +4858,36 @@ static void check_expr(SemaContext *sc, Node *e)
         int rhs_is_int = type_is_int(e->rhs->type);
         int lhs_is_float = type_is_float(e->lhs->type);
         int rhs_is_float = type_is_float(e->rhs->type);
-        int lhs_is_ptr = (e->lhs->type && e->lhs->type->kind == TY_PTR);
-        int rhs_is_ptr = (e->rhs->type && e->rhs->type->kind == TY_PTR);
+        int lhs_is_ptr = type_is_pointer_like(e->lhs->type);
+        int rhs_is_ptr = type_is_pointer_like(e->rhs->type);
         if (!((lhs_is_int && rhs_is_int) || (lhs_is_float && rhs_is_float) || (lhs_is_ptr && rhs_is_ptr)))
         {
             diag_error_at(e->src, e->line, e->col,
                           "equality requires both operands to be integers, floats, or pointers");
+            exit(1);
+        }
+        e->type = type_bool();
+        return;
+    }
+    if (e->kind == ND_IS)
+    {
+        if (!e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "'is' requires a left-hand expression");
+            exit(1);
+        }
+        if (!e->is_type)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "'is' requires a target type");
+            exit(1);
+        }
+        check_expr(sc, e->lhs);
+        if (!type_is_object(e->lhs->type))
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "'is' currently requires an object-typed left operand");
             exit(1);
         }
         e->type = type_bool();
@@ -5413,7 +5534,27 @@ static void check_expr(SemaContext *sc, Node *e)
         e->call_is_indirect = call_is_indirect;
         e->call_is_varargs = func_sig->func.is_varargs;
 
-        if (!call_is_indirect)
+        if (e->call_is_jump)
+        {
+            if (e->arg_count != 0)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "jump calls cannot pass arguments");
+                exit(1);
+            }
+
+            if (!call_is_indirect)
+            {
+                if (!e->call_target || e->call_target->kind != ND_FUNC || !e->call_target->is_jump_target)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "direct jump target must be a function marked with [JumpTarget]");
+                    exit(1);
+                }
+            }
+        }
+
+        if (!call_is_indirect && !e->call_is_jump)
             inline_try_fold_call(e);
         return;
     }
@@ -5757,7 +5898,7 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
             stmt->var_type = canonicalize_type_deep(stmt->rhs->type);
             stmt->rhs->type = stmt->var_type;
         }
-        stmt->var_type = canonicalize_type_deep(stmt->var_type);
+        stmt->var_type = sema_resolve_import_type(canonicalize_type_deep(stmt->var_type));
         // Support multi-element brace initializers on pointer targets by
         // treating the storage as a fixed-size array of the pointee type.
         if (stmt->var_type && stmt->var_type->kind == TY_PTR && stmt->rhs && stmt->rhs->kind == ND_INIT_LIST && !stmt->rhs->init.is_zero)
@@ -5884,6 +6025,78 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
         if (stmt->body && sema_check_statement(sc, stmt->body, fn, found_ret))
             return 1;
         return 0;
+    case ND_TRY:
+    {
+        if (!fn || !fn->is_managed)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "try/catch/finally is currently supported only in managed functions");
+            return 1;
+        }
+        if (stmt->var_type)
+            stmt->var_type = sema_resolve_import_type(canonicalize_type_deep(stmt->var_type));
+        if (!stmt->lhs)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "try statement missing try block");
+            return 1;
+        }
+        if (sema_check_statement(sc, stmt->lhs, fn, found_ret))
+            return 1;
+        if (stmt->rhs && sema_check_statement(sc, stmt->rhs, fn, found_ret))
+            return 1;
+        if (stmt->body && sema_check_statement(sc, stmt->body, fn, found_ret))
+            return 1;
+        return 0;
+    }
+    case ND_THROW:
+    {
+        if (!fn || !fn->is_managed)
+        {
+            diag_error_at(stmt->src, stmt->line, stmt->col,
+                          "throw is currently supported only in managed functions");
+            return 1;
+        }
+        if (!stmt->lhs)
+            return 0;
+
+        check_expr(sc, stmt->lhs);
+        Type *lhs_ty = sema_resolve_import_type(canonicalize_type_deep(stmt->lhs->type));
+
+        if (stmt->rhs)
+        {
+            if (!lhs_ty || lhs_ty->kind != TY_STRUCT)
+            {
+                diag_error_at(stmt->lhs->src, stmt->lhs->line, stmt->lhs->col,
+                              "throw '<exception> -> <message>' requires an exception struct type on the left side");
+                return 1;
+            }
+            stmt->var_type = lhs_ty;
+            check_expr(sc, stmt->rhs);
+            Type *msg_ty = sema_resolve_import_type(canonicalize_type_deep(stmt->rhs->type));
+            if (!type_is_string_ptr(msg_ty))
+            {
+                diag_error_at(stmt->rhs->src, stmt->rhs->line, stmt->rhs->col,
+                              "throw message must be a string");
+                return 1;
+            }
+            return 0;
+        }
+
+        if (lhs_ty && lhs_ty->kind == TY_STRUCT)
+        {
+            stmt->var_type = lhs_ty;
+            return 0;
+        }
+
+        if (!type_is_string_ptr(lhs_ty))
+        {
+            diag_error_at(stmt->lhs->src, stmt->lhs->line, stmt->lhs->col,
+                          "throw expression must be a string, or an exception struct type");
+            return 1;
+        }
+        return 0;
+    }
     case ND_WHILE:
         if (stmt->lhs)
         {
@@ -6256,6 +6469,21 @@ static int sema_check_function(SemaContext *sc, Node *fn)
 {
     if (!fn->ret_type)
         fn->ret_type = &ty_i32;
+    if (fn->is_jump_target)
+    {
+        if (fn->param_count != 0)
+        {
+            diag_error_at(fn->src, fn->line, fn->col,
+                          "[JumpTarget] functions cannot have parameters");
+            return 1;
+        }
+        if (fn->is_varargs)
+        {
+            diag_error_at(fn->src, fn->line, fn->col,
+                          "[JumpTarget] functions cannot be variadic");
+            return 1;
+        }
+    }
     if (fn->is_chancecode || fn->is_literal)
         return 0;
     Node *body = fn->body;
@@ -6770,6 +6998,7 @@ static int inline_eval_const_expr(const Node *expr,
         return 1;
     }
     case ND_EQ:
+    case ND_STRICT_EQ:
     case ND_NE:
     case ND_LT:
     case ND_LE:
@@ -6786,6 +7015,7 @@ static int inline_eval_const_expr(const Node *expr,
         switch (expr->kind)
         {
         case ND_EQ:
+        case ND_STRICT_EQ:
             result = (lhs == rhs);
             break;
         case ND_NE:
@@ -6844,6 +7074,8 @@ static int inline_eval_const_expr(const Node *expr,
 static int inline_try_fold_call(Node *call_expr)
 {
     if (!call_expr || call_expr->kind != ND_CALL)
+        return 0;
+    if (call_expr->call_is_jump)
         return 0;
     if (call_expr->call_is_indirect)
         return 0;
