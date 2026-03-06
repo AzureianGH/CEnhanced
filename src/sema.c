@@ -2144,6 +2144,8 @@ static int alignof_type(Type *ty)
         return 8;
     case TY_STRUCT:
     {
+        if (ty->strct.is_packed)
+            return 1;
         int max_align = 1;
         if (!ty->strct.field_types || ty->strct.field_count <= 0)
             return max_align;

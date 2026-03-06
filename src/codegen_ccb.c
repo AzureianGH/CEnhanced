@@ -5006,7 +5006,11 @@ static CCValueType ccb_type_for_expr(const Node *expr)
     if (!expr)
         return CC_TYPE_VOID;
     if (expr->type)
+    {
+        if (expr->kind == ND_VAR && expr->type->kind == TY_REF && expr->type->pointee)
+            return map_type_to_cc(expr->type->pointee);
         return map_type_to_cc(expr->type);
+    }
 
     switch (expr->kind)
     {
@@ -5899,11 +5903,6 @@ static int ccb_emit_string_equality_compare(CcbFunctionBuilder *fb, const Node *
         return 1;
     if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->lhs), CC_TYPE_PTR, expr->lhs))
         return 1;
-    if (expr->lhs->type && expr->lhs->type->kind == TY_REF)
-    {
-        if (!ccb_emit_load_indirect(&fb->body, CC_TYPE_PTR))
-            return 1;
-    }
     if (!ccb_emit_store_local(fb, lhs_local))
         return 1;
 
@@ -5916,11 +5915,6 @@ static int ccb_emit_string_equality_compare(CcbFunctionBuilder *fb, const Node *
         return 1;
     if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->rhs), CC_TYPE_PTR, expr->rhs))
         return 1;
-    if (expr->rhs->type && expr->rhs->type->kind == TY_REF)
-    {
-        if (!ccb_emit_load_indirect(&fb->body, CC_TYPE_PTR))
-            return 1;
-    }
     if (!ccb_emit_store_local(fb, rhs_local))
         return 1;
 
@@ -5964,11 +5958,6 @@ static int ccb_emit_string_length_expr(CcbFunctionBuilder *fb, const Node *expr)
         return 1;
     if (ccb_emit_convert_between(fb, ccb_type_for_expr(expr->lhs), CC_TYPE_PTR, expr->lhs))
         return 1;
-    if (expr->lhs->type && expr->lhs->type->kind == TY_REF)
-    {
-        if (!ccb_emit_load_indirect(&fb->body, CC_TYPE_PTR))
-            return 1;
-    }
 
     const char *file_name = (expr->src && expr->src->filename) ? expr->src->filename : "";
     const char *symbol_name = "<string>";
@@ -9381,6 +9370,20 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                     if (!ccb_emit_load_global(&fb->body, expr->var_ref))
                         return 1;
                 }
+
+                if (expr->type && expr->type->kind == TY_REF && expr->type->pointee)
+                {
+                    const Type *pointee = expr->type->pointee;
+                    if (!type_is_address_only(pointee))
+                    {
+                        CCValueType pointee_ty = map_type_to_cc(pointee);
+                        if (pointee_ty != CC_TYPE_INVALID && pointee_ty != CC_TYPE_VOID)
+                        {
+                            if (!ccb_emit_load_indirect(&fb->body, pointee_ty))
+                                return 1;
+                        }
+                    }
+                }
                 return 0;
             }
             diag_error_at(expr->src, expr->line, expr->col,
@@ -9389,6 +9392,20 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         }
         if (!ccb_emit_load_local(fb, local))
             return 1;
+
+        if (expr->type && expr->type->kind == TY_REF && expr->type->pointee)
+        {
+            const Type *pointee = expr->type->pointee;
+            if (!type_is_address_only(pointee))
+            {
+                CCValueType pointee_ty = map_type_to_cc(pointee);
+                if (pointee_ty != CC_TYPE_INVALID && pointee_ty != CC_TYPE_VOID)
+                {
+                    if (!ccb_emit_load_indirect(&fb->body, pointee_ty))
+                        return 1;
+                }
+            }
+        }
         return 0;
     }
     case ND_CALL:

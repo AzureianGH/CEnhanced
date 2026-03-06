@@ -23,6 +23,7 @@ typedef enum
     TK_KW_STRUCT,
     TK_KW_STRUC, // alias accepted
     TK_KW_UNION,
+    TK_KW_PACKED,
     TK_KW_EXTEND,
     TK_KW_FROM,
     TK_KW_I32,
@@ -219,6 +220,7 @@ typedef struct Type
         int *field_offsets;
         int field_count;
         int size_bytes;
+        int is_packed;
     } strct;
     struct
     {

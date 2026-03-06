@@ -1385,12 +1385,42 @@ static Node *parse_brace_initializer(Parser *ps);
 static int parser_peek_struct_literal(Parser *ps, Token look);
 
 static Node *parse_initializer(Parser *ps);
-static void parse_struct_decl(Parser *ps, int is_exposed, int is_union);
+static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_packed);
 static void parse_enum_decl(Parser *ps, int is_exposed);
 static void parse_module_decl(Parser *ps, int managed_mode);
 static int parse_bring_decl(Parser *ps);
 static int parse_extend_decl(Parser *ps, int leading_noreturn);
 static Type *parse_inline_union_type(Parser *ps);
+static int struct_packed_from_attributes(Parser *ps, struct PendingAttr *attrs, int attr_count, int is_union);
+
+static int struct_packed_from_attributes(Parser *ps, struct PendingAttr *attrs, int attr_count, int is_union)
+{
+    int packed = 0;
+    if (!attrs || attr_count <= 0)
+        return 0;
+    for (int i = 0; i < attr_count; ++i)
+    {
+        struct PendingAttr *attr = &attrs[i];
+        if (!attr->name)
+            continue;
+        if (strcmp(attr->name, "Packed") == 0)
+        {
+            if (attr->value && *attr->value)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'Packed' attribute does not take arguments");
+                exit(1);
+            }
+            packed = 1;
+            continue;
+        }
+        diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                      "attribute '%s' is not supported on %s declarations",
+                      attr->name, is_union ? "union" : "struct");
+        exit(1);
+    }
+    return packed;
+}
 
 static Node *parser_make_var_ref(Parser *ps, const char *name, int line, int col)
 {
@@ -2099,6 +2129,8 @@ static int type_align_simple(Type *ty)
         return 8;
     case TY_STRUCT:
     {
+        if (ty->strct.is_packed)
+            return 1;
         int max_align = 1;
         if (!ty->strct.field_types || ty->strct.field_count <= 0)
             return max_align;
@@ -4098,7 +4130,7 @@ static Node *parse_primary(Parser *ps)
 
 // Forward decls for new top-level decls
 static void parse_enum_decl(Parser *ps, int is_exposed);
-static void parse_struct_decl(Parser *ps, int is_exposed, int is_union);
+static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_packed);
 static int parser_call_type_args_ahead(Parser *ps)
 {
     if (!ps)
@@ -6620,12 +6652,30 @@ Node *parse_unit(Parser *ps)
             t = lexer_peek(ps->lx);
         }
 
+        int leading_packed = 0;
+        Token packed_tok = {0};
+        if (t.kind == TK_KW_PACKED)
+        {
+            packed_tok = lexer_next(ps->lx);
+            leading_packed = 1;
+            t = lexer_peek(ps->lx);
+        }
+
         if (t.kind == TK_EOF)
         {
             Token err_tok = visibility ? vis_tok : noreturn_tok;
+            if (leading_packed)
+                err_tok = packed_tok;
             diag_error_at(lexer_source(ps->lx), err_tok.line, err_tok.col,
                           "unexpected end of file after '%.*s'",
                           err_tok.length, err_tok.lexeme);
+            exit(1);
+        }
+
+        if (leading_packed && t.kind != TK_KW_STRUCT)
+        {
+            diag_error_at(lexer_source(ps->lx), packed_tok.line, packed_tok.col,
+                          "'packed' is only valid before struct declarations");
             exit(1);
         }
 
@@ -6709,7 +6759,10 @@ Node *parse_unit(Parser *ps)
                               "'noreturn' is only valid before functions or extern declarations");
                 exit(1);
             }
-            parse_struct_decl(ps, visibility, 0);
+            int packed_attr = struct_packed_from_attributes(ps, attrs, attr_count, 0);
+            clear_pending_attrs(attrs, attr_count);
+            attr_count = 0;
+            parse_struct_decl(ps, visibility, 0, leading_packed || packed_attr);
             continue;
         }
         if (t.kind == TK_KW_UNION)
@@ -6726,7 +6779,16 @@ Node *parse_unit(Parser *ps)
                               "'noreturn' is only valid before functions or extern declarations");
                 exit(1);
             }
-            parse_struct_decl(ps, visibility, 1);
+            int packed_attr = struct_packed_from_attributes(ps, attrs, attr_count, 1);
+            if (packed_attr || leading_packed)
+            {
+                diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                              "packed layout is only supported on struct declarations");
+                exit(1);
+            }
+            clear_pending_attrs(attrs, attr_count);
+            attr_count = 0;
+            parse_struct_decl(ps, visibility, 1, 0);
             continue;
         }
         if (t.kind == TK_KW_ALIAS)
@@ -7187,6 +7249,7 @@ static Type *parse_inline_union_type(Parser *ps)
     ut->strct.field_offsets = NULL;
     ut->strct.field_count = 0;
     ut->strct.size_bytes = 0;
+    ut->strct.is_packed = 0;
 
     const char **fnames = NULL;
     Type **ftypes = NULL;
@@ -7253,7 +7316,7 @@ static Type *parse_inline_union_type(Parser *ps)
     return ut;
 }
 
-static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
+static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_packed)
 {
     Token kw = lexer_next(ps->lx);
     if (kw.kind != (is_union ? TK_KW_UNION : TK_KW_STRUCT))
@@ -7288,6 +7351,8 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
             }
             if (is_exposed && !existing->is_exposed)
                 existing->is_exposed = 1;
+            if (!is_union && is_packed)
+                existing->strct.is_packed = 1;
             return;
         }
         Type *forward = (Type *)xcalloc(1, sizeof(Type));
@@ -7299,6 +7364,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
         forward->is_exposed = is_exposed;
         forward->strct.field_count = 0;
         forward->strct.size_bytes = 0;
+        forward->strct.is_packed = (!is_union && is_packed) ? 1 : 0;
         named_type_add(ps, name.lexeme, name.length, forward, is_exposed);
         return;
     }
@@ -7344,6 +7410,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
     }
     st->is_union = !!is_union;
     st->is_exposed = st->is_exposed || is_exposed;
+    st->strct.is_packed = (!is_union && (st->strct.is_packed || is_packed)) ? 1 : 0;
     // Ensure name is registered before parsing fields so self-references work.
     if (is_new_struct)
         named_type_add(ps, name.lexeme, name.length, st, is_exposed);
@@ -7363,6 +7430,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
     int offset = 0;
     int max_size = 0;
     int max_align = 1;
+    int packed_layout = (!is_union && st->strct.is_packed);
     while (1)
     {
         Token t = lexer_peek(ps->lx);
@@ -7434,6 +7502,8 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
         else
         {
             offset = align_up(offset, field_align);
+            if (!packed_layout)
+                offset = align_up(offset, field_align);
             foff[fcnt - 1] = offset;
             offset += sz;
         }
@@ -7447,7 +7517,8 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
         st->strct.size_bytes = align_up(max_size, struct_align);
     else
     {
-        offset = align_up(offset, struct_align);
+        if (!packed_layout)
+            offset = align_up(offset, struct_align);
         st->strct.size_bytes = offset;
     }
     // named type already registered above
