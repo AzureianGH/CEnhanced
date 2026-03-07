@@ -1,0 +1,13 @@
+module M00;
+
+extend from "C" int printf(constant char*, ...);
+
+entrypoint expose fun main() -> i32 {
+    int x = 2;
+    int* x_new = new int[x];
+    x_new[0] = 42;
+    x_new[1] = 43;
+
+    printf("Hello, world! x = %d\n", x_new[0] + x_new[1]); // Should print 85
+    ret x + 10;
+}

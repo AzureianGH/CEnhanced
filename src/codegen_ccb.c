@@ -401,6 +401,7 @@ typedef struct
     size_t local_count;
     int next_label_id;
     int scope_depth;
+    bool needs_gc_prep;
     LoopContext *loop_stack;
     size_t loop_depth;
     size_t loop_capacity;
@@ -459,6 +460,7 @@ static bool ccb_emit_store_global(StringList *body, const char *name);
 static int ccb_promote_param_to_local(CcbFunctionBuilder *fb, const Node *site, CcbLocal **inout_local);
 static void ccb_scope_enter(CcbFunctionBuilder *fb);
 static void ccb_scope_leave(CcbFunctionBuilder *fb);
+static bool ccb_node_uses_tracked_alloc(const Node *node);
 static CCValueType ccb_type_for_expr(const Node *expr);
 static size_t ccb_type_size_bytes(const Type *ty);
 static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym);
@@ -472,17 +474,21 @@ static void ccb_opt_fold_const_unops(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_const_compares(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_const_test_null(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_const_converts(CcbFunctionBuilder *fb);
+static void ccb_opt_strength_reduce_binops(CcbFunctionBuilder *fb);
 static void ccb_opt_simplify_noop_arith_and_bitcasts(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_const_or_store_chains(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_dup_rmw_or_chains(CcbFunctionBuilder *fb);
 static void ccb_opt_pack_byte_store_runs(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_overwritten_indirect_stores(CcbFunctionBuilder *fb);
 static void ccb_opt_simplify_store_load_store(CcbFunctionBuilder *fb);
+static void ccb_opt_promote_local_values(CcbFunctionBuilder *fb);
 static void ccb_opt_propagate_local_values(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_dead_local_stores(CcbFunctionBuilder *fb);
+static void ccb_opt_remove_unused_local_slots(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_dead_local_copies(CcbFunctionBuilder *fb);
 static void ccb_opt_simplify_addr_local_temp(CcbFunctionBuilder *fb);
 static void ccb_opt_simplify_bool_normalization(CcbFunctionBuilder *fb);
+static bool ccb_instruction_is_control_barrier(const char *line);
 static void ccb_opt_simplify_const_branches(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_unreachable_fallthrough(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_redundant_jumps(CcbFunctionBuilder *fb);
@@ -909,6 +915,66 @@ static void ccb_module_optimize(CcbModule *mod, const CodegenOptions *opts)
     string_list_free(&used_symbols);
 }
 
+static bool ccb_node_uses_tracked_alloc(const Node *node)
+{
+    if (!node)
+        return false;
+
+    if (node->kind == ND_NEW)
+        return true;
+
+    if (ccb_node_uses_tracked_alloc(node->lhs) ||
+        ccb_node_uses_tracked_alloc(node->rhs) ||
+        ccb_node_uses_tracked_alloc(node->body) ||
+        ccb_node_uses_tracked_alloc(node->type_expr))
+    {
+        return true;
+    }
+
+    for (int i = 0; i < node->arg_count; ++i)
+    {
+        if (ccb_node_uses_tracked_alloc(node->args[i]))
+            return true;
+    }
+
+    for (int i = 0; i < node->stmt_count; ++i)
+    {
+        if (ccb_node_uses_tracked_alloc(node->stmts[i]))
+            return true;
+    }
+
+    for (int i = 0; i < node->init.count; ++i)
+    {
+        if (ccb_node_uses_tracked_alloc(node->init.elems[i]))
+            return true;
+    }
+
+    if (ccb_node_uses_tracked_alloc(node->switch_stmt.expr))
+        return true;
+    for (int i = 0; i < node->switch_stmt.case_count; ++i)
+    {
+        if (ccb_node_uses_tracked_alloc(node->switch_stmt.cases[i].value) ||
+            ccb_node_uses_tracked_alloc(node->switch_stmt.cases[i].body))
+        {
+            return true;
+        }
+    }
+
+    if (ccb_node_uses_tracked_alloc(node->match_stmt.expr))
+        return true;
+    for (int i = 0; i < node->match_stmt.arm_count; ++i)
+    {
+        if (ccb_node_uses_tracked_alloc(node->match_stmt.arms[i].pattern) ||
+            ccb_node_uses_tracked_alloc(node->match_stmt.arms[i].guard) ||
+            ccb_node_uses_tracked_alloc(node->match_stmt.arms[i].body))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, const Node *fn, bool enable_debug)
 {
     if (!fb)
@@ -927,6 +993,7 @@ static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, co
     fb->local_count = 0;
     fb->next_label_id = 0;
     fb->scope_depth = 0;
+    fb->needs_gc_prep = false;
     fb->loop_stack = NULL;
     fb->loop_depth = 0;
     fb->loop_capacity = 0;
@@ -947,6 +1014,7 @@ static void ccb_function_builder_free(CcbFunctionBuilder *fb)
     fb->module = NULL;
     fb->fn = NULL;
     fb->next_label_id = 0;
+    fb->needs_gc_prep = false;
     free(fb->loop_stack);
     fb->loop_stack = NULL;
     fb->loop_depth = 0;
@@ -2503,6 +2571,74 @@ static bool ccb_replace_linef(StringList *body, size_t index, const char *fmt, .
     return true;
 }
 
+static bool ccb_replace_line_copy(StringList *body, size_t index, const char *replacement)
+{
+    if (!body || !replacement || index >= body->count)
+        return false;
+    char *copy = xstrdup(replacement);
+    if (!copy)
+        return false;
+    free(body->items[index]);
+    body->items[index] = copy;
+    return true;
+}
+
+static const char *ccb_local_type_name_by_index(const CcbFunctionBuilder *fb, int local_index)
+{
+    if (!fb || local_index < 0)
+        return NULL;
+    for (size_t i = 0; i < fb->locals_count; ++i)
+    {
+        const CcbLocal *local = &fb->locals[i];
+        if (!local->is_param && local->index == local_index)
+            return cc_type_name(local->value_type);
+    }
+    return NULL;
+}
+
+static bool ccb_line_is_clonable_local_value(const char *line)
+{
+    line = ccb_trim_leading_ws(line);
+    if (!line)
+        return false;
+    return strncmp(line, "const ", 6) == 0 ||
+           strncmp(line, "const_str ", 10) == 0 ||
+           strncmp(line, "load_param ", 11) == 0 ||
+           strncmp(line, "addr_param ", 11) == 0 ||
+           strncmp(line, "addr_local ", 11) == 0 ||
+           strncmp(line, "addr_global ", 12) == 0;
+}
+
+static bool ccb_const_is_integer_value(const CcbConstInfo *info, unsigned long long expected)
+{
+    if (!info)
+        return false;
+    unsigned long long mask = ccb_mask_for_width(info->width);
+    return (info->u & mask) == (expected & mask);
+}
+
+static bool ccb_const_is_all_ones(const CcbConstInfo *info)
+{
+    if (!info || info->width == 0)
+        return false;
+    return ccb_const_is_integer_value(info, ccb_mask_for_width(info->width));
+}
+
+static bool ccb_const_is_power_of_two(const CcbConstInfo *info, unsigned *shift_out)
+{
+    if (!info || info->width == 0)
+        return false;
+    unsigned long long value = info->u & ccb_mask_for_width(info->width);
+    if (value == 0ULL || (value & (value - 1ULL)) != 0ULL)
+        return false;
+    unsigned shift = 0;
+    while ((value >> shift) != 1ULL)
+        ++shift;
+    if (shift_out)
+        *shift_out = shift;
+    return true;
+}
+
 static void ccb_opt_fold_const_binops(CcbFunctionBuilder *fb)
 {
     if (!fb)
@@ -3056,6 +3192,51 @@ static void ccb_opt_fold_const_converts(CcbFunctionBuilder *fb)
     }
 }
 
+static void ccb_opt_strength_reduce_binops(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+
+    StringList *body = &fb->body;
+    for (size_t i = 0; i + 2 < body->count; ++i)
+    {
+        CcbConstInfo rhs;
+        char op[16];
+        char type_name[16];
+        bool unsigned_hint = false;
+        if (!ccb_parse_const_info(body->items[i + 1], &rhs) ||
+            !ccb_parse_binop_info(body->items[i + 2], op, sizeof(op), type_name, sizeof(type_name), &unsigned_hint) ||
+            strcmp(rhs.type, type_name) != 0 ||
+            !ccb_type_is_integer_name(type_name))
+        {
+            continue;
+        }
+
+        unsigned shift = 0;
+        if (strcmp(op, "mul") == 0 && ccb_const_is_power_of_two(&rhs, &shift) && shift > 0)
+        {
+            ccb_replace_linef(body, i + 1, "  const %s %u", type_name, shift);
+            ccb_replace_linef(body, i + 2, "  binop shl %s%s", type_name,
+                              unsigned_hint ? " unsigned" : "");
+            continue;
+        }
+
+        if (unsigned_hint && strcmp(op, "div") == 0 && ccb_const_is_power_of_two(&rhs, &shift) && shift > 0)
+        {
+            ccb_replace_linef(body, i + 1, "  const %s %u", type_name, shift);
+            ccb_replace_linef(body, i + 2, "  binop shr %s unsigned", type_name);
+            continue;
+        }
+
+        if (unsigned_hint && strcmp(op, "mod") == 0 && ccb_const_is_power_of_two(&rhs, &shift) && shift > 0)
+        {
+            unsigned long long mask = (shift >= rhs.width) ? ccb_mask_for_width(rhs.width) : ((1ULL << shift) - 1ULL);
+            ccb_replace_linef(body, i + 1, "  const %s %llu", type_name, (unsigned long long)mask);
+            ccb_replace_linef(body, i + 2, "  binop and %s unsigned", type_name);
+        }
+    }
+}
+
 static void ccb_opt_simplify_noop_arith_and_bitcasts(CcbFunctionBuilder *fb)
 {
     if (!fb)
@@ -3073,10 +3254,14 @@ static void ccb_opt_simplify_noop_arith_and_bitcasts(CcbFunctionBuilder *fb)
             ccb_parse_binop_info(body->items[i + 2], op_name, sizeof(op_name),
                                  type_name, sizeof(type_name), &unsigned_hint) &&
             strcmp(rhs_const.type, type_name) == 0 &&
-            rhs_const.u == 0ULL &&
             (ccb_type_is_integer_name(type_name) || ccb_type_is_ptr_name(type_name)) &&
-            (strcmp(op_name, "add") == 0 || strcmp(op_name, "sub") == 0 ||
-             strcmp(op_name, "or") == 0 || strcmp(op_name, "xor") == 0))
+                        ((ccb_const_is_integer_value(&rhs_const, 0ULL) &&
+                            (strcmp(op_name, "add") == 0 || strcmp(op_name, "sub") == 0 ||
+                             strcmp(op_name, "or") == 0 || strcmp(op_name, "xor") == 0 ||
+                             strcmp(op_name, "shl") == 0 || strcmp(op_name, "shr") == 0)) ||
+                         (ccb_const_is_integer_value(&rhs_const, 1ULL) &&
+                            (strcmp(op_name, "mul") == 0 || strcmp(op_name, "div") == 0)) ||
+                         (strcmp(op_name, "and") == 0 && ccb_const_is_all_ones(&rhs_const))))
         {
             (void)unsigned_hint;
             string_list_remove_range(body, i + 1, 2);
@@ -3090,10 +3275,11 @@ static void ccb_opt_simplify_noop_arith_and_bitcasts(CcbFunctionBuilder *fb)
             ccb_parse_binop_info(body->items[i + 2], op_name, sizeof(op_name),
                                  type_name, sizeof(type_name), &unsigned_hint) &&
             strcmp(lhs_const.type, type_name) == 0 &&
-            lhs_const.u == 0ULL &&
             (ccb_type_is_integer_name(type_name) || ccb_type_is_ptr_name(type_name)) &&
-            (strcmp(op_name, "add") == 0 || strcmp(op_name, "or") == 0 ||
-             strcmp(op_name, "xor") == 0))
+                        ((ccb_const_is_integer_value(&lhs_const, 0ULL) &&
+                            (strcmp(op_name, "add") == 0 || strcmp(op_name, "or") == 0 ||
+                             strcmp(op_name, "xor") == 0 || strcmp(op_name, "mul") == 0)) ||
+                         (strcmp(op_name, "and") == 0 && ccb_const_is_all_ones(&lhs_const))))
         {
             (void)unsigned_hint;
             string_list_remove_range(body, i + 2, 1);
@@ -3114,7 +3300,23 @@ static void ccb_opt_simplify_noop_arith_and_bitcasts(CcbFunctionBuilder *fb)
         if (!ccb_parse_convert_info(body->items[i], kind1, sizeof(kind1), from1, sizeof(from1), to1, sizeof(to1)) ||
             !ccb_parse_convert_info(body->items[i + 1], kind2, sizeof(kind2), from2, sizeof(from2), to2, sizeof(to2)))
         {
+            if (ccb_parse_convert_info(body->items[i], kind1, sizeof(kind1), from1, sizeof(from1), to1, sizeof(to1)) &&
+                strcmp(from1, to1) == 0)
+            {
+                string_list_remove_range(body, i, 1);
+                if (i > 0)
+                    --i;
+                continue;
+            }
             ++i;
+            continue;
+        }
+
+        if (strcmp(from1, to1) == 0)
+        {
+            string_list_remove_range(body, i, 1);
+            if (i > 0)
+                --i;
             continue;
         }
 
@@ -3129,6 +3331,88 @@ static void ccb_opt_simplify_noop_arith_and_bitcasts(CcbFunctionBuilder *fb)
 
         ++i;
     }
+}
+
+static void ccb_opt_promote_local_values(CcbFunctionBuilder *fb)
+{
+    if (!fb || fb->local_count == 0)
+        return;
+
+    StringList *body = &fb->body;
+    bool *promotable = (bool *)calloc(fb->local_count, sizeof(bool));
+    char **known_lines = (char **)calloc(fb->local_count, sizeof(char *));
+    if (!promotable || !known_lines)
+    {
+        free(promotable);
+        free(known_lines);
+        return;
+    }
+
+    for (size_t i = 0; i < fb->local_count; ++i)
+        promotable[i] = true;
+
+    for (size_t i = 0; i < body->count; ++i)
+    {
+        int local_idx = -1;
+        if (ccb_parse_local_index(body->items[i], "addr_local", &local_idx) &&
+            local_idx >= 0 && (size_t)local_idx < fb->local_count)
+            promotable[local_idx] = false;
+    }
+
+    for (size_t i = 0; i + 1 < body->count; ++i)
+    {
+        int store_idx = -1;
+        int load_idx = -1;
+        if (!ccb_parse_local_index(body->items[i], "store_local", &store_idx) ||
+            !ccb_parse_local_index(body->items[i + 1], "load_local", &load_idx) ||
+            store_idx != load_idx || store_idx < 0 || (size_t)store_idx >= fb->local_count ||
+            !promotable[store_idx])
+        {
+            continue;
+        }
+
+        const char *type_name = ccb_local_type_name_by_index(fb, store_idx);
+        if (!type_name)
+            continue;
+        if (!ccb_replace_linef(body, i, "  dup %s", type_name))
+            continue;
+        ccb_replace_linef(body, i + 1, "  store_local %d", store_idx);
+    }
+
+    for (size_t i = 0; i < body->count; ++i)
+    {
+        int local_idx = -1;
+        if (ccb_parse_local_index(body->items[i], "load_local", &local_idx) &&
+            local_idx >= 0 && (size_t)local_idx < fb->local_count && promotable[local_idx] && known_lines[local_idx])
+        {
+            ccb_replace_line_copy(body, i, known_lines[local_idx]);
+            continue;
+        }
+
+        if (ccb_parse_local_index(body->items[i], "store_local", &local_idx) &&
+            local_idx >= 0 && (size_t)local_idx < fb->local_count)
+        {
+            free(known_lines[local_idx]);
+            known_lines[local_idx] = NULL;
+            if (promotable[local_idx] && i > 0 && ccb_line_is_clonable_local_value(body->items[i - 1]))
+                known_lines[local_idx] = xstrdup(body->items[i - 1]);
+            continue;
+        }
+
+        if (ccb_instruction_is_control_barrier(body->items[i]))
+        {
+            for (size_t j = 0; j < fb->local_count; ++j)
+            {
+                free(known_lines[j]);
+                known_lines[j] = NULL;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < fb->local_count; ++i)
+        free(known_lines[i]);
+    free(known_lines);
+    free(promotable);
 }
 
 static void ccb_opt_fold_const_or_store_chains(CcbFunctionBuilder *fb)
@@ -4080,10 +4364,7 @@ static void ccb_opt_remove_dead_local_stores(CcbFunctionBuilder *fb)
                 break;
             }
             if (trimmed && strncmp(trimmed, "ret", 3) == 0)
-            {
-                hit_barrier = true;
                 break;
-            }
 
             int idx = -1;
             if ((ccb_parse_local_index(line, "load_local", &idx) ||
@@ -4124,6 +4405,113 @@ static void ccb_opt_remove_dead_local_stores(CcbFunctionBuilder *fb)
         if (remove_index > 0)
             --i;
     }
+}
+
+static void ccb_remap_local_indices(StringList *list, const size_t *map, size_t old_count)
+{
+    if (!list || !map)
+        return;
+
+    for (size_t i = 0; i < list->count; ++i)
+    {
+        int idx = -1;
+        if (ccb_parse_local_index(list->items[i], "load_local", &idx))
+        {
+            if (idx >= 0 && (size_t)idx < old_count && map[idx] != SIZE_MAX)
+                ccb_replace_linef(list, i, "  load_local %zu", map[idx]);
+            continue;
+        }
+        if (ccb_parse_local_index(list->items[i], "store_local", &idx))
+        {
+            if (idx >= 0 && (size_t)idx < old_count && map[idx] != SIZE_MAX)
+                ccb_replace_linef(list, i, "  store_local %zu", map[idx]);
+            continue;
+        }
+        if (ccb_parse_local_index(list->items[i], "addr_local", &idx))
+        {
+            if (idx >= 0 && (size_t)idx < old_count && map[idx] != SIZE_MAX)
+                ccb_replace_linef(list, i, "  addr_local %zu", map[idx]);
+        }
+    }
+}
+
+static void ccb_opt_remove_unused_local_slots(CcbFunctionBuilder *fb)
+{
+    if (!fb || fb->local_count == 0)
+        return;
+
+    size_t old_count = fb->local_count;
+    bool *used = (bool *)calloc(old_count, sizeof(bool));
+    if (!used)
+        return;
+
+    StringList *lists[2] = {&fb->prologue, &fb->body};
+    for (size_t list_index = 0; list_index < 2; ++list_index)
+    {
+        StringList *list = lists[list_index];
+        for (size_t i = 0; i < list->count; ++i)
+        {
+            int idx = -1;
+            if ((ccb_parse_local_index(list->items[i], "load_local", &idx) ||
+                 ccb_parse_local_index(list->items[i], "store_local", &idx) ||
+                 ccb_parse_local_index(list->items[i], "addr_local", &idx)) &&
+                idx >= 0 && (size_t)idx < old_count)
+            {
+                used[idx] = true;
+            }
+        }
+    }
+
+    size_t new_count = 0;
+    for (size_t i = 0; i < old_count; ++i)
+    {
+        if (used[i])
+            ++new_count;
+    }
+
+    if (new_count == old_count)
+    {
+        free(used);
+        return;
+    }
+
+    size_t *map = (size_t *)malloc(old_count * sizeof(size_t));
+    if (!map)
+    {
+        free(used);
+        return;
+    }
+
+    size_t next_index = 0;
+    for (size_t i = 0; i < old_count; ++i)
+    {
+        if (used[i])
+            map[i] = next_index++;
+        else
+            map[i] = SIZE_MAX;
+    }
+
+    ccb_remap_local_indices(&fb->prologue, map, old_count);
+    ccb_remap_local_indices(&fb->body, map, old_count);
+
+    size_t write_index = 0;
+    for (size_t i = 0; i < fb->locals_count; ++i)
+    {
+        CcbLocal local = fb->locals[i];
+        if (!local.is_param)
+        {
+            if (local.index < 0 || (size_t)local.index >= old_count || map[local.index] == SIZE_MAX)
+                continue;
+            local.index = (int)map[local.index];
+        }
+        fb->locals[write_index++] = local;
+    }
+
+    fb->locals_count = write_index;
+    fb->local_count = new_count;
+
+    free(map);
+    free(used);
 }
 
 static void ccb_opt_simplify_const_branches(CcbFunctionBuilder *fb)
@@ -4610,6 +4998,12 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
         ccb_opt_fold_const_converts(fb);
 
         if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass strength reduce binops");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass strength reduce binops");
+        ccb_opt_strength_reduce_binops(fb);
+
+        if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass simplify no-op arith/bitcasts");
         if (compiler_verbose_enabled())
             compiler_verbose_logf("optimizer", "pass simplify no-op arith/bitcasts");
@@ -4642,6 +5036,11 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
             compiler_verbose_logf("optimizer", "pass simplify store/load/store");
         ccb_opt_simplify_store_load_store(fb);
         if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass promote local values");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass promote local values");
+        ccb_opt_promote_local_values(fb);
+        if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass propagate local values");
         if (compiler_verbose_enabled())
             compiler_verbose_logf("optimizer", "pass propagate local values");
@@ -4651,6 +5050,11 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
         if (compiler_verbose_enabled())
             compiler_verbose_logf("optimizer", "pass remove dead local stores");
         ccb_opt_remove_dead_local_stores(fb);
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass remove unused local slots");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass remove unused local slots");
+        ccb_opt_remove_unused_local_slots(fb);
         if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass fold constant compares");
         if (compiler_verbose_enabled())
@@ -4711,6 +5115,11 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
         if (compiler_verbose_enabled())
             compiler_verbose_logf("optimizer", "pass remove dead local stores");
         ccb_opt_remove_dead_local_stores(fb);
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass remove unused local slots");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass remove unused local slots");
+        ccb_opt_remove_unused_local_slots(fb);
         if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass remove dead local copies");
         if (compiler_verbose_enabled())
@@ -10022,7 +10431,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
         if (stmt->lhs)
         {
             // if this is the entrypoint, call GC prep exit before returning
-            if (fb->fn && fb->fn->is_entrypoint)
+            if (fb->fn && fb->fn->is_entrypoint && fb->needs_gc_prep)
             {
                 if (!ccb_module_has_function(fb->module, "__cert__GC__prep_exit") && !ccb_module_has_extern(fb->module, "__cert__GC__prep_exit"))
                 {
@@ -10040,7 +10449,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
         else
         {
             // if this is the entrypoint, call GC prep exit before returning
-            if (fb->fn && fb->fn->is_entrypoint)
+            if (fb->fn && fb->fn->is_entrypoint && fb->needs_gc_prep)
             {
                 if (!ccb_module_has_function(fb->module, "__cert__GC__prep_exit") && !ccb_module_has_extern(fb->module, "__cert__GC__prep_exit"))
                 {
@@ -11445,10 +11854,11 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
     bool enable_debug = mod && mod->emit_debug;
     ccb_function_builder_init(&fb, mod, fn, enable_debug);
     ccb_function_builder_register_params(&fb);
+    fb.needs_gc_prep = ccb_node_uses_tracked_alloc(fn->body);
     int rc = 0;
 
     // If this function is the entry point, arrange for GC prep calls.
-    if (fn->is_entrypoint)
+    if (fn->is_entrypoint && fb.needs_gc_prep)
     {
         if (!ccb_module_has_function(mod, "__cert__GC__prep_enter") && !ccb_module_has_extern(mod, "__cert__GC__prep_enter"))
         {
