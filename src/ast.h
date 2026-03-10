@@ -537,8 +537,16 @@ int lexer_collect_literal_block(Lexer *lx, char **out_text);
 const SourceBuffer *lexer_source(Lexer *lx);
 
 typedef struct Parser Parser;
+typedef enum
+{
+    CHANCE_STD_H26 = 26,
+    CHANCE_STD_H27 = 27,
+} ChanceLanguageStandard;
+
 Parser *parser_create(SourceBuffer src);
 void parser_set_disable_formatting_notes(int disable);
+void parser_set_language_standard(ChanceLanguageStandard standard);
+ChanceLanguageStandard parser_get_language_standard(void);
 void parser_destroy(Parser *ps);
 // Parse a translation unit; currently expects one function 'main' with a return
 // int expression

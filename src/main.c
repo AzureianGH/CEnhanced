@@ -383,6 +383,10 @@ static void usage(const char *prog)
       "  --implicit-voidp Allow implicit pointer to void* conversions\n");
       fprintf(stderr,
         "  --implicit-sizeof Allow implicit sizeof/alignof/offsetof to integer conversions\n");
+        fprintf(stderr,
+          "  -H26             Compile in H26 language mode\n");
+        fprintf(stderr,
+          "  -H27             Compile in H27 language mode (default)\n");
   fprintf(stderr, "  --library         Emit a .cclib library instead of "
                   "compiling/linking\n");
 }
@@ -1540,6 +1544,7 @@ typedef struct
   int *implicit_voidp;
   int *implicit_void_function;
   int *implicit_sizeof;
+  int *language_standard;
   int *request_ast;
   int *diagnostics_only;
   int *toolchain_debug_mode;
@@ -2079,6 +2084,18 @@ static int project_args_apply(const char *proj_path, int lineno,
         *state->implicit_sizeof = 1;
       continue;
     }
+    if (strcmp(arg, "-H26") == 0)
+    {
+      if (state->language_standard)
+        *state->language_standard = CHANCE_STD_H26;
+      continue;
+    }
+    if (strcmp(arg, "-H27") == 0)
+    {
+      if (state->language_standard)
+        *state->language_standard = CHANCE_STD_H27;
+      continue;
+    }
     if (arg[0] == '-')
     {
       fprintf(stderr,
@@ -2127,6 +2144,7 @@ static int parse_ceproj_file(
   const char **chs_cmd_override, const char **host_cc_cmd_override,
   const char **obj_override,
   int *implicit_voidp, int *implicit_void_function, int *implicit_sizeof, int *request_ast,
+  int *language_standard,
   int *diagnostics_only, int *toolchain_debug_mode,
   int *toolchain_debug_deep,
   OverrideFile **override_files, int *override_file_count, int *override_file_cap,
@@ -2365,6 +2383,7 @@ static int parse_ceproj_file(
           .implicit_voidp = implicit_voidp,
           .implicit_void_function = implicit_void_function,
           .implicit_sizeof = implicit_sizeof,
+          .language_standard = language_standard,
           .request_ast = request_ast,
           .diagnostics_only = diagnostics_only,
           .toolchain_debug_mode = toolchain_debug_mode,
@@ -5524,6 +5543,7 @@ int main(int argc, char **argv)
   int implicit_voidp = 0;
   int implicit_void_function = 0;
   int implicit_sizeof = 0;
+  int language_standard = CHANCE_STD_H27;
   int request_ast = 0;
   int diagnostics_only = 0;
   int toolchain_debug_mode = 0;
@@ -5604,8 +5624,8 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[i], "--version") == 0)
     {
-      printf("chancec: CHance Compiler version 1.1.0\n");
-      printf("chancec: CE language standard: H26\n");
+      printf("chancec: CHance Compiler version 2.0.0\n");
+      printf("chancec: CE language standard default: H27\n");
       printf("chancec: License: OpenAzure License\n");
       printf("chancec: Compiled on %s %s\n", __DATE__, __TIME__);
       printf("chancec: Created by Nathan Hornby (AzureianGH)\n");
@@ -5927,6 +5947,16 @@ int main(int argc, char **argv)
       implicit_sizeof = 1;
       continue;
     }
+    if (strcmp(argv[i], "-H26") == 0)
+    {
+      language_standard = CHANCE_STD_H26;
+      continue;
+    }
+    if (strcmp(argv[i], "-H27") == 0)
+    {
+      language_standard = CHANCE_STD_H27;
+      continue;
+    }
     if (strncmp(argv[i], "-sr:", 4) == 0)
     {
       const char *sr_path = argv[i] + 4;
@@ -6003,6 +6033,7 @@ int main(int argc, char **argv)
             &chancecodec_cmd_override, &chs_cmd_override,
             &host_cc_cmd_override, &obj_override,
               &implicit_voidp, &implicit_void_function, &implicit_sizeof, &request_ast,
+          &language_standard,
           &diagnostics_only, &toolchain_debug_mode, &toolchain_debug_deep,
           &override_files, &override_file_count, &override_file_cap,
           (ProjectInputList){&symbol_ref_ce_inputs, &symbol_ref_ce_count,
@@ -6154,6 +6185,12 @@ int main(int argc, char **argv)
   if (m32)
   {
     fprintf(stderr, "Error: -m32 not implemented yet\n");
+    return 2;
+  }
+  if (language_standard == CHANCE_STD_H26 && implicit_void_function)
+  {
+    fprintf(stderr,
+            "error: --implicit-void-function is only available in H27 mode\n");
     return 2;
   }
 
@@ -6460,6 +6497,7 @@ int main(int argc, char **argv)
   sema_set_allow_implicit_voidp(implicit_voidp);
   sema_set_allow_implicit_void_function(implicit_void_function);
   sema_set_allow_implicit_sizeof(implicit_sizeof);
+  parser_set_language_standard((ChanceLanguageStandard)language_standard);
 
   module_registry_reset();
   if (strip_hard)

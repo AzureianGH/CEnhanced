@@ -9,12 +9,41 @@
 #include <limits.h>
 
 static int parser_disable_formatting_notes = 0;
+static ChanceLanguageStandard parser_language_standard = CHANCE_STD_H27;
 
 #define RAW_EXPORT_PREFIX "__cc_raw_export__"
 
 void parser_set_disable_formatting_notes(int disable)
 {
     parser_disable_formatting_notes = disable ? 1 : 0;
+}
+
+void parser_set_language_standard(ChanceLanguageStandard standard)
+{
+    if (standard != CHANCE_STD_H26 && standard != CHANCE_STD_H27)
+        standard = CHANCE_STD_H27;
+    parser_language_standard = standard;
+}
+
+ChanceLanguageStandard parser_get_language_standard(void)
+{
+    return parser_language_standard;
+}
+
+static int parser_is_h27_enabled(void)
+{
+    return parser_language_standard >= CHANCE_STD_H27;
+}
+
+static void parser_require_h27(Parser *ps, Token tok, const char *feature_name)
+{
+    (void)ps;
+    if (parser_is_h27_enabled())
+        return;
+    diag_error_at(NULL, tok.line, tok.col,
+                  "'%s' requires H27 mode (use -H27)",
+                  feature_name ? feature_name : "feature");
+    exit(1);
 }
 
 struct ModuleImport
@@ -2372,18 +2401,20 @@ static int is_type_start(Parser *ps, Token t)
     case TK_KW_BOOL:
     case TK_KW_STACK:
     case TK_KW_ACTION:
+        return 1;
     case TK_KW_OBJECT:
-        return 1;
+        return parser_is_h27_enabled();
     case TK_KW_REF:
-        return 1;
+        return parser_is_h27_enabled();
     case TK_KW_FUN:
     {
         Token next = lexer_peek_n(ps->lx, 1);
         return next.kind == TK_STAR;
     }
     case TK_KW_STRUCT:
-    case TK_KW_UNION:
         return 1;
+    case TK_KW_UNION:
+        return parser_is_h27_enabled();
     default:
         break;
     }
@@ -2588,6 +2619,7 @@ static Type *parse_type_base(Parser *ps)
     Token b = lexer_next(ps->lx);
     if (b.kind == TK_KW_REF)
     {
+        parser_require_h27(ps, b, "ref type");
         int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
         Token look = lexer_peek(ps->lx);
         if (look.kind == TK_QUESTION)
@@ -2605,6 +2637,7 @@ static Type *parse_type_base(Parser *ps)
     }
     if (b.kind == TK_KW_REF)
     {
+        parser_require_h27(ps, b, "ref type");
         int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
         Token look = lexer_peek(ps->lx);
         if (look.kind == TK_QUESTION)
@@ -2670,7 +2703,10 @@ static Type *parse_type_base(Parser *ps)
     else if (b.kind == TK_KW_BOOL)
         base = &tbool;
     else if (b.kind == TK_KW_OBJECT)
+    {
+        parser_require_h27(ps, b, "object type");
         base = &tobject;
+    }
     else if (b.kind == TK_KW_LONG)
     {
         // check for 'long double'
@@ -2938,6 +2974,8 @@ static Type *parse_type_base(Parser *ps)
     }
     else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_UNION)
     {
+        if (b.kind == TK_KW_UNION)
+            parser_require_h27(ps, b, "union type");
         int want_union = (b.kind == TK_KW_UNION);
         Token look = lexer_peek(ps->lx);
         if (want_union && look.kind == TK_LBRACE)
@@ -3000,6 +3038,7 @@ static Type *parse_type_spec(Parser *ps)
     Token b = lexer_next(ps->lx);
     if (b.kind == TK_KW_REF)
     {
+        parser_require_h27(ps, b, "ref type");
         int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
         Token look = lexer_peek(ps->lx);
         if (look.kind == TK_QUESTION)
@@ -3064,7 +3103,10 @@ static Type *parse_type_spec(Parser *ps)
     else if (b.kind == TK_KW_BOOL)
         base = &tbool;
     else if (b.kind == TK_KW_OBJECT)
+    {
+        parser_require_h27(ps, b, "object type");
         base = &tobject;
+    }
     else if (b.kind == TK_KW_LONG)
     {
         // check for 'long double'
@@ -3332,6 +3374,8 @@ static Type *parse_type_spec(Parser *ps)
     }
     else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_UNION)
     {
+        if (b.kind == TK_KW_UNION)
+            parser_require_h27(ps, b, "union type");
         int want_union = (b.kind == TK_KW_UNION);
         Token look = lexer_peek(ps->lx);
         if (want_union && look.kind == TK_LBRACE)
@@ -4593,6 +4637,7 @@ static Node *parse_unary(Parser *ps)
     }
     if (p.kind == TK_KW_REF)
     {
+        parser_require_h27(ps, p, "ref address-of expression");
         lexer_next(ps->lx);
         Node *lv = parse_unary(ps);
         Node *n = new_node(ND_ADDR);
@@ -4637,6 +4682,7 @@ static Node *parse_unary(Parser *ps)
     }
     if (p.kind == TK_KW_NEW)
     {
+        parser_require_h27(ps, p, "new expression");
         lexer_next(ps->lx);
         Type *ty = parse_type_base(ps);
         Node *n = new_node(ND_NEW);
@@ -4794,6 +4840,7 @@ static Node *parse_rel(Parser *ps)
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_KW_IS)
         {
+            parser_require_h27(ps, p, "'is' type-test operator");
             Token op = lexer_next(ps->lx);
             Type *rhs_ty = parse_type_spec(ps);
             Node *n = new_node(ND_IS);
@@ -4838,6 +4885,7 @@ static Node *parse_eq(Parser *ps)
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_EQEQEQ)
         {
+            parser_require_h27(ps, p, "'===' strict equality operator");
             Token op = lexer_next(ps->lx);
             Node *rhs = parse_rel(ps);
             Node *n = new_node(ND_STRICT_EQ);
@@ -5192,6 +5240,7 @@ static Node *parse_stmt(Parser *ps)
     Token t = lexer_peek(ps->lx);
     if (t.kind == TK_KW_MANAGED)
     {
+        parser_require_h27(ps, t, "managed block");
         lexer_next(ps->lx);
         Token next = lexer_peek(ps->lx);
         if (next.kind != TK_LBRACE)
@@ -5209,6 +5258,7 @@ static Node *parse_stmt(Parser *ps)
     }
     if (t.kind == TK_KW_UNMANAGED)
     {
+        parser_require_h27(ps, t, "unmanaged block");
         lexer_next(ps->lx);
         Token next = lexer_peek(ps->lx);
         if (next.kind != TK_LBRACE)
@@ -5265,10 +5315,12 @@ static Node *parse_stmt(Parser *ps)
     }
     if (t.kind == TK_KW_TRY)
     {
+        parser_require_h27(ps, t, "try/catch/finally");
         return parse_try_stmt(ps);
     }
     if (t.kind == TK_KW_THROW)
     {
+        parser_require_h27(ps, t, "throw statement");
         lexer_next(ps->lx);
         Token nxt = lexer_peek(ps->lx);
         Node *expr = NULL;
@@ -5341,6 +5393,7 @@ static Node *parse_stmt(Parser *ps)
     }
     if (t.kind == TK_KW_JUMP)
     {
+        parser_require_h27(ps, t, "jump statement");
         lexer_next(ps->lx);
         Node *expr = parse_expr(ps);
         if (!expr || expr->kind != ND_CALL)
@@ -5361,6 +5414,7 @@ static Node *parse_stmt(Parser *ps)
     }
     if (t.kind == TK_KW_DELETE)
     {
+        parser_require_h27(ps, t, "delete statement");
         lexer_next(ps->lx);
         Node *expr = parse_expr(ps);
         expect(ps, TK_SEMI, ";");
@@ -6616,6 +6670,7 @@ Node *parse_unit(Parser *ps)
         int managed_override_value = 0;
         if (t.kind == TK_KW_MANAGED || t.kind == TK_KW_UNMANAGED)
         {
+            parser_require_h27(ps, t, "managed/unmanaged declaration modifier");
             Token managed_tok = lexer_next(ps->lx);
             managed_override_present = 1;
             managed_override_value = (managed_tok.kind == TK_KW_MANAGED) ? 1 : 0;
@@ -6702,6 +6757,7 @@ Node *parse_unit(Parser *ps)
         Token packed_tok = {0};
         if (t.kind == TK_KW_PACKED)
         {
+            parser_require_h27(ps, t, "packed struct");
             packed_tok = lexer_next(ps->lx);
             leading_packed = 1;
             t = lexer_peek(ps->lx);
@@ -6813,6 +6869,7 @@ Node *parse_unit(Parser *ps)
         }
         if (t.kind == TK_KW_UNION)
         {
+            parser_require_h27(ps, t, "union declaration");
             if (bring_seen)
                 bring_block_done = 1;
             if (extend_seen)
