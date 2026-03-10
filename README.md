@@ -4,6 +4,27 @@
 
 It parses `.ce` source files, runs semantic analysis, emits ChanceCode bytecode (`.ccb`), and can drive backend compilation and linking through the CHance toolchain.
 
+## How to Install
+Clone these repositories like:
+
+```bash
+git clone https://github.com/Aquanite/CEnhanced.git
+git clone https://github.com/Aquanite/ChanceCode.git
+git clone https://github.com/Aquanite/CHS.git
+git clone https://github.com/Aquanite/CLD.git
+```
+
+Then build `chancec` and related tools:
+
+```bash
+cd CEnhanced
+./install.sh
+```
+OR with PREFIX on Windows
+```
+cd CEnhanced
+.\install.bat
+```
 ## Language Standards
 
 - H26 specification: [`H26.md`](H26.md)
