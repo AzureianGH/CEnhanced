@@ -54,6 +54,7 @@ RUNTIME_DIR="$SHARE_DIR/runtime"
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CHANCECODE_DIR="${1:-$SCRIPT_DIR/../ChanceCode}"
 CLD_DIR="${2:-$SCRIPT_DIR/../CLD}"
+CHS_DIR="${3:-$SCRIPT_DIR/../CHS}"
 if [ -n "$CHANCECODE_DIR" ]; then
   if cd "$CHANCECODE_DIR" >/dev/null 2>&1; then
     CHANCECODE_DIR=$(pwd)
@@ -63,6 +64,12 @@ fi
 if [ -n "$CLD_DIR" ]; then
   if cd "$CLD_DIR" >/dev/null 2>&1; then
     CLD_DIR=$(pwd)
+    cd "$SCRIPT_DIR"
+  fi
+fi
+if [ -n "$CHS_DIR" ]; then
+  if cd "$CHS_DIR" >/dev/null 2>&1; then
+    CHS_DIR=$(pwd)
     cd "$SCRIPT_DIR"
   fi
 fi
@@ -83,6 +90,12 @@ if [ -n "$CHANCECODE_DIR" ] && [ -f "$CHANCECODE_DIR/build.sh" ]; then
   ok "ChanceCode build complete"
 fi
 
+if [ -n "$CHS_DIR" ] && [ -f "$CHS_DIR/Makefile" ]; then
+  log "Building CHS"
+  (cd "$CHS_DIR" && make)
+  ok "CHS build complete"
+fi
+
 CHANCEC_BIN="$SCRIPT_DIR/build/chancec"
 if [ ! -x "$CHANCEC_BIN" ]; then
   err "error: chancec not found at $CHANCEC_BIN"
@@ -99,14 +112,34 @@ if [ -n "$CHANCECODEC_BIN" ]; then
   note "Using chancecodec for library rebuild: $CHANCECODEC_BIN"
 fi
 
+CHS_BIN=""
+if [ -x "$SCRIPT_DIR/build/chs" ]; then
+  CHS_BIN="$SCRIPT_DIR/build/chs"
+elif [ -x "$CHS_DIR/build/chs" ]; then
+  CHS_BIN="$CHS_DIR/build/chs"
+fi
+if [ -n "$CHS_BIN" ]; then
+  note "Using CHS for assembly: $CHS_BIN"
+fi
+
 section "Libraries"
 log "Rebuilding runtime and stdlib with built compiler"
 if [ -n "$CHANCECODEC_BIN" ]; then
-  (cd "$SCRIPT_DIR/runtime" && "$CHANCEC_BIN" --chancecodec "$CHANCECODEC_BIN" runtime.ceproj)
-  (cd "$SCRIPT_DIR/src/stdlib" && "$CHANCEC_BIN" --chancecodec "$CHANCECODEC_BIN" stdlib.ceproj)
+  if [ -n "$CHS_BIN" ]; then
+    (cd "$SCRIPT_DIR/runtime" && "$CHANCEC_BIN" --chancecodec "$CHANCECODEC_BIN" --chs "$CHS_BIN" runtime.ceproj)
+    (cd "$SCRIPT_DIR/src/stdlib" && "$CHANCEC_BIN" --chancecodec "$CHANCECODEC_BIN" --chs "$CHS_BIN" stdlib.ceproj)
+  else
+    (cd "$SCRIPT_DIR/runtime" && "$CHANCEC_BIN" --chancecodec "$CHANCECODEC_BIN" runtime.ceproj)
+    (cd "$SCRIPT_DIR/src/stdlib" && "$CHANCEC_BIN" --chancecodec "$CHANCECODEC_BIN" stdlib.ceproj)
+  fi
 else
-  (cd "$SCRIPT_DIR/runtime" && "$CHANCEC_BIN" runtime.ceproj)
-  (cd "$SCRIPT_DIR/src/stdlib" && "$CHANCEC_BIN" stdlib.ceproj)
+  if [ -n "$CHS_BIN" ]; then
+    (cd "$SCRIPT_DIR/runtime" && "$CHANCEC_BIN" --chs "$CHS_BIN" runtime.ceproj)
+    (cd "$SCRIPT_DIR/src/stdlib" && "$CHANCEC_BIN" --chs "$CHS_BIN" stdlib.ceproj)
+  else
+    (cd "$SCRIPT_DIR/runtime" && "$CHANCEC_BIN" runtime.ceproj)
+    (cd "$SCRIPT_DIR/src/stdlib" && "$CHANCEC_BIN" stdlib.ceproj)
+  fi
 fi
 ok "Library rebuild complete"
 
@@ -137,6 +170,11 @@ fi
 if [ -n "$CLD_DIR" ] && [ -f "$CLD_DIR/Makefile" ]; then
   log "Installing CLD"
   (cd "$CLD_DIR" && make install PREFIX="$PREFIX")
+fi
+
+if [ -n "$CHS_DIR" ] && [ -f "$CHS_DIR/Makefile" ]; then
+  log "Installing CHS"
+  (cd "$CHS_DIR" && make install PREFIX="$PREFIX")
 fi
 
 ok "Done"
