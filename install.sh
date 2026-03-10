@@ -53,9 +53,16 @@ RUNTIME_DIR="$SHARE_DIR/runtime"
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CHANCECODE_DIR="${1:-$SCRIPT_DIR/../ChanceCode}"
+CLD_DIR="${2:-$SCRIPT_DIR/../CLD}"
 if [ -n "$CHANCECODE_DIR" ]; then
   if cd "$CHANCECODE_DIR" >/dev/null 2>&1; then
     CHANCECODE_DIR=$(pwd)
+    cd "$SCRIPT_DIR"
+  fi
+fi
+if [ -n "$CLD_DIR" ]; then
+  if cd "$CLD_DIR" >/dev/null 2>&1; then
+    CLD_DIR=$(pwd)
     cd "$SCRIPT_DIR"
   fi
 fi
@@ -125,6 +132,11 @@ if [ -x "$SCRIPT_DIR/build/chancecodec" ]; then
   install -m 755 "$SCRIPT_DIR/build/chancecodec" "$BIN_DIR/chancecodec"
 elif [ -x "$CHANCECODE_DIR/build/chancecodec" ]; then
   install -m 755 "$CHANCECODE_DIR/build/chancecodec" "$BIN_DIR/chancecodec"
+fi
+
+if [ -n "$CLD_DIR" ] && [ -f "$CLD_DIR/Makefile" ]; then
+  log "Installing CLD"
+  (cd "$CLD_DIR" && make install PREFIX="$PREFIX")
 fi
 
 ok "Done"
