@@ -9,12 +9,41 @@
 #include <limits.h>
 
 static int parser_disable_formatting_notes = 0;
+static ChanceLanguageStandard parser_language_standard = CHANCE_STD_H27;
 
 #define RAW_EXPORT_PREFIX "__cc_raw_export__"
 
 void parser_set_disable_formatting_notes(int disable)
 {
     parser_disable_formatting_notes = disable ? 1 : 0;
+}
+
+void parser_set_language_standard(ChanceLanguageStandard standard)
+{
+    if (standard != CHANCE_STD_H26 && standard != CHANCE_STD_H27)
+        standard = CHANCE_STD_H27;
+    parser_language_standard = standard;
+}
+
+ChanceLanguageStandard parser_get_language_standard(void)
+{
+    return parser_language_standard;
+}
+
+static int parser_is_h27_enabled(void)
+{
+    return parser_language_standard >= CHANCE_STD_H27;
+}
+
+static void parser_require_h27(Parser *ps, Token tok, const char *feature_name)
+{
+    (void)ps;
+    if (parser_is_h27_enabled())
+        return;
+    diag_error_at(NULL, tok.line, tok.col,
+                  "'%s' requires H27 mode (use -H27)",
+                  feature_name ? feature_name : "feature");
+    exit(1);
 }
 
 struct ModuleImport
@@ -1385,12 +1414,42 @@ static Node *parse_brace_initializer(Parser *ps);
 static int parser_peek_struct_literal(Parser *ps, Token look);
 
 static Node *parse_initializer(Parser *ps);
-static void parse_struct_decl(Parser *ps, int is_exposed, int is_union);
+static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_packed);
 static void parse_enum_decl(Parser *ps, int is_exposed);
 static void parse_module_decl(Parser *ps, int managed_mode);
 static int parse_bring_decl(Parser *ps);
 static int parse_extend_decl(Parser *ps, int leading_noreturn);
 static Type *parse_inline_union_type(Parser *ps);
+static int struct_packed_from_attributes(Parser *ps, struct PendingAttr *attrs, int attr_count, int is_union);
+
+static int struct_packed_from_attributes(Parser *ps, struct PendingAttr *attrs, int attr_count, int is_union)
+{
+    int packed = 0;
+    if (!attrs || attr_count <= 0)
+        return 0;
+    for (int i = 0; i < attr_count; ++i)
+    {
+        struct PendingAttr *attr = &attrs[i];
+        if (!attr->name)
+            continue;
+        if (strcmp(attr->name, "Packed") == 0)
+        {
+            if (attr->value && *attr->value)
+            {
+                diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                              "'Packed' attribute does not take arguments");
+                exit(1);
+            }
+            packed = 1;
+            continue;
+        }
+        diag_error_at(lexer_source(ps->lx), attr->line, attr->col,
+                      "attribute '%s' is not supported on %s declarations",
+                      attr->name, is_union ? "union" : "struct");
+        exit(1);
+    }
+    return packed;
+}
 
 static Node *parser_make_var_ref(Parser *ps, const char *name, int line, int col)
 {
@@ -1625,13 +1684,13 @@ static Node *parse_try_stmt(Parser *ps)
                 clause_name = heap;
             }
 
-            Token guard_q = lexer_peek(ps->lx);
-            if (guard_q.kind == TK_QUESTION)
+            Token guard_tok = lexer_peek(ps->lx);
+            if (guard_tok.kind == TK_QUESTION)
             {
                 Token guard_gt = lexer_peek_n(ps->lx, 1);
                 if (guard_gt.kind != TK_GT)
                 {
-                    diag_error_at(lexer_source(ps->lx), guard_q.line, guard_q.col,
+                    diag_error_at(lexer_source(ps->lx), guard_tok.line, guard_tok.col,
                                   "expected '>' after '?' in catch guard; use '?> <expr>'");
                     exit(1);
                 }
@@ -1639,8 +1698,19 @@ static Node *parse_try_stmt(Parser *ps)
                 lexer_next(ps->lx);
                 if (!clause_name)
                 {
-                    diag_error_at(lexer_source(ps->lx), guard_q.line, guard_q.col,
+                    diag_error_at(lexer_source(ps->lx), guard_tok.line, guard_tok.col,
                                   "catch guard requires a catch variable name (e.g. catch (T ex ?> ...))");
+                    exit(1);
+                }
+                clause_guard = parse_expr(ps);
+            }
+            else if (guard_tok.kind == TK_KW_WHERE)
+            {
+                lexer_next(ps->lx);
+                if (!clause_name)
+                {
+                    diag_error_at(lexer_source(ps->lx), guard_tok.line, guard_tok.col,
+                                  "catch guard requires a catch variable name (e.g. catch (T ex where ...))");
                     exit(1);
                 }
                 clause_guard = parse_expr(ps);
@@ -2099,6 +2169,8 @@ static int type_align_simple(Type *ty)
         return 8;
     case TY_STRUCT:
     {
+        if (ty->strct.is_packed)
+            return 1;
         int max_align = 1;
         if (!ty->strct.field_types || ty->strct.field_count <= 0)
             return max_align;
@@ -2329,18 +2401,20 @@ static int is_type_start(Parser *ps, Token t)
     case TK_KW_BOOL:
     case TK_KW_STACK:
     case TK_KW_ACTION:
+        return 1;
     case TK_KW_OBJECT:
-        return 1;
+        return parser_is_h27_enabled();
     case TK_KW_REF:
-        return 1;
+        return parser_is_h27_enabled();
     case TK_KW_FUN:
     {
         Token next = lexer_peek_n(ps->lx, 1);
         return next.kind == TK_STAR;
     }
     case TK_KW_STRUCT:
-    case TK_KW_UNION:
         return 1;
+    case TK_KW_UNION:
+        return parser_is_h27_enabled();
     default:
         break;
     }
@@ -2545,6 +2619,7 @@ static Type *parse_type_base(Parser *ps)
     Token b = lexer_next(ps->lx);
     if (b.kind == TK_KW_REF)
     {
+        parser_require_h27(ps, b, "ref type");
         int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
         Token look = lexer_peek(ps->lx);
         if (look.kind == TK_QUESTION)
@@ -2562,6 +2637,7 @@ static Type *parse_type_base(Parser *ps)
     }
     if (b.kind == TK_KW_REF)
     {
+        parser_require_h27(ps, b, "ref type");
         int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
         Token look = lexer_peek(ps->lx);
         if (look.kind == TK_QUESTION)
@@ -2627,7 +2703,10 @@ static Type *parse_type_base(Parser *ps)
     else if (b.kind == TK_KW_BOOL)
         base = &tbool;
     else if (b.kind == TK_KW_OBJECT)
+    {
+        parser_require_h27(ps, b, "object type");
         base = &tobject;
+    }
     else if (b.kind == TK_KW_LONG)
     {
         // check for 'long double'
@@ -2895,6 +2974,8 @@ static Type *parse_type_base(Parser *ps)
     }
     else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_UNION)
     {
+        if (b.kind == TK_KW_UNION)
+            parser_require_h27(ps, b, "union type");
         int want_union = (b.kind == TK_KW_UNION);
         Token look = lexer_peek(ps->lx);
         if (want_union && look.kind == TK_LBRACE)
@@ -2957,6 +3038,7 @@ static Type *parse_type_spec(Parser *ps)
     Token b = lexer_next(ps->lx);
     if (b.kind == TK_KW_REF)
     {
+        parser_require_h27(ps, b, "ref type");
         int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
         Token look = lexer_peek(ps->lx);
         if (look.kind == TK_QUESTION)
@@ -3021,7 +3103,10 @@ static Type *parse_type_spec(Parser *ps)
     else if (b.kind == TK_KW_BOOL)
         base = &tbool;
     else if (b.kind == TK_KW_OBJECT)
+    {
+        parser_require_h27(ps, b, "object type");
         base = &tobject;
+    }
     else if (b.kind == TK_KW_LONG)
     {
         // check for 'long double'
@@ -3289,6 +3374,8 @@ static Type *parse_type_spec(Parser *ps)
     }
     else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_UNION)
     {
+        if (b.kind == TK_KW_UNION)
+            parser_require_h27(ps, b, "union type");
         int want_union = (b.kind == TK_KW_UNION);
         Token look = lexer_peek(ps->lx);
         if (want_union && look.kind == TK_LBRACE)
@@ -4098,7 +4185,7 @@ static Node *parse_primary(Parser *ps)
 
 // Forward decls for new top-level decls
 static void parse_enum_decl(Parser *ps, int is_exposed);
-static void parse_struct_decl(Parser *ps, int is_exposed, int is_union);
+static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_packed);
 static int parser_call_type_args_ahead(Parser *ps)
 {
     if (!ps)
@@ -4441,12 +4528,47 @@ static Node *parse_postfix(Parser *ps)
     return parse_postfix_suffixes(ps, e);
 }
 
+static Node *parse_managed_array_adapter(Parser *ps, Token open_paren)
+{
+    expect(ps, TK_KW_MANAGED, "managed");
+    expect(ps, TK_LBRACKET, "[");
+    expect(ps, TK_RBRACKET, "]");
+    expect(ps, TK_COLON, ":");
+    expect(ps, TK_DOT, ".");
+
+    Token field = expect(ps, TK_IDENT, "managed array property");
+    if (!(field.length == 6 && strncmp(field.lexeme, "length", 6) == 0))
+    {
+        diag_error_at(lexer_source(ps->lx), field.line, field.col,
+                      "only '.length' is supported in managed array adapters");
+        exit(1);
+    }
+
+    expect(ps, TK_ASSIGN, "=");
+    Node *length_expr = parse_expr(ps);
+    expect(ps, TK_RPAREN, ")");
+
+    Node *operand = parse_unary(ps);
+    Node *adapt = new_node(ND_MANAGED_ARRAY_ADAPT);
+    adapt->lhs = operand;
+    adapt->rhs = length_expr;
+    adapt->line = open_paren.line;
+    adapt->col = open_paren.col;
+    adapt->src = lexer_source(ps->lx);
+    return adapt;
+}
+
 static Node *parse_unary(Parser *ps)
 {
     Token p = lexer_peek(ps->lx);
     if (p.kind == TK_LPAREN)
     {
         Token next = lexer_peek_n(ps->lx, 1);
+        if (next.kind == TK_KW_MANAGED)
+        {
+            lexer_next(ps->lx); // consume '('
+            return parse_managed_array_adapter(ps, p);
+        }
         if (is_type_start(ps, next))
         {
             lexer_next(ps->lx); // consume '('
@@ -4515,6 +4637,7 @@ static Node *parse_unary(Parser *ps)
     }
     if (p.kind == TK_KW_REF)
     {
+        parser_require_h27(ps, p, "ref address-of expression");
         lexer_next(ps->lx);
         Node *lv = parse_unary(ps);
         Node *n = new_node(ND_ADDR);
@@ -4559,6 +4682,7 @@ static Node *parse_unary(Parser *ps)
     }
     if (p.kind == TK_KW_NEW)
     {
+        parser_require_h27(ps, p, "new expression");
         lexer_next(ps->lx);
         Type *ty = parse_type_base(ps);
         Node *n = new_node(ND_NEW);
@@ -4716,6 +4840,7 @@ static Node *parse_rel(Parser *ps)
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_KW_IS)
         {
+            parser_require_h27(ps, p, "'is' type-test operator");
             Token op = lexer_next(ps->lx);
             Type *rhs_ty = parse_type_spec(ps);
             Node *n = new_node(ND_IS);
@@ -4760,6 +4885,7 @@ static Node *parse_eq(Parser *ps)
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_EQEQEQ)
         {
+            parser_require_h27(ps, p, "'===' strict equality operator");
             Token op = lexer_next(ps->lx);
             Node *rhs = parse_rel(ps);
             Node *n = new_node(ND_STRICT_EQ);
@@ -5114,6 +5240,7 @@ static Node *parse_stmt(Parser *ps)
     Token t = lexer_peek(ps->lx);
     if (t.kind == TK_KW_MANAGED)
     {
+        parser_require_h27(ps, t, "managed block");
         lexer_next(ps->lx);
         Token next = lexer_peek(ps->lx);
         if (next.kind != TK_LBRACE)
@@ -5131,6 +5258,7 @@ static Node *parse_stmt(Parser *ps)
     }
     if (t.kind == TK_KW_UNMANAGED)
     {
+        parser_require_h27(ps, t, "unmanaged block");
         lexer_next(ps->lx);
         Token next = lexer_peek(ps->lx);
         if (next.kind != TK_LBRACE)
@@ -5187,10 +5315,12 @@ static Node *parse_stmt(Parser *ps)
     }
     if (t.kind == TK_KW_TRY)
     {
+        parser_require_h27(ps, t, "try/catch/finally");
         return parse_try_stmt(ps);
     }
     if (t.kind == TK_KW_THROW)
     {
+        parser_require_h27(ps, t, "throw statement");
         lexer_next(ps->lx);
         Token nxt = lexer_peek(ps->lx);
         Node *expr = NULL;
@@ -5263,6 +5393,7 @@ static Node *parse_stmt(Parser *ps)
     }
     if (t.kind == TK_KW_JUMP)
     {
+        parser_require_h27(ps, t, "jump statement");
         lexer_next(ps->lx);
         Node *expr = parse_expr(ps);
         if (!expr || expr->kind != ND_CALL)
@@ -5283,6 +5414,7 @@ static Node *parse_stmt(Parser *ps)
     }
     if (t.kind == TK_KW_DELETE)
     {
+        parser_require_h27(ps, t, "delete statement");
         lexer_next(ps->lx);
         Node *expr = parse_expr(ps);
         expect(ps, TK_SEMI, ";");
@@ -6538,6 +6670,7 @@ Node *parse_unit(Parser *ps)
         int managed_override_value = 0;
         if (t.kind == TK_KW_MANAGED || t.kind == TK_KW_UNMANAGED)
         {
+            parser_require_h27(ps, t, "managed/unmanaged declaration modifier");
             Token managed_tok = lexer_next(ps->lx);
             managed_override_present = 1;
             managed_override_value = (managed_tok.kind == TK_KW_MANAGED) ? 1 : 0;
@@ -6620,12 +6753,31 @@ Node *parse_unit(Parser *ps)
             t = lexer_peek(ps->lx);
         }
 
+        int leading_packed = 0;
+        Token packed_tok = {0};
+        if (t.kind == TK_KW_PACKED)
+        {
+            parser_require_h27(ps, t, "packed struct");
+            packed_tok = lexer_next(ps->lx);
+            leading_packed = 1;
+            t = lexer_peek(ps->lx);
+        }
+
         if (t.kind == TK_EOF)
         {
             Token err_tok = visibility ? vis_tok : noreturn_tok;
+            if (leading_packed)
+                err_tok = packed_tok;
             diag_error_at(lexer_source(ps->lx), err_tok.line, err_tok.col,
                           "unexpected end of file after '%.*s'",
                           err_tok.length, err_tok.lexeme);
+            exit(1);
+        }
+
+        if (leading_packed && t.kind != TK_KW_STRUCT)
+        {
+            diag_error_at(lexer_source(ps->lx), packed_tok.line, packed_tok.col,
+                          "'packed' is only valid before struct declarations");
             exit(1);
         }
 
@@ -6709,11 +6861,15 @@ Node *parse_unit(Parser *ps)
                               "'noreturn' is only valid before functions or extern declarations");
                 exit(1);
             }
-            parse_struct_decl(ps, visibility, 0);
+            int packed_attr = struct_packed_from_attributes(ps, attrs, attr_count, 0);
+            clear_pending_attrs(attrs, attr_count);
+            attr_count = 0;
+            parse_struct_decl(ps, visibility, 0, leading_packed || packed_attr);
             continue;
         }
         if (t.kind == TK_KW_UNION)
         {
+            parser_require_h27(ps, t, "union declaration");
             if (bring_seen)
                 bring_block_done = 1;
             if (extend_seen)
@@ -6726,7 +6882,16 @@ Node *parse_unit(Parser *ps)
                               "'noreturn' is only valid before functions or extern declarations");
                 exit(1);
             }
-            parse_struct_decl(ps, visibility, 1);
+            int packed_attr = struct_packed_from_attributes(ps, attrs, attr_count, 1);
+            if (packed_attr || leading_packed)
+            {
+                diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                              "packed layout is only supported on struct declarations");
+                exit(1);
+            }
+            clear_pending_attrs(attrs, attr_count);
+            attr_count = 0;
+            parse_struct_decl(ps, visibility, 1, 0);
             continue;
         }
         if (t.kind == TK_KW_ALIAS)
@@ -7184,9 +7349,11 @@ static Type *parse_inline_union_type(Parser *ps)
     ut->is_union = 1;
     ut->strct.field_names = NULL;
     ut->strct.field_types = NULL;
+    ut->strct.field_default_values = NULL;
     ut->strct.field_offsets = NULL;
     ut->strct.field_count = 0;
     ut->strct.size_bytes = 0;
+    ut->strct.is_packed = 0;
 
     const char **fnames = NULL;
     Type **ftypes = NULL;
@@ -7247,13 +7414,156 @@ static Type *parse_inline_union_type(Parser *ps)
 
     ut->strct.field_names = fnames;
     ut->strct.field_types = ftypes;
+    ut->strct.field_default_values = NULL;
     ut->strct.field_offsets = foff;
     ut->strct.field_count = fcnt;
     ut->strct.size_bytes = align_up(max_size, max_align > 0 ? max_align : 1);
     return ut;
 }
 
-static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
+static int parser_field_default_allows_null(const Type *ty)
+{
+    return ty && (ty->kind == TY_PTR || ty->kind == TY_REF || ty->is_object);
+}
+
+static int parser_field_default_allows_string(const Type *ty)
+{
+    return ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_CHAR;
+}
+
+static int parser_field_default_allows_int(const Type *ty)
+{
+    if (!ty)
+        return 0;
+    switch (ty->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+    case TY_I16:
+    case TY_U16:
+    case TY_I32:
+    case TY_U32:
+    case TY_I64:
+    case TY_U64:
+    case TY_CHAR:
+    case TY_BOOL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int parser_field_default_allows_float(const Type *ty)
+{
+    return ty && (ty->kind == TY_F32 || ty->kind == TY_F64 || ty->kind == TY_F128);
+}
+
+static char *parser_serialize_struct_field_default(Parser *ps, const Type *field_type, Node *expr)
+{
+    Node *cur = expr;
+    while (cur && cur->kind == ND_CAST)
+        cur = cur->lhs;
+    if (!cur)
+    {
+        diag_error("invalid struct field default initializer");
+        exit(1);
+    }
+
+    if (cur->kind == ND_NULL)
+    {
+        if (!parser_field_default_allows_null(field_type))
+        {
+            diag_error_at(cur->src, cur->line, cur->col,
+                          "field default 'null' requires pointer-like field type");
+            exit(1);
+        }
+        return xstrdup("N");
+    }
+
+    if (cur->kind == ND_STRING)
+    {
+        if (!parser_field_default_allows_string(field_type))
+        {
+            diag_error_at(cur->src, cur->line, cur->col,
+                          "string field defaults require a string-compatible pointer field");
+            exit(1);
+        }
+        size_t len = cur->str_len > 0 ? (size_t)cur->str_len : 0;
+        int prefix_len = snprintf(NULL, 0, "S%zu:", len);
+        char *out = (char *)xmalloc((size_t)prefix_len + len + 1);
+        snprintf(out, (size_t)prefix_len + 1, "S%zu:", len);
+        if (len > 0 && cur->str_data)
+            memcpy(out + prefix_len, cur->str_data, len);
+        out[prefix_len + len] = '\0';
+        return out;
+    }
+
+    if (cur->kind == ND_INT)
+    {
+        if (!parser_field_default_allows_int(field_type))
+        {
+            diag_error_at(cur->src, cur->line, cur->col,
+                          "integer field default is not compatible with this field type");
+            exit(1);
+        }
+        char buf[64];
+        if (cur->int_is_unsigned)
+            snprintf(buf, sizeof(buf), "U%llu", (unsigned long long)cur->int_uval);
+        else
+            snprintf(buf, sizeof(buf), "I%lld", (long long)cur->int_val);
+        return xstrdup(buf);
+    }
+
+    if (cur->kind == ND_FLOAT)
+    {
+        if (!parser_field_default_allows_float(field_type))
+        {
+            diag_error_at(cur->src, cur->line, cur->col,
+                          "floating-point field default is not compatible with this field type");
+            exit(1);
+        }
+        char buf[64];
+        snprintf(buf, sizeof(buf), "F%.17g", cur->float_val);
+        return xstrdup(buf);
+    }
+
+    if (cur->kind == ND_NEG && cur->lhs)
+    {
+        Node *inner = cur->lhs;
+        while (inner && inner->kind == ND_CAST)
+            inner = inner->lhs;
+        if (inner && inner->kind == ND_INT)
+        {
+            if (!parser_field_default_allows_int(field_type))
+            {
+                diag_error_at(cur->src, cur->line, cur->col,
+                              "integer field default is not compatible with this field type");
+                exit(1);
+            }
+            char buf[64];
+            snprintf(buf, sizeof(buf), "I%lld", (long long)(-inner->int_val));
+            return xstrdup(buf);
+        }
+        if (inner && inner->kind == ND_FLOAT)
+        {
+            if (!parser_field_default_allows_float(field_type))
+            {
+                diag_error_at(cur->src, cur->line, cur->col,
+                              "floating-point field default is not compatible with this field type");
+                exit(1);
+            }
+            char buf[64];
+            snprintf(buf, sizeof(buf), "F%.17g", -inner->float_val);
+            return xstrdup(buf);
+        }
+    }
+
+    diag_error_at(cur->src, cur->line, cur->col,
+                  "struct field defaults currently support only literal numbers, strings, and null");
+    exit(1);
+}
+
+static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_packed)
 {
     Token kw = lexer_next(ps->lx);
     if (kw.kind != (is_union ? TK_KW_UNION : TK_KW_STRUCT))
@@ -7288,6 +7598,8 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
             }
             if (is_exposed && !existing->is_exposed)
                 existing->is_exposed = 1;
+            if (!is_union && is_packed)
+                existing->strct.is_packed = 1;
             return;
         }
         Type *forward = (Type *)xcalloc(1, sizeof(Type));
@@ -7299,6 +7611,8 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
         forward->is_exposed = is_exposed;
         forward->strct.field_count = 0;
         forward->strct.size_bytes = 0;
+        forward->strct.is_packed = (!is_union && is_packed) ? 1 : 0;
+        forward->strct.field_default_values = NULL;
         named_type_add(ps, name.lexeme, name.length, forward, is_exposed);
         return;
     }
@@ -7344,6 +7658,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
     }
     st->is_union = !!is_union;
     st->is_exposed = st->is_exposed || is_exposed;
+    st->strct.is_packed = (!is_union && (st->strct.is_packed || is_packed)) ? 1 : 0;
     // Ensure name is registered before parsing fields so self-references work.
     if (is_new_struct)
         named_type_add(ps, name.lexeme, name.length, st, is_exposed);
@@ -7351,6 +7666,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
     // Reset any forward-declaration field info before populating.
     st->strct.field_names = NULL;
     st->strct.field_types = NULL;
+    st->strct.field_default_values = NULL;
     st->strct.field_offsets = NULL;
     st->strct.field_count = 0;
     st->strct.size_bytes = 0;
@@ -7358,11 +7674,13 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
     // Parse fields: list of type ident ';'
     const char **fnames = NULL;
     Type **ftypes = NULL;
+    const char **fdefs = NULL;
     int *foff = NULL;
     int fcnt = 0, fcap = 0;
     int offset = 0;
     int max_size = 0;
     int max_align = 1;
+    int packed_layout = (!is_union && st->strct.is_packed);
     while (1)
     {
         Token t = lexer_peek(ps->lx);
@@ -7385,6 +7703,19 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
         (void)is_const; // fields ignore const for now
         Type *fty = parse_type_spec(ps);
         Token fname = expect(ps, TK_IDENT, "field name");
+        char *field_default = NULL;
+        Token maybe_assign = lexer_peek(ps->lx);
+        if (maybe_assign.kind == TK_ASSIGN)
+        {
+            if (is_union)
+            {
+                diag_error_at(lexer_source(ps->lx), maybe_assign.line, maybe_assign.col,
+                              "union fields do not support default initializers");
+                exit(1);
+            }
+            lexer_next(ps->lx);
+            field_default = parser_serialize_struct_field_default(ps, fty, parse_expr(ps));
+        }
         // optional multiple declarators not supported; one per line
         if (is_exposed)
         {
@@ -7405,6 +7736,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
             fcap = fcap ? fcap * 2 : 4;
             fnames = (const char **)realloc(fnames, sizeof(char *) * fcap);
             ftypes = (Type **)realloc(ftypes, sizeof(Type *) * fcap);
+            fdefs = (const char **)realloc(fdefs, sizeof(char *) * fcap);
             foff = (int *)realloc(foff, sizeof(int) * fcap);
         }
         char *nm = (char *)xmalloc((size_t)fname.length + 1);
@@ -7412,6 +7744,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
         nm[fname.length] = '\0';
         fnames[fcnt] = nm;
         ftypes[fcnt] = fty;
+        fdefs[fcnt] = field_default;
         fcnt++;
         int field_align = type_align_simple(fty);
         if (field_align > max_align)
@@ -7434,12 +7767,15 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
         else
         {
             offset = align_up(offset, field_align);
+            if (!packed_layout)
+                offset = align_up(offset, field_align);
             foff[fcnt - 1] = offset;
             offset += sz;
         }
     }
     st->strct.field_names = fnames;
     st->strct.field_types = ftypes;
+    st->strct.field_default_values = fdefs;
     st->strct.field_offsets = foff;
     st->strct.field_count = fcnt;
     int struct_align = max_align > 0 ? max_align : 1;
@@ -7447,7 +7783,8 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union)
         st->strct.size_bytes = align_up(max_size, struct_align);
     else
     {
-        offset = align_up(offset, struct_align);
+        if (!packed_layout)
+            offset = align_up(offset, struct_align);
         st->strct.size_bytes = offset;
     }
     // named type already registered above

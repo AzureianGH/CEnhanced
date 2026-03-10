@@ -521,6 +521,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_STRUCT;
     else if (len == 5 && strncmp(p, "union", 5) == 0)
         k = TK_KW_UNION;
+    else if (len == 6 && strncmp(p, "packed", 6) == 0)
+        k = TK_KW_PACKED;
     else if (len == 6 && strncmp(p, "extend", 6) == 0)
         k = TK_KW_EXTEND;
     else if (len == 3 && strncmp(p, "new", 3) == 0)
@@ -613,6 +615,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_CATCH;
     else if (len == 7 && strncmp(p, "finally", 7) == 0)
         k = TK_KW_FINALLY;
+    else if (len == 5 && strncmp(p, "where", 5) == 0)
+        k = TK_KW_WHERE;
     else if (len == 5 && strncmp(p, "throw", 5) == 0)
         k = TK_KW_THROW;
     else if (len == 5 && strncmp(p, "break", 5) == 0)

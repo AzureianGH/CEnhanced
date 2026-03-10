@@ -26,6 +26,7 @@ extern "C"
         char *name;              /* struct name */
         char **field_names;      /* array of field names */
         char **field_types;      /* parallel array of type specs */
+        char **field_defaults;   /* parallel array of serialized default literals */
         uint32_t *field_offsets; /* byte offsets */
         uint32_t field_count;
         uint32_t size_bytes;

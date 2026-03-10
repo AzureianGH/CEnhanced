@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define CCLIB_MAGIC "CCLIB"
-#define CCLIB_VERSION 1u
+#define CCLIB_VERSION 2u
 
 static int write_u8(FILE *out, uint8_t value)
 {
@@ -171,6 +171,8 @@ static int write_struct(FILE *out, const CclibStruct *st)
         if (!write_string(out, st->field_names ? st->field_names[i] : NULL))
             return 0;
         if (!write_string(out, st->field_types ? st->field_types[i] : NULL))
+            return 0;
+        if (!write_string(out, st->field_defaults ? st->field_defaults[i] : NULL))
             return 0;
         uint32_t offset = st && st->field_offsets ? st->field_offsets[i] : 0;
         if (!write_u32(out, offset))
@@ -346,7 +348,7 @@ static int read_function(FILE *in, CclibFunction *fn)
     return 1;
 }
 
-static int read_struct(FILE *in, CclibStruct *st)
+static int read_struct(FILE *in, CclibStruct *st, uint32_t version)
 {
     memset(st, 0, sizeof(*st));
     if (!read_string(in, &st->name))
@@ -358,8 +360,9 @@ static int read_struct(FILE *in, CclibStruct *st)
     {
         st->field_names = (char **)calloc(field_count, sizeof(char *));
         st->field_types = (char **)calloc(field_count, sizeof(char *));
+        st->field_defaults = (char **)calloc(field_count, sizeof(char *));
         st->field_offsets = (uint32_t *)calloc(field_count, sizeof(uint32_t));
-        if (!st->field_names || !st->field_types || !st->field_offsets)
+        if (!st->field_names || !st->field_types || !st->field_defaults || !st->field_offsets)
             return 0;
         for (uint32_t i = 0; i < field_count; ++i)
         {
@@ -367,6 +370,11 @@ static int read_struct(FILE *in, CclibStruct *st)
                 return 0;
             if (!read_string(in, &st->field_types[i]))
                 return 0;
+            if (version >= 2)
+            {
+                if (!read_string(in, &st->field_defaults[i]))
+                    return 0;
+            }
             if (!read_u32(in, &st->field_offsets[i]))
                 return 0;
         }
@@ -510,7 +518,7 @@ int cclib_read(const char *path, CclibFile *out_lib)
             }
             for (uint32_t si = 0; si < struct_count; ++si)
             {
-                if (!read_struct(in, &mod->structs[si]))
+                if (!read_struct(in, &mod->structs[si], version))
                 {
                     fclose(in);
                     return EIO;
@@ -621,6 +629,8 @@ void cclib_free(CclibFile *lib)
                     free_string_array(st->field_names, st->field_count);
                 if (st->field_types)
                     free_string_array(st->field_types, st->field_count);
+                if (st->field_defaults)
+                    free_string_array(st->field_defaults, st->field_count);
                 free(st->field_offsets);
             }
             free(mod->structs);

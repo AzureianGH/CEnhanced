@@ -2,7 +2,7 @@ module Std.Exception;
 
 expose struct RuntimeError {
     i32 code;
-    string category;
+    string category = "RuntimeError";
     string message;
     string file;
     u64 line;
@@ -11,7 +11,7 @@ expose struct RuntimeError {
 
 expose struct Panic {
     i32 code;
-    string category;
+    string category = "Panic";
     string message;
     string file;
     u64 line;
@@ -20,7 +20,7 @@ expose struct Panic {
 
 expose struct OutOfMemory {
     i32 code;
-    string category;
+    string category = "OutOfMemory";
     string message;
     string file;
     u64 line;
@@ -29,7 +29,7 @@ expose struct OutOfMemory {
 
 expose struct NullReference {
     i32 code;
-    string category;
+    string category = "NullReference";
     string message;
     string file;
     u64 line;
@@ -38,9 +38,37 @@ expose struct NullReference {
 
 expose struct InvalidCast {
     i32 code;
-    string category;
+    string category = "InvalidCast";
     string message;
     string file;
     u64 line;
     string symbol;
 };
+
+expose struct IndexOutOfBounds {
+    i32 code;
+    string category = "IndexOutOfBounds";
+    string message;
+    string file;
+    u64 line;
+    string symbol;
+};
+
+expose struct IOError {
+    i32 code;
+    string category = "IOError";
+    string message;
+    string file;
+    u64 line;
+    string symbol;
+};
+
+expose struct AssertionFailed {
+    i32 code;
+    string category = "AssertionFailed";
+    string message;
+    string file;
+    u64 line;
+    string symbol;
+};
+

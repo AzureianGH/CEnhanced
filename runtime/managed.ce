@@ -9,6 +9,7 @@ hide constant i32 __cert__OBJ_TAG_PTR = 3;
 hide constant i32 __cert__ERR_INVALID_CAST_NULL = 1001;
 hide constant i32 __cert__ERR_INVALID_CAST_TYPE = 1002;
 hide constant i32 __cert__ERR_INVALID_CAST_KIND = 1003;
+hide constant i32 __cert__ERR_NULL_REFERENCE = 0x7EADC0DE;
 
 struct __cert__ObjectBox {
     i32 tag;
@@ -155,11 +156,24 @@ expose fun __cert__object_is_type(void* obj, char* expected_type) -> i32 {
 [Export]
 expose fun __cert__null_deref(char* file, u64 line, char* name_of_ref_obj) -> void {
     __cert__runtime_error_ex(
-        0xDEADC0DE,
+        __cert__ERR_NULL_REFERENCE,
         "NullReference",
         "Attempted to dereference null reference",
         file,
         line,
         name_of_ref_obj
     );
+}
+
+[Export]
+expose fun __cert__null_deref_fallback(char* file, u64 line, char* name_of_ref_obj) -> void* {
+    __cert__runtime_error_ex(
+        __cert__ERR_NULL_REFERENCE,
+        "NullReference",
+        "Attempted to dereference null reference",
+        file,
+        line,
+        name_of_ref_obj
+    );
+    ret (&__cert__unbox_ptr_fallback) as void*;
 }

@@ -1,0 +1,7 @@
+ccbytecode 3
+
+.func main ret=i32 params=0 locals=0
+  const i32 12345
+  ret
+.endfunc
+.preserve main

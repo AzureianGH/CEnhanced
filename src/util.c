@@ -530,6 +530,8 @@ const char *node_kind_name(NodeKind kind)
         return "lambda expression";
     case ND_SEQ:
         return "sequence expression";
+    case ND_MANAGED_ARRAY_ADAPT:
+        return "managed array adapter";
     case ND_LAMBDA_CALL:
         return "lambda call";
     default:

@@ -23,6 +23,7 @@ typedef enum
     TK_KW_STRUCT,
     TK_KW_STRUC, // alias accepted
     TK_KW_UNION,
+    TK_KW_PACKED,
     TK_KW_EXTEND,
     TK_KW_FROM,
     TK_KW_I32,
@@ -66,6 +67,7 @@ typedef enum
     TK_KW_TRY,
     TK_KW_CATCH,
     TK_KW_FINALLY,
+    TK_KW_WHERE,
     TK_KW_THROW,
     TK_KW_JUMP,
     TK_KW_CHANCECODE,
@@ -216,9 +218,11 @@ typedef struct Type
     {
         const char **field_names;
         struct Type **field_types;
+        const char **field_default_values;
         int *field_offsets;
         int field_count;
         int size_bytes;
+        int is_packed;
     } strct;
     struct
     {
@@ -331,6 +335,7 @@ typedef enum
     ND_MATCH,
     ND_LAMBDA,
     ND_SEQ,
+    ND_MANAGED_ARRAY_ADAPT,
     ND_LAMBDA_CALL,
 } NodeKind;
 
@@ -464,6 +469,8 @@ struct Node
     int var_is_array;                 // for ND_VAR references to array-typed variables
     int var_is_function;              // for ND_VAR references that name a function symbol
     struct Node *referenced_function; // points at referenced function definition when resolved
+    const char *managed_length_name;  // hidden companion local/global storing dynamic array length
+    struct Node *managed_length_expr; // initializer for hidden managed array length companion
     const ModulePath *module_ref;     // tracks originating module for qualified references
     int module_ref_parts;             // number of module path segments consumed in expression
     const char *module_type_name;     // resolved type name within module, when applicable
@@ -530,8 +537,16 @@ int lexer_collect_literal_block(Lexer *lx, char **out_text);
 const SourceBuffer *lexer_source(Lexer *lx);
 
 typedef struct Parser Parser;
+typedef enum
+{
+    CHANCE_STD_H26 = 26,
+    CHANCE_STD_H27 = 27,
+} ChanceLanguageStandard;
+
 Parser *parser_create(SourceBuffer src);
 void parser_set_disable_formatting_notes(int disable);
+void parser_set_language_standard(ChanceLanguageStandard standard);
+ChanceLanguageStandard parser_get_language_standard(void);
 void parser_destroy(Parser *ps);
 // Parse a translation unit; currently expects one function 'main' with a return
 // int expression
