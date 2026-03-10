@@ -4478,6 +4478,8 @@ static void check_expr(SemaContext *sc, Node *e)
         }
         else
         {
+            if (base && base->kind == TY_REF && base->pointee)
+                base = sema_resolve_import_type(canonicalize_type_deep(base->pointee));
             if (!base || base->kind != TY_STRUCT)
             {
                 diag_error_at(e->src, e->line, e->col,
@@ -6286,16 +6288,16 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
                 return 1;
             }
             check_expr(sc, stmt->lhs);
-            stmt->type = stmt->lhs->type;
-            Type *decl = fn->ret_type ? fn->ret_type : &ty_i32;
-            if (!type_equal(stmt->type, decl))
+            Type *decl = canonicalize_type_deep(fn->ret_type ? fn->ret_type : &ty_i32);
+            if (!can_assign(decl, stmt->lhs))
             {
                 diag_error_at(stmt->src, stmt->line, stmt->col,
                               "return type mismatch: returning %d but function returns %d",
-                              stmt->type ? stmt->type->kind : -1,
+                              stmt->lhs->type ? stmt->lhs->type->kind : -1,
                               decl ? decl->kind : -1);
                 return 1;
             }
+            stmt->type = decl;
         }
         if (found_ret)
             *found_ret = 1;

@@ -67,6 +67,7 @@ typedef enum
     TK_KW_TRY,
     TK_KW_CATCH,
     TK_KW_FINALLY,
+    TK_KW_WHERE,
     TK_KW_THROW,
     TK_KW_JUMP,
     TK_KW_CHANCECODE,
@@ -217,6 +218,7 @@ typedef struct Type
     {
         const char **field_names;
         struct Type **field_types;
+        const char **field_default_values;
         int *field_offsets;
         int field_count;
         int size_bytes;

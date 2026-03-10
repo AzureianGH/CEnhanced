@@ -29,12 +29,15 @@ extern char **environ;
 #endif
 
 #define CHANCECODEC_BASE "chancecodec"
+#define CLD_BASE "cld"
 #ifdef _WIN32
 #define CHANCE_PATH_SEP '\\'
 #define CHANCECODEC_EXT ".exe"
+#define CLD_EXT ".exe"
 #else
 #define CHANCE_PATH_SEP '/'
 #define CHANCECODEC_EXT ""
+#define CLD_EXT ""
 #endif
 
 #ifndef STRIP_MAP_PATH_MAX
@@ -59,6 +62,14 @@ static const char *default_chancecodec_name =
     "chancecodec"
 #endif
     ;
+
+static const char *default_cld_name =
+#ifdef _WIN32
+  "cld.exe"
+#else
+  "cld"
+#endif
+  ;
 
 static int verbose_use_ansi = 1;
 static const char *target_os_to_option(TargetOS os);
@@ -333,7 +344,7 @@ static void usage(const char *prog)
   fprintf(stderr, "  --chancecodec <path>\n");
   fprintf(stderr, "                    Override ChanceCode CLI executable path "
                   "(default: auto-detect or PATH)\n");
-  fprintf(stderr, "  --cc <path>       Override host C compiler used for asm/link (default cc)\n");
+  fprintf(stderr, "  --cc <path>       Override host C compiler used for assembly only (default cc)\n");
   fprintf(stderr,
           "  -sr:<path>       Load .ce/.cclib for symbols only (no codegen)\n");
   fprintf(stderr,
@@ -753,6 +764,85 @@ static int locate_chancecodec(char *out, size_t outsz, const char *exe_dir)
   }
   out[0] = '\0';
   return 1;
+}
+
+static int locate_cld(char *out, size_t outsz, const char *exe_dir)
+{
+  if (!out || outsz == 0)
+    return 1;
+  out[0] = '\0';
+  const char *env_cmd = getenv("CLD_CMD");
+  if (!env_cmd || !*env_cmd)
+    env_cmd = getenv("CLD");
+  if (env_cmd && *env_cmd)
+  {
+    strip_wrapping_quotes(env_cmd, out, outsz);
+    if (out[0])
+      return 0;
+  }
+  const char *env_home = getenv("CLD_HOME");
+  if (env_home && *env_home)
+  {
+    char home_build[1024];
+    snprintf(home_build, sizeof(home_build), "%s%cbuild", env_home,
+             CHANCE_PATH_SEP);
+    build_path_with_ext(home_build, CLD_BASE, CLD_EXT, out, outsz);
+    if (is_regular_file(out))
+      return 0;
+    build_path_with_ext(env_home, CLD_BASE, CLD_EXT, out, outsz);
+    if (is_regular_file(out))
+      return 0;
+  }
+  if (exe_dir && *exe_dir)
+  {
+    build_path_with_ext(exe_dir, CLD_BASE, CLD_EXT, out, outsz);
+    if (is_regular_file(out))
+      return 0;
+    char parent[1024];
+    if (parent_directory(exe_dir, parent, sizeof(parent)) == 0 && parent[0])
+    {
+      char sibling[1024];
+      snprintf(sibling, sizeof(sibling), "%s%cCLD", parent, CHANCE_PATH_SEP);
+      build_path_with_ext(sibling, CLD_BASE, CLD_EXT, out, outsz);
+      if (is_regular_file(out))
+        return 0;
+      snprintf(sibling, sizeof(sibling), "%s%cCLD%cbuild", parent,
+               CHANCE_PATH_SEP, CHANCE_PATH_SEP);
+      build_path_with_ext(sibling, CLD_BASE, CLD_EXT, out, outsz);
+      if (is_regular_file(out))
+        return 0;
+      char grandparent[1024];
+      if (parent_directory(parent, grandparent, sizeof(grandparent)) == 0 &&
+          grandparent[0])
+      {
+        snprintf(sibling, sizeof(sibling), "%s%cCLD", grandparent,
+                 CHANCE_PATH_SEP);
+        build_path_with_ext(sibling, CLD_BASE, CLD_EXT, out, outsz);
+        if (is_regular_file(out))
+          return 0;
+        snprintf(sibling, sizeof(sibling), "%s%cCLD%cbuild", grandparent,
+                 CHANCE_PATH_SEP, CHANCE_PATH_SEP);
+        build_path_with_ext(sibling, CLD_BASE, CLD_EXT, out, outsz);
+        if (is_regular_file(out))
+          return 0;
+      }
+    }
+  }
+  out[0] = '\0';
+  return 1;
+}
+
+static const char *cld_target_name_for_link(TargetArch arch, TargetOS os)
+{
+  switch (arch)
+  {
+  case ARCH_ARM64:
+    return os == OS_MACOS ? "macos-arm64" : NULL;
+  case ARCH_X86:
+    return os == OS_LINUX ? "x86_64-elf" : NULL;
+  default:
+    return NULL;
+  }
 }
 
 static const char *target_os_to_option(TargetOS os)
@@ -2828,6 +2918,7 @@ typedef struct LibraryStruct
   char *name;
   char **field_names;
   char **field_specs;
+  char **field_defaults;
   uint32_t *field_offsets;
   uint32_t field_count;
   uint32_t size_bytes;
@@ -3523,6 +3614,12 @@ static void free_library_struct(LibraryStruct *st)
       free(st->field_specs[i]);
     free(st->field_specs);
   }
+  if (st->field_defaults)
+  {
+    for (uint32_t i = 0; i < st->field_count; ++i)
+      free(st->field_defaults[i]);
+    free(st->field_defaults);
+  }
   free(st->field_offsets);
   memset(st, 0, sizeof(*st));
 }
@@ -3698,9 +3795,10 @@ static int collect_structs_for_module(const char *module_name,
     {
       st.field_names = (char **)xcalloc((size_t)field_count, sizeof(char *));
       st.field_specs = (char **)xcalloc((size_t)field_count, sizeof(char *));
+      st.field_defaults = (char **)xcalloc((size_t)field_count, sizeof(char *));
       st.field_offsets =
           (uint32_t *)xcalloc((size_t)field_count, sizeof(uint32_t));
-      if (!st.field_names || !st.field_specs || !st.field_offsets)
+      if (!st.field_names || !st.field_specs || !st.field_defaults || !st.field_offsets)
       {
         free_library_struct(&st);
         return 1;
@@ -3715,6 +3813,10 @@ static int collect_structs_for_module(const char *module_name,
                           ? ty->strct.field_types[fi]
                           : NULL;
         st.field_specs[fi] = type_to_spec(ftype);
+        const char *field_default = (ty->strct.field_default_values && fi < field_count)
+                ? ty->strct.field_default_values[fi]
+                : NULL;
+        st.field_defaults[fi] = field_default ? xstrdup(field_default) : NULL;
         int offset = (ty->strct.field_offsets && fi < field_count)
                          ? ty->strct.field_offsets[fi]
                          : 0;
@@ -3914,6 +4016,7 @@ static int write_library_file(const char *path, LibraryModuleData *mods,
         cs->name = ls->name;
         cs->field_names = ls->field_names;
         cs->field_types = ls->field_specs;
+        cs->field_defaults = ls->field_defaults;
         cs->field_offsets = ls->field_offsets;
         cs->field_count = ls->field_count;
         cs->size_bytes = ls->size_bytes;
@@ -4045,6 +4148,13 @@ static void free_loaded_library_type(Type *ty)
     }
     if (ty->strct.field_types)
       free(ty->strct.field_types);
+    if (ty->strct.field_default_values)
+    {
+      char **defaults = (char **)ty->strct.field_default_values;
+      for (int i = 0; i < ty->strct.field_count; ++i)
+        free(defaults[i]);
+      free(defaults);
+    }
     if (ty->strct.field_offsets)
       free(ty->strct.field_offsets);
     free((void *)ty->struct_name);
@@ -4120,11 +4230,13 @@ static int register_structs_from_cclib_module(LoadedLibrary *lib,
     {
       char **names = (char **)xcalloc((size_t)field_count, sizeof(char *));
       Type **types = (Type **)xcalloc((size_t)field_count, sizeof(Type *));
+      char **defaults = (char **)xcalloc((size_t)field_count, sizeof(char *));
       int *offsets = (int *)xcalloc((size_t)field_count, sizeof(int));
-      if (!names || !types || !offsets)
+      if (!names || !types || !defaults || !offsets)
       {
         free(names);
         free(types);
+        free(defaults);
         free(offsets);
         return 1;
       }
@@ -4136,12 +4248,16 @@ static int register_structs_from_cclib_module(LoadedLibrary *lib,
         const char *spec =
             (st->field_types && fi < field_count) ? st->field_types[fi] : NULL;
         types[fi] = spec_to_type(spec);
+        defaults[fi] = (st->field_defaults && fi < field_count && st->field_defaults[fi])
+                           ? xstrdup(st->field_defaults[fi])
+                           : NULL;
         offsets[fi] = (st->field_offsets && fi < field_count)
                           ? (int)st->field_offsets[fi]
                           : 0;
       }
       ty->strct.field_names = (const char **)names;
       ty->strct.field_types = types;
+      ty->strct.field_default_values = (const char **)defaults;
       ty->strct.field_offsets = offsets;
     }
   }
@@ -4820,6 +4936,140 @@ static int run_chancecodec_emit_ccbin(const char *cmd, const char *ccb_path,
   args[idx] = NULL;
   pid_t pid = 0;
   int rc = posix_spawnp(&pid, cmd, NULL, NULL, args, environ);
+  if (rc != 0)
+  {
+    if (spawn_errno_out)
+      *spawn_errno_out = rc;
+    errno = rc;
+    return -1;
+  }
+  int status = 0;
+  if (waitpid(pid, &status, 0) == -1)
+  {
+    if (spawn_errno_out)
+      *spawn_errno_out = errno;
+    return -1;
+  }
+  if (WIFEXITED(status))
+    return WEXITSTATUS(status);
+  if (WIFSIGNALED(status))
+    return 128 + WTERMSIG(status);
+  return -1;
+#endif
+}
+
+static int run_cld_link_process(const char *cmd, const char *target_name,
+                                const char *output_kind,
+                                const char *output_path, int no_stdlib,
+                                const char **inputs, int input_count,
+                                int *spawn_errno_out)
+{
+  if (spawn_errno_out)
+    *spawn_errno_out = 0;
+  if (!cmd || !*cmd || !output_kind || !*output_kind || !output_path ||
+      !*output_path || !inputs || input_count <= 0)
+  {
+    if (spawn_errno_out)
+      *spawn_errno_out = EINVAL;
+    return -1;
+  }
+
+  size_t arg_cap = (size_t)input_count + 10u + (target_name && *target_name ? 2u : 0u) +
+                   (no_stdlib ? 1u : 0u);
+#ifdef _WIN32
+  const char **args = (const char **)calloc(arg_cap, sizeof(*args));
+#else
+  char **args = (char **)calloc(arg_cap, sizeof(*args));
+#endif
+  if (!args)
+  {
+    if (spawn_errno_out)
+      *spawn_errno_out = ENOMEM;
+    return -1;
+  }
+
+  size_t idx = 0;
+    args[idx++] =
+  #ifdef _WIN32
+    cmd;
+  #else
+    (char *)cmd;
+  #endif
+    args[idx++] =
+  #ifdef _WIN32
+    "link";
+  #else
+    (char *)"link";
+  #endif
+    args[idx++] =
+  #ifdef _WIN32
+    "-o";
+  #else
+    (char *)"-o";
+  #endif
+    args[idx++] =
+  #ifdef _WIN32
+    output_path;
+  #else
+    (char *)output_path;
+  #endif
+  if (target_name && *target_name)
+  {
+      args[idx++] =
+  #ifdef _WIN32
+      "--target";
+  #else
+      (char *)"--target";
+  #endif
+      args[idx++] =
+  #ifdef _WIN32
+      target_name;
+  #else
+      (char *)target_name;
+  #endif
+  }
+    args[idx++] =
+  #ifdef _WIN32
+    "--output-kind";
+  #else
+    (char *)"--output-kind";
+  #endif
+    args[idx++] =
+  #ifdef _WIN32
+    output_kind;
+  #else
+    (char *)output_kind;
+  #endif
+  if (no_stdlib)
+      args[idx++] =
+  #ifdef _WIN32
+      "-nostdlib";
+  #else
+      (char *)"-nostdlib";
+  #endif
+  for (int i = 0; i < input_count; ++i)
+      args[idx++] =
+  #ifdef _WIN32
+      inputs[i];
+  #else
+      (char *)inputs[i];
+  #endif
+  args[idx] = NULL;
+
+#ifdef _WIN32
+  intptr_t rc = _spawnvp(_P_WAIT, cmd, args);
+  free(args);
+  if (rc == -1)
+  {
+    if (spawn_errno_out)
+      *spawn_errno_out = errno;
+    return -1;
+  }
+  return (int)rc;
+#else
+  pid_t pid = 0;
+  int rc = posix_spawnp(&pid, cmd, NULL, NULL, args, environ);
+  free(args);
   if (rc != 0)
   {
     if (spawn_errno_out)
@@ -5562,6 +5812,25 @@ int main(int argc, char **argv)
     {
       chancecodec_cmd_to_use = default_chancecodec_name;
       chancecodec_uses_fallback = 1;
+    }
+  }
+
+  char cld_exec_buf[1024] = {0};
+  const char *cld_cmd_to_use = NULL;
+  int cld_uses_fallback = 0;
+  const char *cld_target_to_use = cld_target_name_for_link(target_arch, target_os);
+  int cld_supported_link_target = cld_target_to_use && *cld_target_to_use;
+  if (!emit_library && cld_supported_link_target)
+  {
+    if (locate_cld(cld_exec_buf, sizeof(cld_exec_buf), exe_dir) == 0 &&
+        cld_exec_buf[0])
+    {
+      cld_cmd_to_use = cld_exec_buf;
+    }
+    else
+    {
+      cld_cmd_to_use = default_cld_name;
+      cld_uses_fallback = 1;
     }
   }
 
@@ -7030,60 +7299,113 @@ int main(int argc, char **argv)
 
   if (!rc && multi_link)
   {
-    // Final link of temps + provided objects into an executable
-    size_t cmdsz = 4096;
-    char *cmd = (char *)xmalloc(cmdsz);
-    if (debug_symbols)
-      snprintf(cmd, cmdsz, "\"%s\" -g -gdwarf-4 -o \"%s\"",
-               host_cc_cmd_to_use, out);
-    else
-      snprintf(cmd, cmdsz, "\"%s\" -o \"%s\"", host_cc_cmd_to_use, out);
-    if (target_arch == ARCH_ARM64)
-      append_arm64_arch_flag(cmd, cmdsz, target_os, host_cc_cmd_to_use);
-    if (freestanding)
-      strncat(cmd, " -ffreestanding -nostdlib", cmdsz - strlen(cmd) - 1);
-    for (int i = 0; i < to_cnt; ++i)
+    if (cld_supported_link_target)
     {
-      size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
-      if (need > cmdsz)
+      int input_count = to_cnt + obj_count;
+      const char **link_inputs =
+          (const char **)xcalloc((size_t)input_count, sizeof(const char *));
+      if (!link_inputs)
       {
-        cmdsz = need + 1024;
-        cmd = (char *)realloc(cmd, cmdsz);
+        fprintf(stderr, "error: out of memory allocating linker inputs\n");
+        rc = 1;
       }
-      strcat(cmd, " ");
-      strcat(cmd, "\"");
-      strcat(cmd, temp_objs[i]);
-      strcat(cmd, "\"");
-    }
-    for (int i = 0; i < obj_count; ++i)
-    {
-      size_t need = strlen(cmd) + strlen(obj_inputs[i]) + 8;
-      if (need > cmdsz)
+      else
       {
-        cmdsz = need + 1024;
-        cmd = (char *)realloc(cmd, cmdsz);
+        int input_index = 0;
+        for (int i = 0; i < to_cnt; ++i)
+          link_inputs[input_index++] = temp_objs[i];
+        for (int i = 0; i < obj_count; ++i)
+          link_inputs[input_index++] = obj_inputs[i];
+        if (compiler_verbose_enabled())
+        {
+          verbose_section("Linking executable");
+          verbose_table_row("Linker", cld_cmd_to_use);
+          verbose_table_row("Target", cld_target_to_use);
+        }
+        int spawn_errno = 0;
+        int lrc = run_cld_link_process(cld_cmd_to_use, cld_target_to_use,
+                                       "executable", out, freestanding,
+                                       link_inputs, input_count,
+                                       &spawn_errno);
+        free(link_inputs);
+        if (lrc != 0)
+        {
+          if (lrc < 0)
+          {
+            fprintf(stderr, "failed to launch cld '%s': %s\n",
+                    cld_cmd_to_use, strerror(spawn_errno));
+            if (cld_uses_fallback)
+              fprintf(stderr, "hint: install cld or set CLD_CMD to point at the CLD executable\n");
+          }
+          else
+          {
+            fprintf(stderr, "cld link failed (rc=%d)\n", lrc);
+          }
+          rc = 1;
+        }
+        else
+        {
+          maybe_generate_dsym(out, debug_symbols, target_os);
+        }
       }
-      strcat(cmd, " ");
-      strcat(cmd, "\"");
-      strcat(cmd, obj_inputs[i]);
-      strcat(cmd, "\"");
-    }
-    if (compiler_verbose_enabled())
-    {
-      verbose_section("Linking executable");
-      verbose_table_row("Command", cmd);
-    }
-    int lrc = system(cmd);
-    if (lrc != 0)
-    {
-      fprintf(stderr, "link failed (rc=%d): %s\n", lrc, cmd);
-      rc = 1;
     }
     else
     {
-      maybe_generate_dsym(out, debug_symbols, target_os);
+      // Final link of temps + provided objects into an executable
+      size_t cmdsz = 4096;
+      char *cmd = (char *)xmalloc(cmdsz);
+      if (debug_symbols)
+        snprintf(cmd, cmdsz, "\"%s\" -g -gdwarf-4 -o \"%s\"",
+                 host_cc_cmd_to_use, out);
+      else
+        snprintf(cmd, cmdsz, "\"%s\" -o \"%s\"", host_cc_cmd_to_use, out);
+      if (target_arch == ARCH_ARM64)
+        append_arm64_arch_flag(cmd, cmdsz, target_os, host_cc_cmd_to_use);
+      if (freestanding)
+        strncat(cmd, " -ffreestanding -nostdlib", cmdsz - strlen(cmd) - 1);
+      for (int i = 0; i < to_cnt; ++i)
+      {
+        size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
+        if (need > cmdsz)
+        {
+          cmdsz = need + 1024;
+          cmd = (char *)realloc(cmd, cmdsz);
+        }
+        strcat(cmd, " ");
+        strcat(cmd, "\"");
+        strcat(cmd, temp_objs[i]);
+        strcat(cmd, "\"");
+      }
+      for (int i = 0; i < obj_count; ++i)
+      {
+        size_t need = strlen(cmd) + strlen(obj_inputs[i]) + 8;
+        if (need > cmdsz)
+        {
+          cmdsz = need + 1024;
+          cmd = (char *)realloc(cmd, cmdsz);
+        }
+        strcat(cmd, " ");
+        strcat(cmd, "\"");
+        strcat(cmd, obj_inputs[i]);
+        strcat(cmd, "\"");
+      }
+      if (compiler_verbose_enabled())
+      {
+        verbose_section("Linking executable");
+        verbose_table_row("Command", cmd);
+      }
+      int lrc = system(cmd);
+      if (lrc != 0)
+      {
+        fprintf(stderr, "link failed (rc=%d): %s\n", lrc, cmd);
+        rc = 1;
+      }
+      else
+      {
+        maybe_generate_dsym(out, debug_symbols, target_os);
+      }
+      free(cmd);
     }
-    free(cmd);
     // cleanup temp objects
     for (int i = 0; i < to_cnt; ++i)
     {
@@ -7097,94 +7419,179 @@ int main(int argc, char **argv)
   }
   if (!rc && have_single_obj)
   {
-    char link_cmd[4096];
-    if (debug_symbols)
-      snprintf(link_cmd, sizeof(link_cmd),
-               "\"%s\" -g -gdwarf-4 -o \"%s\" \"%s\"",
-               host_cc_cmd_to_use, out, single_obj_path);
-    else
-      snprintf(link_cmd, sizeof(link_cmd),
-               "\"%s\" -o \"%s\" \"%s\"", host_cc_cmd_to_use, out,
-               single_obj_path);
-    if (target_arch == ARCH_ARM64)
-      append_arm64_arch_flag(link_cmd, sizeof(link_cmd), target_os,
-                             host_cc_cmd_to_use);
-    if (freestanding)
-      strncat(link_cmd, " -ffreestanding -nostdlib",
-              sizeof(link_cmd) - strlen(link_cmd) - 1);
-    if (compiler_verbose_enabled())
+    if (cld_supported_link_target)
     {
-      verbose_section("Linking single object");
-      verbose_table_row("Command", link_cmd);
+      const char *link_inputs[1] = {single_obj_path};
+      if (compiler_verbose_enabled())
+      {
+        verbose_section("Linking single object");
+        verbose_table_row("Linker", cld_cmd_to_use);
+        verbose_table_row("Target", cld_target_to_use);
+      }
+      int spawn_errno = 0;
+      int lrc = run_cld_link_process(cld_cmd_to_use, cld_target_to_use,
+                                     "executable", out, freestanding,
+                                     link_inputs, 1, &spawn_errno);
+      if (lrc != 0)
+      {
+        if (lrc < 0)
+        {
+          fprintf(stderr, "failed to launch cld '%s': %s\n", cld_cmd_to_use,
+                  strerror(spawn_errno));
+          if (cld_uses_fallback)
+            fprintf(stderr, "hint: install cld or set CLD_CMD to point at the CLD executable\n");
+        }
+        else
+        {
+          fprintf(stderr, "cld link failed (rc=%d)\n", lrc);
+        }
+        rc = 1;
+      }
+      else
+      {
+        maybe_generate_dsym(out, debug_symbols, target_os);
+      }
     }
-    int lrc = system(link_cmd);
-    if (lrc != 0)
-    {
-      fprintf(stderr, "link failed (rc=%d): %s\n", lrc, link_cmd);
-      rc = 1;
-    }
     else
     {
-      maybe_generate_dsym(out, debug_symbols, target_os);
+      char link_cmd[4096];
+      if (debug_symbols)
+        snprintf(link_cmd, sizeof(link_cmd),
+                 "\"%s\" -g -gdwarf-4 -o \"%s\" \"%s\"",
+                 host_cc_cmd_to_use, out, single_obj_path);
+      else
+        snprintf(link_cmd, sizeof(link_cmd),
+                 "\"%s\" -o \"%s\" \"%s\"", host_cc_cmd_to_use, out,
+                 single_obj_path);
+      if (target_arch == ARCH_ARM64)
+        append_arm64_arch_flag(link_cmd, sizeof(link_cmd), target_os,
+                               host_cc_cmd_to_use);
+      if (freestanding)
+        strncat(link_cmd, " -ffreestanding -nostdlib",
+                sizeof(link_cmd) - strlen(link_cmd) - 1);
+      if (compiler_verbose_enabled())
+      {
+        verbose_section("Linking single object");
+        verbose_table_row("Command", link_cmd);
+      }
+      int lrc = system(link_cmd);
+      if (lrc != 0)
+      {
+        fprintf(stderr, "link failed (rc=%d): %s\n", lrc, link_cmd);
+        rc = 1;
+      }
+      else
+      {
+        maybe_generate_dsym(out, debug_symbols, target_os);
+      }
     }
     if (single_obj_is_temp)
       remove(single_obj_path);
   }
   if (!rc && no_link && obj_override)
   {
-    // Merge temps + external objects into obj_override (relocatable link)
-    // Build command
-    // Validate external objects again (already checked)
-    size_t cmdsz = 4096;
-    char *cmd = (char *)xmalloc(cmdsz);
-    if (debug_symbols)
-      snprintf(cmd, cmdsz, "\"%s\" -g -gdwarf-4 -r -o \"%s\"",
-               host_cc_cmd_to_use, obj_override);
+    if (cld_supported_link_target)
+    {
+      int input_count = to_cnt + obj_count;
+      const char **link_inputs =
+          (const char **)xcalloc((size_t)input_count, sizeof(const char *));
+      if (!link_inputs)
+      {
+        fprintf(stderr, "error: out of memory allocating linker inputs\n");
+        rc = 1;
+      }
+      else
+      {
+        int input_index = 0;
+        for (int i = 0; i < to_cnt; ++i)
+          link_inputs[input_index++] = temp_objs[i];
+        for (int i = 0; i < obj_count; ++i)
+          link_inputs[input_index++] = obj_inputs[i];
+        if (compiler_verbose_enabled())
+        {
+          verbose_section("Merging objects");
+          verbose_table_row("Linker", cld_cmd_to_use);
+          verbose_table_row("Target", cld_target_to_use);
+        }
+        int spawn_errno = 0;
+        int lrc = run_cld_link_process(cld_cmd_to_use, cld_target_to_use,
+                                       "relocatable", obj_override,
+                                       freestanding, link_inputs,
+                                       input_count, &spawn_errno);
+        free(link_inputs);
+        if (lrc != 0)
+        {
+          if (lrc < 0)
+          {
+            fprintf(stderr, "failed to launch cld '%s': %s\n",
+                    cld_cmd_to_use, strerror(spawn_errno));
+            if (cld_uses_fallback)
+              fprintf(stderr, "hint: install cld or set CLD_CMD to point at the CLD executable\n");
+          }
+          else
+          {
+            fprintf(stderr, "cld relocatable link failed (rc=%d)\n", lrc);
+          }
+          rc = 1;
+        }
+      }
+    }
     else
-      snprintf(cmd, cmdsz, "\"%s\" -r -o \"%s\"", host_cc_cmd_to_use,
-               obj_override);
-    if (target_arch == ARCH_ARM64)
-      append_arm64_arch_flag(cmd, cmdsz, target_os, host_cc_cmd_to_use);
-    if (freestanding)
-      strncat(cmd, " -ffreestanding -nostdlib", cmdsz - strlen(cmd) - 1);
-    for (int i = 0; i < to_cnt; ++i)
     {
-      size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
-      if (need > cmdsz)
+      // Merge temps + external objects into obj_override (relocatable link)
+      // Build command
+      // Validate external objects again (already checked)
+      size_t cmdsz = 4096;
+      char *cmd = (char *)xmalloc(cmdsz);
+      if (debug_symbols)
+        snprintf(cmd, cmdsz, "\"%s\" -g -gdwarf-4 -r -o \"%s\"",
+                 host_cc_cmd_to_use, obj_override);
+      else
+        snprintf(cmd, cmdsz, "\"%s\" -r -o \"%s\"", host_cc_cmd_to_use,
+                 obj_override);
+      if (target_arch == ARCH_ARM64)
+        append_arm64_arch_flag(cmd, cmdsz, target_os, host_cc_cmd_to_use);
+      if (freestanding)
+        strncat(cmd, " -ffreestanding -nostdlib", cmdsz - strlen(cmd) - 1);
+      for (int i = 0; i < to_cnt; ++i)
       {
-        cmdsz = need + 1024;
-        cmd = (char *)realloc(cmd, cmdsz);
+        size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
+        if (need > cmdsz)
+        {
+          cmdsz = need + 1024;
+          cmd = (char *)realloc(cmd, cmdsz);
+        }
+        strcat(cmd, " ");
+        strcat(cmd, "\"");
+        strcat(cmd, temp_objs[i]);
+        strcat(cmd, "\"");
       }
-      strcat(cmd, " ");
-      strcat(cmd, "\"");
-      strcat(cmd, temp_objs[i]);
-      strcat(cmd, "\"");
-    }
-    for (int i = 0; i < obj_count; ++i)
-    {
-      size_t need = strlen(cmd) + strlen(obj_inputs[i]) + 8;
-      if (need > cmdsz)
+      for (int i = 0; i < obj_count; ++i)
       {
-        cmdsz = need + 1024;
-        cmd = (char *)realloc(cmd, cmdsz);
+        size_t need = strlen(cmd) + strlen(obj_inputs[i]) + 8;
+        if (need > cmdsz)
+        {
+          cmdsz = need + 1024;
+          cmd = (char *)realloc(cmd, cmdsz);
+        }
+        strcat(cmd, " ");
+        strcat(cmd, "\"");
+        strcat(cmd, obj_inputs[i]);
+        strcat(cmd, "\"");
       }
-      strcat(cmd, " ");
-      strcat(cmd, "\"");
-      strcat(cmd, obj_inputs[i]);
-      strcat(cmd, "\"");
+      if (compiler_verbose_enabled())
+      {
+        verbose_section("Merging objects");
+        verbose_table_row("Command", cmd);
+      }
+      int lrc = system(cmd);
+      if (lrc != 0)
+      {
+        fprintf(stderr, "relocatable link failed (rc=%d): %s\n", lrc, cmd);
+        rc = 1;
+      }
+      free(cmd);
     }
-    if (compiler_verbose_enabled())
-    {
-      verbose_section("Merging objects");
-      verbose_table_row("Command", cmd);
-    }
-    int lrc = system(cmd);
-    if (lrc != 0)
-    {
-      fprintf(stderr, "relocatable link failed (rc=%d): %s\n", lrc, cmd);
-      rc = 1;
-    }
-    free(cmd);
     // cleanup temp objects
     for (int i = 0; i < to_cnt; ++i)
     {

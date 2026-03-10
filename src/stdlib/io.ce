@@ -1,10 +1,18 @@
 module Std.IO;
 
 bring Std.String as Str;
+bring Std.Exception as Exception;
 
 extend from "C" i32 write(i32, char*, int);
 extend from "C" i32 printf(char*, ...);
+extend from "C" i32 read(i32, char*, int);
+extend from "C" i32 getchar();
+extend from "C" i32 ungetc(i32, void*);
+extend from "C" void* memcpy(void* dest, constant void* src, u64 n);
+
 constant i32 STDOUT_FD = 1;
+constant i32 STDIN_FD = 0;
+constant i32 STDERR_FD = 2;
 
 hide fun flush_buf(char* buf, i32 len) -> i32
 {
@@ -585,4 +593,50 @@ expose fun sprintf(char* buf, i32 cap, char* fmt, ...) -> i32
     }
     va_end(list);
     ret written;
+}
+
+// Std.IO.readin
+
+managed expose fun readin() -> char*
+{
+    string buf = new char[1024];
+    if (buf == null)
+        throw Exception.OutOfMemory -> "Failed to allocate buffer in readin";
+
+    i32 read_bytes = read(STDIN_FD as i32, buf, buf.length as int);
+    if (read_bytes < 0)
+    {
+        delete buf;
+        throw Exception.IOError -> "Error reading from stdin in readin";
+    }
+    if (read_bytes == 0)
+    {
+        delete buf;
+        ret "";
+    }
+
+    buf[read_bytes] = 0;
+    ret buf;
+}
+
+managed expose fun readin(int count) -> string
+{
+    if (count == 0)
+        ret "";
+    if (count < 0)
+        throw Exception.IndexOutOfBounds -> "Negative count not allowed in readin";
+    
+    string buf = new char[(count + 1)];
+    if (buf == null)
+        throw Exception.OutOfMemory -> "Failed to allocate buffer in readin";
+    
+    i32 read_bytes = read(STDIN_FD as i32, buf, count);
+    if (read_bytes < 0)
+    {
+        delete buf;
+        throw Exception.IOError -> "Error reading from stdin in readin";
+    }
+
+    buf[read_bytes] = 0;
+    ret buf;
 }

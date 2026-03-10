@@ -615,6 +615,8 @@ static Token lex_ident_or_kw(Lexer *lx)
         k = TK_KW_CATCH;
     else if (len == 7 && strncmp(p, "finally", 7) == 0)
         k = TK_KW_FINALLY;
+    else if (len == 5 && strncmp(p, "where", 5) == 0)
+        k = TK_KW_WHERE;
     else if (len == 5 && strncmp(p, "throw", 5) == 0)
         k = TK_KW_THROW;
     else if (len == 5 && strncmp(p, "break", 5) == 0)

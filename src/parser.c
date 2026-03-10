@@ -1655,13 +1655,13 @@ static Node *parse_try_stmt(Parser *ps)
                 clause_name = heap;
             }
 
-            Token guard_q = lexer_peek(ps->lx);
-            if (guard_q.kind == TK_QUESTION)
+            Token guard_tok = lexer_peek(ps->lx);
+            if (guard_tok.kind == TK_QUESTION)
             {
                 Token guard_gt = lexer_peek_n(ps->lx, 1);
                 if (guard_gt.kind != TK_GT)
                 {
-                    diag_error_at(lexer_source(ps->lx), guard_q.line, guard_q.col,
+                    diag_error_at(lexer_source(ps->lx), guard_tok.line, guard_tok.col,
                                   "expected '>' after '?' in catch guard; use '?> <expr>'");
                     exit(1);
                 }
@@ -1669,8 +1669,19 @@ static Node *parse_try_stmt(Parser *ps)
                 lexer_next(ps->lx);
                 if (!clause_name)
                 {
-                    diag_error_at(lexer_source(ps->lx), guard_q.line, guard_q.col,
+                    diag_error_at(lexer_source(ps->lx), guard_tok.line, guard_tok.col,
                                   "catch guard requires a catch variable name (e.g. catch (T ex ?> ...))");
+                    exit(1);
+                }
+                clause_guard = parse_expr(ps);
+            }
+            else if (guard_tok.kind == TK_KW_WHERE)
+            {
+                lexer_next(ps->lx);
+                if (!clause_name)
+                {
+                    diag_error_at(lexer_source(ps->lx), guard_tok.line, guard_tok.col,
+                                  "catch guard requires a catch variable name (e.g. catch (T ex where ...))");
                     exit(1);
                 }
                 clause_guard = parse_expr(ps);
@@ -7246,6 +7257,7 @@ static Type *parse_inline_union_type(Parser *ps)
     ut->is_union = 1;
     ut->strct.field_names = NULL;
     ut->strct.field_types = NULL;
+    ut->strct.field_default_values = NULL;
     ut->strct.field_offsets = NULL;
     ut->strct.field_count = 0;
     ut->strct.size_bytes = 0;
@@ -7310,10 +7322,153 @@ static Type *parse_inline_union_type(Parser *ps)
 
     ut->strct.field_names = fnames;
     ut->strct.field_types = ftypes;
+    ut->strct.field_default_values = NULL;
     ut->strct.field_offsets = foff;
     ut->strct.field_count = fcnt;
     ut->strct.size_bytes = align_up(max_size, max_align > 0 ? max_align : 1);
     return ut;
+}
+
+static int parser_field_default_allows_null(const Type *ty)
+{
+    return ty && (ty->kind == TY_PTR || ty->kind == TY_REF || ty->is_object);
+}
+
+static int parser_field_default_allows_string(const Type *ty)
+{
+    return ty && ty->kind == TY_PTR && ty->pointee && ty->pointee->kind == TY_CHAR;
+}
+
+static int parser_field_default_allows_int(const Type *ty)
+{
+    if (!ty)
+        return 0;
+    switch (ty->kind)
+    {
+    case TY_I8:
+    case TY_U8:
+    case TY_I16:
+    case TY_U16:
+    case TY_I32:
+    case TY_U32:
+    case TY_I64:
+    case TY_U64:
+    case TY_CHAR:
+    case TY_BOOL:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int parser_field_default_allows_float(const Type *ty)
+{
+    return ty && (ty->kind == TY_F32 || ty->kind == TY_F64 || ty->kind == TY_F128);
+}
+
+static char *parser_serialize_struct_field_default(Parser *ps, const Type *field_type, Node *expr)
+{
+    Node *cur = expr;
+    while (cur && cur->kind == ND_CAST)
+        cur = cur->lhs;
+    if (!cur)
+    {
+        diag_error("invalid struct field default initializer");
+        exit(1);
+    }
+
+    if (cur->kind == ND_NULL)
+    {
+        if (!parser_field_default_allows_null(field_type))
+        {
+            diag_error_at(cur->src, cur->line, cur->col,
+                          "field default 'null' requires pointer-like field type");
+            exit(1);
+        }
+        return xstrdup("N");
+    }
+
+    if (cur->kind == ND_STRING)
+    {
+        if (!parser_field_default_allows_string(field_type))
+        {
+            diag_error_at(cur->src, cur->line, cur->col,
+                          "string field defaults require a string-compatible pointer field");
+            exit(1);
+        }
+        size_t len = cur->str_len > 0 ? (size_t)cur->str_len : 0;
+        int prefix_len = snprintf(NULL, 0, "S%zu:", len);
+        char *out = (char *)xmalloc((size_t)prefix_len + len + 1);
+        snprintf(out, (size_t)prefix_len + 1, "S%zu:", len);
+        if (len > 0 && cur->str_data)
+            memcpy(out + prefix_len, cur->str_data, len);
+        out[prefix_len + len] = '\0';
+        return out;
+    }
+
+    if (cur->kind == ND_INT)
+    {
+        if (!parser_field_default_allows_int(field_type))
+        {
+            diag_error_at(cur->src, cur->line, cur->col,
+                          "integer field default is not compatible with this field type");
+            exit(1);
+        }
+        char buf[64];
+        if (cur->int_is_unsigned)
+            snprintf(buf, sizeof(buf), "U%llu", (unsigned long long)cur->int_uval);
+        else
+            snprintf(buf, sizeof(buf), "I%lld", (long long)cur->int_val);
+        return xstrdup(buf);
+    }
+
+    if (cur->kind == ND_FLOAT)
+    {
+        if (!parser_field_default_allows_float(field_type))
+        {
+            diag_error_at(cur->src, cur->line, cur->col,
+                          "floating-point field default is not compatible with this field type");
+            exit(1);
+        }
+        char buf[64];
+        snprintf(buf, sizeof(buf), "F%.17g", cur->float_val);
+        return xstrdup(buf);
+    }
+
+    if (cur->kind == ND_NEG && cur->lhs)
+    {
+        Node *inner = cur->lhs;
+        while (inner && inner->kind == ND_CAST)
+            inner = inner->lhs;
+        if (inner && inner->kind == ND_INT)
+        {
+            if (!parser_field_default_allows_int(field_type))
+            {
+                diag_error_at(cur->src, cur->line, cur->col,
+                              "integer field default is not compatible with this field type");
+                exit(1);
+            }
+            char buf[64];
+            snprintf(buf, sizeof(buf), "I%lld", (long long)(-inner->int_val));
+            return xstrdup(buf);
+        }
+        if (inner && inner->kind == ND_FLOAT)
+        {
+            if (!parser_field_default_allows_float(field_type))
+            {
+                diag_error_at(cur->src, cur->line, cur->col,
+                              "floating-point field default is not compatible with this field type");
+                exit(1);
+            }
+            char buf[64];
+            snprintf(buf, sizeof(buf), "F%.17g", -inner->float_val);
+            return xstrdup(buf);
+        }
+    }
+
+    diag_error_at(cur->src, cur->line, cur->col,
+                  "struct field defaults currently support only literal numbers, strings, and null");
+    exit(1);
 }
 
 static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_packed)
@@ -7365,6 +7520,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
         forward->strct.field_count = 0;
         forward->strct.size_bytes = 0;
         forward->strct.is_packed = (!is_union && is_packed) ? 1 : 0;
+        forward->strct.field_default_values = NULL;
         named_type_add(ps, name.lexeme, name.length, forward, is_exposed);
         return;
     }
@@ -7418,6 +7574,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     // Reset any forward-declaration field info before populating.
     st->strct.field_names = NULL;
     st->strct.field_types = NULL;
+    st->strct.field_default_values = NULL;
     st->strct.field_offsets = NULL;
     st->strct.field_count = 0;
     st->strct.size_bytes = 0;
@@ -7425,6 +7582,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     // Parse fields: list of type ident ';'
     const char **fnames = NULL;
     Type **ftypes = NULL;
+    const char **fdefs = NULL;
     int *foff = NULL;
     int fcnt = 0, fcap = 0;
     int offset = 0;
@@ -7453,6 +7611,19 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
         (void)is_const; // fields ignore const for now
         Type *fty = parse_type_spec(ps);
         Token fname = expect(ps, TK_IDENT, "field name");
+        char *field_default = NULL;
+        Token maybe_assign = lexer_peek(ps->lx);
+        if (maybe_assign.kind == TK_ASSIGN)
+        {
+            if (is_union)
+            {
+                diag_error_at(lexer_source(ps->lx), maybe_assign.line, maybe_assign.col,
+                              "union fields do not support default initializers");
+                exit(1);
+            }
+            lexer_next(ps->lx);
+            field_default = parser_serialize_struct_field_default(ps, fty, parse_expr(ps));
+        }
         // optional multiple declarators not supported; one per line
         if (is_exposed)
         {
@@ -7473,6 +7644,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
             fcap = fcap ? fcap * 2 : 4;
             fnames = (const char **)realloc(fnames, sizeof(char *) * fcap);
             ftypes = (Type **)realloc(ftypes, sizeof(Type *) * fcap);
+            fdefs = (const char **)realloc(fdefs, sizeof(char *) * fcap);
             foff = (int *)realloc(foff, sizeof(int) * fcap);
         }
         char *nm = (char *)xmalloc((size_t)fname.length + 1);
@@ -7480,6 +7652,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
         nm[fname.length] = '\0';
         fnames[fcnt] = nm;
         ftypes[fcnt] = fty;
+        fdefs[fcnt] = field_default;
         fcnt++;
         int field_align = type_align_simple(fty);
         if (field_align > max_align)
@@ -7510,6 +7683,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     }
     st->strct.field_names = fnames;
     st->strct.field_types = ftypes;
+    st->strct.field_default_values = fdefs;
     st->strct.field_offsets = foff;
     st->strct.field_count = fcnt;
     int struct_align = max_align > 0 ? max_align : 1;
