@@ -4484,12 +4484,47 @@ static Node *parse_postfix(Parser *ps)
     return parse_postfix_suffixes(ps, e);
 }
 
+static Node *parse_managed_array_adapter(Parser *ps, Token open_paren)
+{
+    expect(ps, TK_KW_MANAGED, "managed");
+    expect(ps, TK_LBRACKET, "[");
+    expect(ps, TK_RBRACKET, "]");
+    expect(ps, TK_COLON, ":");
+    expect(ps, TK_DOT, ".");
+
+    Token field = expect(ps, TK_IDENT, "managed array property");
+    if (!(field.length == 6 && strncmp(field.lexeme, "length", 6) == 0))
+    {
+        diag_error_at(lexer_source(ps->lx), field.line, field.col,
+                      "only '.length' is supported in managed array adapters");
+        exit(1);
+    }
+
+    expect(ps, TK_ASSIGN, "=");
+    Node *length_expr = parse_expr(ps);
+    expect(ps, TK_RPAREN, ")");
+
+    Node *operand = parse_unary(ps);
+    Node *adapt = new_node(ND_MANAGED_ARRAY_ADAPT);
+    adapt->lhs = operand;
+    adapt->rhs = length_expr;
+    adapt->line = open_paren.line;
+    adapt->col = open_paren.col;
+    adapt->src = lexer_source(ps->lx);
+    return adapt;
+}
+
 static Node *parse_unary(Parser *ps)
 {
     Token p = lexer_peek(ps->lx);
     if (p.kind == TK_LPAREN)
     {
         Token next = lexer_peek_n(ps->lx, 1);
+        if (next.kind == TK_KW_MANAGED)
+        {
+            lexer_next(ps->lx); // consume '('
+            return parse_managed_array_adapter(ps, p);
+        }
         if (is_type_start(ps, next))
         {
             lexer_next(ps->lx); // consume '('

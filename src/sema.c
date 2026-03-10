@@ -551,6 +551,7 @@ struct VarBind
     int is_const;
     int is_static;
     const char *backend_name;
+    const char *managed_length_name;
 };
 struct Scope
 {
@@ -2946,6 +2947,29 @@ static int can_assign(Type *target, Node *rhs)
     }
     if (rhs->type && type_equal(canon_target, rhs->type))
         return 1;
+    if (canon_target->kind == TY_ARRAY && canon_target->array.is_unsized)
+    {
+        Type *rhs_ty = canonicalize_type_deep(rhs->type);
+        Type *target_elem = canonicalize_type_deep(canon_target->array.elem);
+        if (rhs_ty && rhs_ty->kind == TY_ARRAY)
+        {
+            Type *rhs_elem = canonicalize_type_deep(rhs_ty->array.elem);
+            if (target_elem && rhs_elem && type_equal(target_elem, rhs_elem))
+            {
+                rhs->type = canon_target;
+                return 1;
+            }
+        }
+        if (rhs_ty && rhs_ty->kind == TY_PTR)
+        {
+            Type *rhs_elem = canonicalize_type_deep(rhs_ty->pointee);
+            if (target_elem && rhs_elem && type_equal(target_elem, rhs_elem))
+            {
+                rhs->type = canon_target;
+                return 1;
+            }
+        }
+    }
     {
         Type *rhs_ty = canonicalize_type_deep(rhs->type);
         if (canon_target->kind == TY_PTR && rhs_ty && rhs_ty->kind == TY_ARRAY)
@@ -3380,7 +3404,8 @@ static const struct VarBind *scope_get_binding(SemaContext *sc, const char *name
     return NULL;
 }
 static void scope_add(SemaContext *sc, const char *name, Type *ty,
-                      int is_const, int is_static, const char *backend_name)
+                      int is_const, int is_static, const char *backend_name,
+                      const char *managed_length_name)
 {
     if (!sc->scope)
         scope_push(sc);
@@ -3393,8 +3418,52 @@ static void scope_add(SemaContext *sc, const char *name, Type *ty,
         s->locals[s->local_count].is_const = is_const;
         s->locals[s->local_count].is_static = is_static;
         s->locals[s->local_count].backend_name = backend_name;
+        s->locals[s->local_count].managed_length_name = managed_length_name;
         s->local_count++;
     }
+}
+
+static int type_is_unsized_array(Type *ty)
+{
+    ty = canonicalize_type_deep(ty);
+    return ty && ty->kind == TY_ARRAY && ty->array.is_unsized;
+}
+
+static Type *node_array_source_type(const Node *node)
+{
+    if (!node)
+        return NULL;
+    if (node->var_type)
+    {
+        Type *var_ty = canonicalize_type_deep(node->var_type);
+        if (var_ty && var_ty->kind == TY_ARRAY)
+            return var_ty;
+    }
+    Type *expr_ty = canonicalize_type_deep(node->type);
+    if (expr_ty && expr_ty->kind == TY_ARRAY)
+        return expr_ty;
+    return NULL;
+}
+
+static char *make_managed_length_name(const char *name)
+{
+    const char *base = (name && *name) ? name : "array";
+    size_t need = strlen(base) + strlen("__managed_len_") + 1;
+    char *buf = (char *)xmalloc(need);
+    snprintf(buf, need, "__managed_len_%s", base);
+    return buf;
+}
+
+static int expr_provides_managed_array_length(const Node *expr)
+{
+    if (!expr)
+        return 0;
+    if (expr->kind == ND_MANAGED_ARRAY_ADAPT)
+        return 1;
+    if (expr->managed_length_name && expr->managed_length_name[0] != '\0')
+        return 1;
+    Type *array_ty = node_array_source_type(expr);
+    return array_ty && !array_ty->array.is_unsized;
 }
 static int scope_is_const(SemaContext *sc, const char *name)
 {
@@ -3963,6 +4032,8 @@ static void check_expr(SemaContext *sc, Node *e)
         const struct VarBind *binding = scope_get_binding(sc, orig_name);
         if (binding && binding->is_static && binding->backend_name)
             e->var_ref = binding->backend_name;
+        if (binding && binding->managed_length_name)
+            e->managed_length_name = binding->managed_length_name;
 
         Type *canon = canonicalize_type_deep(t);
         e->var_type = canon ? canon : t;
@@ -4457,6 +4528,22 @@ static void check_expr(SemaContext *sc, Node *e)
         }
 
         Type *base = sema_resolve_import_type(canonicalize_type_deep(e->lhs->type));
+        Type *array_base = node_array_source_type(e->lhs);
+
+        if (!e->is_pointer_deref && array_base && e->field_name && strcmp(e->field_name, "length") == 0)
+        {
+            e->type = &ty_u64;
+            e->field_index = -1;
+            e->field_offset = 0;
+            if (array_base->array.is_unsized && e->lhs->kind != ND_MANAGED_ARRAY_ADAPT &&
+                !(e->lhs->managed_length_name && e->lhs->managed_length_name[0] != '\0'))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "dynamic array length is only available for managed array values with length metadata");
+                exit(1);
+            }
+            return;
+        }
 
         if (!e->is_pointer_deref && base && type_is_string_ptr(base) && e->field_name && strcmp(e->field_name, "length") == 0)
         {
@@ -4549,6 +4636,47 @@ static void check_expr(SemaContext *sc, Node *e)
         if (target->var_type && target->var_type->kind == TY_ARRAY && !target->var_type->array.is_unsized)
             addr_type = target->var_type;
         e->type = type_ptr(addr_type);
+        return;
+    }
+    if (e->kind == ND_MANAGED_ARRAY_ADAPT)
+    {
+        if (!e->lhs || !e->rhs)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "managed array adapter requires both a source array and a .length expression");
+            exit(1);
+        }
+
+        check_expr(sc, e->lhs);
+        check_expr(sc, e->rhs);
+
+        if (!type_is_int(e->rhs->type))
+        {
+            diag_error_at(e->rhs->src, e->rhs->line, e->rhs->col,
+                          "managed array adapter length must be an integer expression");
+            exit(1);
+        }
+
+        Type *src_array = node_array_source_type(e->lhs);
+        Type *elem = NULL;
+        if (src_array && src_array->kind == TY_ARRAY)
+            elem = canonicalize_type_deep(src_array->array.elem);
+        else
+        {
+            Type *src_ty = canonicalize_type_deep(e->lhs->type);
+            if (src_ty && src_ty->kind == TY_PTR)
+                elem = canonicalize_type_deep(src_ty->pointee);
+        }
+
+        if (!elem)
+        {
+            diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
+                          "managed array adapter source must be an array or pointer value");
+            exit(1);
+        }
+
+        e->var_type = canonicalize_type_deep(type_array(elem, -1));
+        e->type = e->var_type;
         return;
     }
     if (e->kind == ND_ADD)
@@ -5073,6 +5201,18 @@ static void check_expr(SemaContext *sc, Node *e)
                 exit(1);
             }
             e->rhs->type = lhs_type;
+        }
+        if (lhs_base && lhs_base->kind == ND_VAR && type_is_unsized_array(lhs_base->var_type) &&
+            lhs_base->managed_length_name && lhs_base->managed_length_name[0] != '\0')
+        {
+            if (!expr_provides_managed_array_length(e->rhs))
+            {
+                diag_error_at(e->rhs->src, e->rhs->line, e->rhs->col,
+                              "assignment to managed dynamic array '%s' requires length metadata; use (managed[]: .length = expr)",
+                              lhs_base->var_ref ? lhs_base->var_ref : "<array>");
+                exit(1);
+            }
+            e->managed_length_name = lhs_base->managed_length_name;
         }
         e->type = lhs_type ? lhs_type : (e->rhs->type ? e->rhs->type : &ty_i32);
         return;
@@ -5946,6 +6086,19 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
         else
             stmt->var_is_array = 0;
         stmt->var_is_function = type_is_function_pointer(stmt->var_type);
+
+        if (stmt->rhs && stmt->rhs->kind != ND_INIT_LIST && !rhs_checked)
+        {
+            check_expr(sc, stmt->rhs);
+            rhs_checked = 1;
+        }
+
+        if (fn && fn->is_managed && type_is_unsized_array(stmt->var_type) && stmt->rhs &&
+            expr_provides_managed_array_length(stmt->rhs))
+            stmt->managed_length_name = make_managed_length_name(stmt->var_name);
+        else
+            stmt->managed_length_name = NULL;
+
         if (stmt->var_is_static)
         {
             if (!sc || !sc->unit || sc->unit->kind != ND_UNIT)
@@ -5977,13 +6130,13 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
 
             sema_register_global_local(sc, sc->unit, hoisted);
             unit_append_decl(sc->unit, hoisted);
-            scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const, 1, backend);
+            scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const, 1, backend, stmt->managed_length_name);
 
             stmt->rhs = NULL;
             stmt->var_is_global = 1;
             return 0;
         }
-        scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const, 0, NULL);
+        scope_add(sc, stmt->var_name, stmt->var_type, stmt->var_is_const, 0, NULL, stmt->managed_length_name);
         if (stmt->rhs)
         {
             if (stmt->rhs->kind == ND_INIT_LIST)
@@ -6005,6 +6158,7 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
                     stmt->rhs->type = stmt->var_type;
             }
         }
+
         return 0;
     }
     case ND_EXPR_STMT:
@@ -6516,7 +6670,8 @@ static int sema_check_function(SemaContext *sc, Node *fn)
     {
         fn->param_types[i] = canonicalize_type_deep(fn->param_types[i]);
         int param_is_const = (fn->param_const_flags && i < fn->param_count) ? fn->param_const_flags[i] : 0;
-        scope_add(sc, fn->param_names[i], fn->param_types[i], param_is_const, 0, NULL);
+        scope_add(sc, fn->param_names[i], fn->param_types[i], param_is_const, 0, NULL,
+              (fn->is_managed && type_is_unsized_array(fn->param_types[i])) ? make_managed_length_name(fn->param_names[i]) : NULL);
     }
     int has_return = 0;
     int rc;

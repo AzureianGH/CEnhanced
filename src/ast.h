@@ -335,6 +335,7 @@ typedef enum
     ND_MATCH,
     ND_LAMBDA,
     ND_SEQ,
+    ND_MANAGED_ARRAY_ADAPT,
     ND_LAMBDA_CALL,
 } NodeKind;
 
@@ -468,6 +469,8 @@ struct Node
     int var_is_array;                 // for ND_VAR references to array-typed variables
     int var_is_function;              // for ND_VAR references that name a function symbol
     struct Node *referenced_function; // points at referenced function definition when resolved
+    const char *managed_length_name;  // hidden companion local/global storing dynamic array length
+    struct Node *managed_length_expr; // initializer for hidden managed array length companion
     const ModulePath *module_ref;     // tracks originating module for qualified references
     int module_ref_parts;             // number of module path segments consumed in expression
     const char *module_type_name;     // resolved type name within module, when applicable

@@ -1,4 +1,4 @@
-#define DEBUGABLE
+
 
 #ifdef DEBUGABLE
 extend from "C" int printf(constant char* format, ...);
