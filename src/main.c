@@ -7737,60 +7737,11 @@ int main(int argc, char **argv)
     }
     else
     {
-      // Final link of temps + provided objects into an executable
-      size_t cmdsz = 4096;
-      char *cmd = (char *)xmalloc(cmdsz);
-      if (debug_symbols)
-        snprintf(cmd, cmdsz, "\"%s\" -g -gdwarf-4 -o \"%s\"",
-                 host_cc_cmd_to_use, out);
-      else
-        snprintf(cmd, cmdsz, "\"%s\" -o \"%s\"", host_cc_cmd_to_use, out);
-      if (target_arch == ARCH_ARM64)
-        append_arm64_arch_flag(cmd, cmdsz, target_os, host_cc_cmd_to_use);
-      if (freestanding)
-        strncat(cmd, " -ffreestanding -nostdlib", cmdsz - strlen(cmd) - 1);
-      for (int i = 0; i < to_cnt; ++i)
-      {
-        size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
-        if (need > cmdsz)
-        {
-          cmdsz = need + 1024;
-          cmd = (char *)realloc(cmd, cmdsz);
-        }
-        strcat(cmd, " ");
-        strcat(cmd, "\"");
-        strcat(cmd, temp_objs[i]);
-        strcat(cmd, "\"");
-      }
-      for (int i = 0; i < obj_count; ++i)
-      {
-        size_t need = strlen(cmd) + strlen(obj_inputs[i]) + 8;
-        if (need > cmdsz)
-        {
-          cmdsz = need + 1024;
-          cmd = (char *)realloc(cmd, cmdsz);
-        }
-        strcat(cmd, " ");
-        strcat(cmd, "\"");
-        strcat(cmd, obj_inputs[i]);
-        strcat(cmd, "\"");
-      }
-      if (compiler_verbose_enabled())
-      {
-        verbose_section("Linking executable");
-        verbose_table_row("Command", cmd);
-      }
-      int lrc = system(cmd);
-      if (lrc != 0)
-      {
-        fprintf(stderr, "link failed (rc=%d): %s\n", lrc, cmd);
-        rc = 1;
-      }
-      else
-      {
-        maybe_generate_dsym(out, debug_symbols, target_os);
-      }
-      free(cmd);
+      fprintf(stderr,
+              "error: self-hosted linking is required; no CLD target is available for this build/target\n");
+      fprintf(stderr,
+              "hint: use a CLD-supported target or extend CLD for this architecture/object format\n");
+      rc = 1;
     }
     // cleanup temp objects
     for (int i = 0; i < to_cnt; ++i)
@@ -7843,36 +7794,11 @@ int main(int argc, char **argv)
     }
     else
     {
-      char link_cmd[4096];
-      if (debug_symbols)
-        snprintf(link_cmd, sizeof(link_cmd),
-                 "\"%s\" -g -gdwarf-4 -o \"%s\" \"%s\"",
-                 host_cc_cmd_to_use, out, single_obj_path);
-      else
-        snprintf(link_cmd, sizeof(link_cmd),
-                 "\"%s\" -o \"%s\" \"%s\"", host_cc_cmd_to_use, out,
-                 single_obj_path);
-      if (target_arch == ARCH_ARM64)
-        append_arm64_arch_flag(link_cmd, sizeof(link_cmd), target_os,
-                               host_cc_cmd_to_use);
-      if (freestanding)
-        strncat(link_cmd, " -ffreestanding -nostdlib",
-                sizeof(link_cmd) - strlen(link_cmd) - 1);
-      if (compiler_verbose_enabled())
-      {
-        verbose_section("Linking single object");
-        verbose_table_row("Command", link_cmd);
-      }
-      int lrc = system(link_cmd);
-      if (lrc != 0)
-      {
-        fprintf(stderr, "link failed (rc=%d): %s\n", lrc, link_cmd);
-        rc = 1;
-      }
-      else
-      {
-        maybe_generate_dsym(out, debug_symbols, target_os);
-      }
+      fprintf(stderr,
+              "error: self-hosted linking is required; no CLD target is available for this build/target\n");
+      fprintf(stderr,
+              "hint: use a CLD-supported target or extend CLD for this architecture/object format\n");
+      rc = 1;
     }
     if (single_obj_is_temp)
       remove(single_obj_path);
@@ -7930,59 +7856,11 @@ int main(int argc, char **argv)
     }
     else
     {
-      // Merge temps + external objects into obj_override (relocatable link)
-      // Build command
-      // Validate external objects again (already checked)
-      size_t cmdsz = 4096;
-      char *cmd = (char *)xmalloc(cmdsz);
-      if (debug_symbols)
-        snprintf(cmd, cmdsz, "\"%s\" -g -gdwarf-4 -r -o \"%s\"",
-                 host_cc_cmd_to_use, obj_override);
-      else
-        snprintf(cmd, cmdsz, "\"%s\" -r -o \"%s\"", host_cc_cmd_to_use,
-                 obj_override);
-      if (target_arch == ARCH_ARM64)
-        append_arm64_arch_flag(cmd, cmdsz, target_os, host_cc_cmd_to_use);
-      if (freestanding)
-        strncat(cmd, " -ffreestanding -nostdlib", cmdsz - strlen(cmd) - 1);
-      for (int i = 0; i < to_cnt; ++i)
-      {
-        size_t need = strlen(cmd) + strlen(temp_objs[i]) + 8;
-        if (need > cmdsz)
-        {
-          cmdsz = need + 1024;
-          cmd = (char *)realloc(cmd, cmdsz);
-        }
-        strcat(cmd, " ");
-        strcat(cmd, "\"");
-        strcat(cmd, temp_objs[i]);
-        strcat(cmd, "\"");
-      }
-      for (int i = 0; i < obj_count; ++i)
-      {
-        size_t need = strlen(cmd) + strlen(obj_inputs[i]) + 8;
-        if (need > cmdsz)
-        {
-          cmdsz = need + 1024;
-          cmd = (char *)realloc(cmd, cmdsz);
-        }
-        strcat(cmd, " ");
-        strcat(cmd, "\"");
-        strcat(cmd, obj_inputs[i]);
-        strcat(cmd, "\"");
-      }
-      if (compiler_verbose_enabled())
-      {
-        verbose_section("Merging objects");
-        verbose_table_row("Command", cmd);
-      }
-      int lrc = system(cmd);
-      if (lrc != 0)
-      {
-        fprintf(stderr, "relocatable link failed (rc=%d): %s\n", lrc, cmd);
-        rc = 1;
-      }
-      free(cmd);
+      fprintf(stderr,
+              "error: self-hosted relocatable linking is required; no CLD target is available for this build/target\n");
+      fprintf(stderr,
+              "hint: use a CLD-supported target or extend CLD relocatable output for this architecture/object format\n");
+      rc = 1;
     }
     // cleanup temp objects
     for (int i = 0; i < to_cnt; ++i)
