@@ -5611,6 +5611,15 @@ int main(int argc, char **argv)
   int loaded_library_function_cap = 0;
   char *project_output_alloc = NULL;
   char *project_after_cmd = NULL;
+  int rc = 0;
+  UnitCompile *units = NULL;
+  SymbolRefUnit *symbol_ref_units = NULL;
+  char **temp_objs = NULL;
+  int to_cnt = 0;
+  int to_cap = 0;
+  char single_obj_path[1024] = {0};
+  int have_single_obj = 0;
+  int single_obj_is_temp = 0;
 
   ProjectInputList ce_cli_list = {&ce_inputs, &ce_count, &ce_cap,
                                   &owned_ce_inputs, &owned_ce_count,
@@ -6460,16 +6469,9 @@ int main(int argc, char **argv)
   {
     if (!obj_override)
     {
-      // Per-file compile: must not include external .o inputs
-      if (obj_count > 0)
-      {
-        fprintf(
-            stderr,
-            "error: providing .o files with -c but without an output object is "
-            "invalid. Specify an output object after -c to merge.\n");
-        goto fail;
-      }
-      if (ce_count == 0)
+      // Per-input object emission: compile source inputs to individual object
+      // files and leave any externally provided .o inputs untouched.
+      if (ce_count == 0 && ccb_count == 0)
       {
         fprintf(stderr, "error: nothing to compile.\n");
         goto fail;
@@ -6513,7 +6515,6 @@ int main(int argc, char **argv)
     }
     remove(strip_map_path);
   }
-  int rc = 0;
   if (symbol_ref_cclib_count > 0)
   {
     for (int i = 0; i < symbol_ref_cclib_count; ++i)
@@ -6560,10 +6561,8 @@ int main(int argc, char **argv)
     }
   }
 
-  UnitCompile *units = NULL;
   if (ce_count > 0)
     units = (UnitCompile *)xcalloc((size_t)ce_count, sizeof(UnitCompile));
-  SymbolRefUnit *symbol_ref_units = NULL;
   if (symbol_ref_ce_count > 0)
     symbol_ref_units =
         (SymbolRefUnit *)xcalloc((size_t)symbol_ref_ce_count,
@@ -6575,12 +6574,6 @@ int main(int argc, char **argv)
                     (obj_count > 0 || total_codegen_units > 1));
 
   // Container for temporary objects when merging or linking
-  char **temp_objs = NULL;
-  int to_cnt = 0, to_cap = 0;
-  char single_obj_path[1024] = {0};
-  int have_single_obj = 0;
-  int single_obj_is_temp = 0;
-
   if (symbol_ref_ce_count > 0 && symbol_ref_units)
   {
     if (compiler_verbose_enabled())

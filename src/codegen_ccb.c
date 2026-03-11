@@ -5206,6 +5206,13 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
     if (!fb || !opts || opts->opt_level <= 0)
         return;
 
+    /*
+     * The frontend CCB optimizer is currently unsound for some nested address
+     * arithmetic and short-circuit boolean patterns. Leave frontend bytecode in
+     * its unoptimized form until these passes are repaired.
+     */
+    return;
+
     const char *fn_name = (fb->fn && fb->fn->name) ? fb->fn->name : "<anon>";
     if (compiler_verbose_enabled())
         compiler_verbose_logf("optimizer", "optimizing '%s' (O%d)", fn_name, opts->opt_level);
