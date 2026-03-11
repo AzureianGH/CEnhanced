@@ -1,5 +1,6 @@
 #include "preproc.h"
 #include "ast.h"
+#include "chance_version.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -1968,26 +1969,29 @@ char *chance_preprocess_source(const char *path, const char *src, int len,
 	st.date_literal[sizeof(st.date_literal) - 1] = '\0';
 	st.time_literal[sizeof(st.time_literal) - 1] = '\0';
 	define_builtin_macro(&st, "__CHANCE__", "1");
-	const int version_major = 1;
-	const int version_minor = 1;
-	const int version_patch = 0;
 	char version_compact[16];
-	snprintf(version_compact, sizeof(version_compact), "%d", version_major * 10000 + version_minor * 100 + version_patch);
+	snprintf(version_compact, sizeof(version_compact), "%d",
+			 CHANCEC_VERSION_COMPACT);
 	define_builtin_macro(&st, "__CHANCE_VERSION__", version_compact);
 	char version_major_buf[8];
 	char version_minor_buf[8];
 	char version_patch_buf[8];
-	snprintf(version_major_buf, sizeof(version_major_buf), "%d", version_major);
-	snprintf(version_minor_buf, sizeof(version_minor_buf), "%d", version_minor);
-	snprintf(version_patch_buf, sizeof(version_patch_buf), "%d", version_patch);
+	snprintf(version_major_buf, sizeof(version_major_buf), "%d",
+			 CHANCEC_VERSION_MAJOR);
+	snprintf(version_minor_buf, sizeof(version_minor_buf), "%d",
+			 CHANCEC_VERSION_MINOR);
+	snprintf(version_patch_buf, sizeof(version_patch_buf), "%d",
+			 CHANCEC_VERSION_PATCH);
 	define_builtin_macro(&st, "__CHANCE_VERSION_MAJOR__", version_major_buf);
 	define_builtin_macro(&st, "__CHANCE_VERSION_MINOR__", version_minor_buf);
 	define_builtin_macro(&st, "__CHANCE_VERSION_PATCH__", version_patch_buf);
-	char version_str_literal[32];
-	snprintf(version_str_literal, sizeof(version_str_literal), "%d.%d.%d", version_major, version_minor, version_patch);
-	char *version_str_macro = make_string_literal(version_str_literal);
+	char *version_str_macro = make_string_literal(CHANCEC_VERSION_STRING);
 	define_builtin_macro(&st, "__CHANCE_VERSION_STR__", version_str_macro);
 	free(version_str_macro);
+	char standard_buf[16];
+	snprintf(standard_buf, sizeof(standard_buf), "%d",
+			 chance_standard_value(parser_get_language_standard()));
+	define_builtin_macro(&st, "__CHANCE_STANDARD__", standard_buf);
 	char pointer_buf[16];
 	snprintf(pointer_buf, sizeof(pointer_buf), "%d", st.pointer_width);
 	define_builtin_macro(&st, "__POINTER_WIDTH__", pointer_buf);

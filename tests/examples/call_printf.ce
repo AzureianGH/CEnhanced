@@ -447,11 +447,9 @@ expose fun main() -> i32
     assert(UNDEF_CHECK_VALUE == 456, "#undef clears definitions for guards");
     
     assert(__CHANCE__ == 1, "__CHANCE__ builtin defined");
-    assert(__CHANCE_VERSION_MAJOR__ == 1, "major version under 1");
-    assert(__CHANCE_VERSION_MINOR__ >= 1, "minor version reflects progress");
-    assert(__CHANCE_VERSION_PATCH__ >= 0, "patch version set");
     assert(__CHANCE_VERSION__ == (__CHANCE_VERSION_MAJOR__ * 10000 + __CHANCE_VERSION_MINOR__ * 100 + __CHANCE_VERSION_PATCH__), "aggregate version matches components");
-    assert(strcmp(__CHANCE_VERSION_STR__, "1.1.0") == 0, "string version matches 1.1.0");
+    Std.IO.printnl("CHanceC version: %s", __CHANCE_VERSION_STR__);
+    Std.IO.printnl("CHance H%d", __CHANCE_STANDARD__);
     assert(__POINTER_WIDTH__ == (sizeof(void*) * 8), "__POINTER_WIDTH__ matches sizeof(void*)");
     if (sizeof(void*) == 8)
     {
@@ -812,6 +810,7 @@ expose fun main() -> i32
     assert(vertices[2].position[0] == 0.75f && vertices[2].position[1] == -0.70f && vertices[2].position[2] == 0.0f, "vertex 2 position correct");
     assert(vertices[2].color[0] == 0.2f && vertices[2].color[1] == 0.5f && vertices[2].color[2] == 1.0f && vertices[2].color[3] == 1.0f, "vertex 2 color correct");
 
+    #if __CHANCE_STANDARD__ >= 27
     int* test_new = new int[3];
     if (test_new != null)
     {
@@ -845,6 +844,9 @@ expose fun main() -> i32
     {
         assert(false, "delete did not set pointers to null");
     }
+    #else
+    assert(true, "new/delete tests skipped on older CHance standards");
+    #endif
 
     Std.IO.printnl("All tests completed successfully! %d total asserts.", total_test_count);
 

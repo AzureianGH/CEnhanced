@@ -1,5 +1,6 @@
 #include "ast.h"
 #include "cclib.h"
+#include "chance_version.h"
 #include "includes.h"
 #include "mangle.h"
 #include "module_registry.h"
@@ -5543,7 +5544,7 @@ int main(int argc, char **argv)
   int implicit_voidp = 0;
   int implicit_void_function = 0;
   int implicit_sizeof = 0;
-  int language_standard = CHANCE_STD_H27;
+  int language_standard = CHANCEC_DEFAULT_STANDARD;
   int request_ast = 0;
   int diagnostics_only = 0;
   int toolchain_debug_mode = 0;
@@ -5624,8 +5625,10 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[i], "--version") == 0)
     {
-      printf("chancec: CHance Compiler version 2.0.0\n");
-      printf("chancec: CE language standard default: H27\n");
+          printf("chancec: CHance Compiler version %s\n",
+            CHANCEC_VERSION_STRING);
+          printf("chancec: CE language standard default: %s\n",
+            chance_standard_name(CHANCEC_DEFAULT_STANDARD));
       printf("chancec: License: OpenAzure License\n");
       printf("chancec: Compiled on %s %s\n", __DATE__, __TIME__);
       printf("chancec: Created by Nathan Hornby (AzureianGH)\n");
