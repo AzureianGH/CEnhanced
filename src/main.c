@@ -348,7 +348,7 @@ static void usage(const char *prog)
                   "assembly/object/executable output\n");
   fprintf(stderr, "  -arm64            Select ARM64 backend (use --target-os macos|linux|windows) for "
                   "assembly/object/executable output\n");
-  fprintf(stderr, "  -bslash           Select BSlash backend for assembly output\n");
+  fprintf(stderr, "  -bslash           Select BSlash backend for assembly/object/executable output\n");
   fprintf(stderr, "  --target-os <os>  Backend target OS: windows|linux|macos\n");
   fprintf(
       stderr,
@@ -451,6 +451,31 @@ static int is_ce_source_arg(const char *path)
 static int is_object_file_arg(const char *path)
 {
   return path && (ends_with_icase(path, ".o") || ends_with_icase(path, ".obj"));
+}
+
+static int unit_is_embedded_force_inline_literal_only(const Node *unit)
+{
+  if (!unit || unit->kind != ND_UNIT)
+    return 0;
+
+  int saw_function = 0;
+  for (int i = 0; i < unit->stmt_count; ++i)
+  {
+    const Node *decl = unit->stmts[i];
+    if (!decl)
+      continue;
+    if (decl->kind == ND_FUNC)
+    {
+      saw_function = 1;
+      if (!decl->is_exposed || !decl->is_literal || !decl->force_inline_literal || decl->is_preserve)
+        return 0;
+      continue;
+    }
+    if (decl->kind == ND_VAR_DECL && decl->var_is_global)
+      return 0;
+  }
+
+  return saw_function;
 }
 
 static void split_path(const char *path, char *dir, size_t dsz,
@@ -926,6 +951,8 @@ static const char *cld_target_name_for_link(TargetArch arch, TargetOS os)
     return os == OS_MACOS ? "macos-arm64" : NULL;
   case ARCH_X86:
     return os == OS_LINUX ? "x86_64-elf" : NULL;
+  case ARCH_BSLASH:
+    return "bslash";
   default:
     return NULL;
   }
@@ -1883,8 +1910,6 @@ static int project_args_apply(const char *proj_path, int lineno,
         *state->target_arch = ARCH_BSLASH;
       if (state->chancecode_backend)
         *state->chancecode_backend = "bslash";
-      if (state->stop_after_asm)
-        *state->stop_after_asm = 1;
       continue;
     }
     if (strcmp(arg, "-m32") == 0)
@@ -2300,8 +2325,6 @@ static int parse_ceproj_file(
           *target_arch = ARCH_BSLASH;
         if (chancecode_backend)
           *chancecode_backend = "bslash";
-        if (stop_after_asm)
-          *stop_after_asm = 1;
       }
       else if (equals_icase(value_buf, "none"))
       {
@@ -5125,6 +5148,8 @@ static const char *chs_arch_name_for_target(TargetArch arch)
     return "x86_64";
   case ARCH_ARM64:
     return "arm64";
+  case ARCH_BSLASH:
+    return "bslash";
   default:
     return NULL;
   }
@@ -5280,7 +5305,7 @@ static int assemble_to_object(const char *host_cc_cmd_to_use,
                               int debug_symbols, int freestanding,
                               int opt_level)
 {
-  if (target_arch == ARCH_ARM64)
+  if (target_arch == ARCH_ARM64 || target_arch == ARCH_BSLASH)
   {
     if (!chs_cmd_to_use || !*chs_cmd_to_use)
     {
@@ -5292,10 +5317,11 @@ static int assemble_to_object(const char *host_cc_cmd_to_use,
     if (!arch_name || !format_name)
     {
       fprintf(stderr,
-              "CHS does not support target-os '%s' for arm64 assembly\n",
+              "CHS does not support target-os '%s' for %s assembly\n",
               target_os_to_option(target_os)
                   ? target_os_to_option(target_os)
-                  : "<unset>");
+                  : "<unset>",
+              target_arch == ARCH_BSLASH ? "bslash" : "arm64");
       return 1;
     }
     int spawn_errno = 0;
@@ -5834,7 +5860,6 @@ int main(int argc, char **argv)
     {
       target_arch = ARCH_BSLASH;
       chancecode_backend = "bslash";
-      stop_after_asm = 1;
       continue;
     }
     if (strcmp(argv[i], "-m32") == 0)
@@ -6262,7 +6287,7 @@ int main(int argc, char **argv)
   int chs_uses_fallback = 0;
   int chs_has_override = 0;
   int needs_chs = !emit_library && !stop_after_ccb && !stop_after_asm &&
-                  target_arch == ARCH_ARM64;
+                  (target_arch == ARCH_ARM64 || target_arch == ARCH_BSLASH);
   if (needs_chs)
   {
     if (chs_cmd_override && *chs_cmd_override)
@@ -6346,6 +6371,7 @@ int main(int argc, char **argv)
       }
     }
 
+    if (!freestanding)
     {
       char runtime_path[1024];
       if (!locate_cclib_path(exe_dir, "runtime", "runtime.cclib",
@@ -6775,6 +6801,19 @@ int main(int argc, char **argv)
       char dir[512], base[512];
       split_path(uc->input_path, dir, sizeof(dir), base, sizeof(base));
 
+      if (!emit_library && ce_count > 1 && unit_is_embedded_force_inline_literal_only(unit))
+      {
+        if (!(stop_after_ccb && ends_with_icase(out, ".ccb")))
+        {
+          char stale_ccb_path[1024];
+          build_path_with_ext(dir, base, ".ccb", stale_ccb_path, sizeof(stale_ccb_path));
+          remove(stale_ccb_path);
+        }
+        if (compiler_verbose_enabled())
+          compiler_verbose_logf("codegen", "skip standalone CCB for inline-only literal unit '%s'", uc->input_path);
+        continue;
+      }
+
       char ccb_path[1024];
       build_path_with_ext(dir, base, ".ccb", ccb_path, sizeof(ccb_path));
       if (stop_after_ccb && ends_with_icase(out, ".ccb"))
@@ -7107,7 +7146,8 @@ int main(int argc, char **argv)
         }
       }
 
-      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+        if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+              target_arch == ARCH_BSLASH) &&
           !stop_after_ccb &&
           !stop_after_asm)
       {
@@ -7137,7 +7177,8 @@ int main(int argc, char **argv)
           remove(asm_path);
       }
 
-      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+        if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+              target_arch == ARCH_BSLASH) &&
           !stop_after_ccb &&
           !stop_after_asm && !no_link && !multi_link)
       {
@@ -7360,7 +7401,8 @@ int main(int argc, char **argv)
         }
       }
 
-      if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+       if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+         target_arch == ARCH_BSLASH) &&
           !stop_after_ccb && !stop_after_asm)
       {
         if (!need_obj)
@@ -7388,7 +7430,8 @@ int main(int argc, char **argv)
           remove(asm_path);
       }
 
-      if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64) &&
+       if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+         target_arch == ARCH_BSLASH) &&
           !stop_after_ccb && !stop_after_asm &&
           !no_link && !multi_link)
       {

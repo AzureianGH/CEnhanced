@@ -493,8 +493,11 @@ static bool ccb_emit_const_u64(StringList *body, CCValueType ty, uint64_t value)
 static bool ccb_make_default_literal_expr(const Type *field_type, const char *spec, Node *out_expr);
 static bool ccb_struct_has_field_defaults(const Type *struct_type);
 static bool ccb_store_struct_default_bytes(const Type *struct_type, uint8_t *dst, size_t dst_size);
+static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const CodegenOptions *opts);
+static bool ccb_symbol_is_embedded_force_inline_literal(const Symbol *sym);
 static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym);
 static int ccb_module_emit_externs(CcbModule *mod, const CodegenOptions *opts);
+static int ccb_module_emit_imported_force_inline_literals(CcbModule *mod, const CodegenOptions *opts);
 static CcbEntrypointShimKind ccb_entrypoint_shim_kind(const Node *fn, const CodegenOptions *opts);
 static Node *ccb_prepare_hosted_entrypoint(CcbModule *mod, const Node *unit, const CodegenOptions *opts,
                                            CcbEntrypointShimKind *out_kind, const char **out_public_name,
@@ -869,6 +872,14 @@ static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym)
     return ok;
 }
 
+static bool ccb_symbol_is_embedded_force_inline_literal(const Symbol *sym)
+{
+    if (!sym || sym->kind != SYM_FUNC || !sym->is_extern || !sym->ast_node)
+        return false;
+    const Node *fn = sym->ast_node;
+    return fn->kind == ND_FUNC && fn->is_literal && fn->force_inline_literal;
+}
+
 static const char *ccb_effective_global_name(const Node *decl, const char *module_prefix)
 {
     if (!decl)
@@ -894,6 +905,8 @@ static int ccb_emit_symbol_list(CcbModule *mod, const Symbol *syms, int count, S
         const Symbol *sym = &syms[i];
         if (!sym || !sym->is_extern || sym->kind != SYM_FUNC)
             continue;
+        if (ccb_symbol_is_embedded_force_inline_literal(sym))
+            continue;
         const char *symbol_name = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
         if (!symbol_name || !*symbol_name)
             continue;
@@ -910,6 +923,51 @@ static int ccb_emit_symbol_list(CcbModule *mod, const Symbol *syms, int count, S
             return 1;
         if (any)
             *any = 1;
+    }
+
+    return 0;
+}
+
+static int ccb_module_emit_imported_force_inline_literals(CcbModule *mod, const CodegenOptions *opts)
+{
+    if (!mod || !opts || !opts->imported_externs || opts->imported_extern_count <= 0)
+        return 0;
+
+    StringList emitted;
+    string_list_init(&emitted);
+    int any = 0;
+
+    for (int i = 0; i < opts->imported_extern_count; ++i)
+    {
+        const Symbol *sym = &opts->imported_externs[i];
+        if (!ccb_symbol_is_embedded_force_inline_literal(sym))
+            continue;
+
+        const Node *fn = sym->ast_node;
+        const char *name = ccb_effective_function_name(fn);
+        if (!name || !*name)
+            continue;
+        if (string_list_contains(&emitted, name))
+            continue;
+
+        if (ccb_function_emit_basic(mod, fn, opts))
+        {
+            string_list_free(&emitted);
+            return 1;
+        }
+        if (!string_list_append(&emitted, name))
+        {
+            string_list_free(&emitted);
+            return 1;
+        }
+        any = 1;
+    }
+
+    string_list_free(&emitted);
+    if (any)
+    {
+        if (!ccb_module_append_line(mod, ""))
+            return 1;
     }
 
     return 0;
@@ -13786,6 +13844,8 @@ int codegen_ccb_write_module(const Node *unit, const CodegenOptions *opts)
         rc = ccb_module_emit_externs(&mod, opts);
     if (!rc)
         rc = ccb_module_emit_imported_globals(&mod, opts);
+    if (!rc)
+        rc = ccb_module_emit_imported_force_inline_literals(&mod, opts);
 
     if (!rc)
     {

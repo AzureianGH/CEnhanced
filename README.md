@@ -53,6 +53,8 @@ From the `CEnhanced` directory:
 
 This builds `chancec` and related toolchain pieces used by this workspace.
 
+For BSlash targets, `chancec` uses CHS as the assembler stage. CHS now embeds the BSlash assembler core internally, so the normal CHance toolchain no longer requires a separate external `bas` executable for BSlash assembly.
+
 ## Basic Usage
 
 Compile a source file:
