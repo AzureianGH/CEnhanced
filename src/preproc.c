@@ -91,6 +91,46 @@ static const char *detect_host_architecture(void)
 #endif
 }
 
+static int arch_name_equals(const char *lhs, const char *rhs)
+{
+	if (!lhs || !rhs)
+		return 0;
+	while (*lhs && *rhs)
+	{
+		if (tolower((unsigned char)*lhs) != tolower((unsigned char)*rhs))
+			return 0;
+		lhs++;
+		rhs++;
+	}
+	return *lhs == '\0' && *rhs == '\0';
+}
+
+static int pointer_width_for_target_arch(const char *target_arch_name)
+{
+	if (!target_arch_name || !*target_arch_name)
+		return (int)(sizeof(void *) * 8);
+
+	if (arch_name_equals(target_arch_name, "bslash") ||
+		arch_name_equals(target_arch_name, "x86") ||
+		arch_name_equals(target_arch_name, "x86-32") ||
+		arch_name_equals(target_arch_name, "arm") ||
+		arch_name_equals(target_arch_name, "arm32") ||
+		arch_name_equals(target_arch_name, "ppc"))
+	{
+		return 32;
+	}
+
+	if (arch_name_equals(target_arch_name, "x86-64") ||
+		arch_name_equals(target_arch_name, "arm64") ||
+		arch_name_equals(target_arch_name, "aarch64") ||
+		arch_name_equals(target_arch_name, "ppc64"))
+	{
+		return 64;
+	}
+
+	return (int)(sizeof(void *) * 8);
+}
+
 static void sb_init(StrBuilder *sb)
 {
 	sb->data = NULL;
@@ -1945,7 +1985,10 @@ char *chance_preprocess_source(const char *path, const char *src, int len,
 	st.path = path;
 	st.expansion_stack.count = 0;
 	st.counter = 0;
-	st.pointer_width = (int)(sizeof(void *) * 8);
+	const char *arch_name =
+		(target_arch_name && *target_arch_name) ? target_arch_name
+											: detect_host_architecture();
+	st.pointer_width = pointer_width_for_target_arch(arch_name);
 	st.module_name = detect_module_name(src, len);
 	st.date_literal[0] = '\0';
 	st.time_literal[0] = '\0';
@@ -1996,9 +2039,6 @@ char *chance_preprocess_source(const char *path, const char *src, int len,
 	snprintf(pointer_buf, sizeof(pointer_buf), "%d", st.pointer_width);
 	define_builtin_macro(&st, "__POINTER_WIDTH__", pointer_buf);
 	define_builtin_macro(&st, "__IS64BIT__", st.pointer_width >= 64 ? "1" : "0");
-	const char *arch_name =
-		(target_arch_name && *target_arch_name) ? target_arch_name
-												: detect_host_architecture();
 	char *arch_literal = make_string_literal(arch_name);
 	define_builtin_macro(&st, "__TARGET_ARCH__", arch_literal);
 	define_builtin_macro(&st, "__ARCH__", arch_literal);

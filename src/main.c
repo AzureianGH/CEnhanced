@@ -2159,7 +2159,8 @@ static int project_args_apply(const char *proj_path, int lineno,
 
 static int parse_ceproj_file(
     const char *proj_path, ProjectInputList ce_list, ProjectInputList ccb_list,
-    ProjectInputList cclib_list, ProjectInputList obj_list,
+  ProjectInputList cclib_list, ProjectInputList obj_list,
+  ProjectInputList asm_list,
     char ***include_dirs, int *include_dir_count, int *output_overridden,
     const char **out, char **project_output_alloc, TargetArch *target_arch,
     const char **chancecode_backend, int *stop_after_ccb, int *stop_after_asm,
@@ -2254,6 +2255,14 @@ static int parse_ceproj_file(
     else if (strcmp(key, "obj") == 0 || strcmp(key, "object") == 0)
     {
       if (add_file_list_entries(value_buf, project_dir, obj_list) != 0)
+      {
+        rc = -1;
+        break;
+      }
+    }
+    else if (strcmp(key, "asm") == 0 || strcmp(key, "assembly") == 0)
+    {
+      if (add_file_list_entries(value_buf, project_dir, asm_list) != 0)
       {
         rc = -1;
         break;
@@ -5604,6 +5613,8 @@ int main(int argc, char **argv)
   int cclib_count = 0, cclib_cap = 0;
   const char **obj_inputs = NULL;
   int obj_count = 0, obj_cap = 0;
+  const char **asm_inputs = NULL;
+  int asm_count = 0, asm_cap = 0;
   const char **symbol_ref_ce_inputs = NULL;
   int symbol_ref_ce_count = 0, symbol_ref_ce_cap = 0;
   const char **symbol_ref_cclib_inputs = NULL;
@@ -5616,6 +5627,8 @@ int main(int argc, char **argv)
   int owned_cclib_count = 0, owned_cclib_cap = 0;
   char **owned_obj_inputs = NULL;
   int owned_obj_count = 0, owned_obj_cap = 0;
+  char **owned_asm_inputs = NULL;
+  int owned_asm_count = 0, owned_asm_cap = 0;
   // include paths
   char **include_dirs = NULL;
   int include_dir_count = 0;
@@ -6059,9 +6072,14 @@ int main(int argc, char **argv)
                                    &obj_cap, &owned_obj_inputs,
                                    &owned_obj_count, &owned_obj_cap,
                                    NULL};
+        ProjectInputList asm_list = {&asm_inputs, &asm_count,
+                       &asm_cap, &owned_asm_inputs,
+                       &owned_asm_count, &owned_asm_cap,
+                       NULL};
       int freestanding_before = freestanding;
       int perr = parse_ceproj_file(
-          arg, ce_list, ccb_list, cclib_list, obj_list, &include_dirs,
+          arg, ce_list, ccb_list, cclib_list, obj_list, asm_list,
+          &include_dirs,
           &include_dir_count, &output_overridden, &out, &project_output_alloc,
           &target_arch, &chancecode_backend, &stop_after_ccb, &stop_after_asm,
           &emit_library, &no_link, &freestanding, &target_os,
@@ -6164,14 +6182,14 @@ int main(int argc, char **argv)
                       "object emission when stopping at bytecode)\n");
       return 2;
     }
-    if (obj_count > 0 || ccb_count > 0)
+    if (obj_count > 0 || ccb_count > 0 || asm_count > 0)
     {
       fprintf(stderr, "error: providing .ccb/.o/.obj inputs requires selecting "
                       "a backend (e.g., -x86 or -arm64)\n");
       return 2;
     }
   }
-  if (ce_count == 0 && obj_count == 0 && ccb_count == 0)
+  if (ce_count == 0 && obj_count == 0 && ccb_count == 0 && asm_count == 0)
   {
     usage(argv[0]);
     return 2;
@@ -6199,7 +6217,7 @@ int main(int argc, char **argv)
                       "selection (e.g., -x86 or -arm64)\n");
       return 2;
     }
-    if (ccb_count > 0 || obj_count > 0 || cclib_count > 0)
+    if (ccb_count > 0 || obj_count > 0 || asm_count > 0 || cclib_count > 0)
     {
       fprintf(stderr, "error: --library currently only accepts .ce inputs\n");
       return 2;
@@ -6486,6 +6504,16 @@ int main(int argc, char **argv)
         verbose_table_row(label, obj_inputs[idx]);
       }
     }
+    if (asm_count > 0 && asm_inputs)
+    {
+      verbose_section("Assembly Inputs");
+      for (int idx = 0; idx < asm_count; ++idx)
+      {
+        char label[32];
+        snprintf(label, sizeof(label), "asm[%d]", idx);
+        verbose_table_row(label, asm_inputs[idx]);
+      }
+    }
   }
   // Allow multiple inputs: if linking to an executable (no -c) with multiple
   // .ce and/or .o, we will compile .ce to temporary objects and link them
@@ -6497,7 +6525,7 @@ int main(int argc, char **argv)
     {
       // Per-input object emission: compile source inputs to individual object
       // files and leave any externally provided .o inputs untouched.
-      if (ce_count == 0 && ccb_count == 0)
+      if (ce_count == 0 && ccb_count == 0 && asm_count == 0)
       {
         fprintf(stderr, "error: nothing to compile.\n");
         goto fail;
@@ -6595,9 +6623,10 @@ int main(int argc, char **argv)
                                  sizeof(SymbolRefUnit));
   int skip_backend_outputs = stop_after_ccb || stop_after_asm || emit_library;
   int total_codegen_units = ce_count + ccb_count + library_codegen_units;
+  int link_input_units = obj_count + asm_count + total_codegen_units;
   // Determine if we need a final link step combining multiple inputs
   int multi_link = (!no_link && !skip_backend_outputs &&
-                    (obj_count > 0 || total_codegen_units > 1));
+                    (link_input_units > 1));
 
   // Container for temporary objects when merging or linking
   if (symbol_ref_ce_count > 0 && symbol_ref_units)
@@ -7451,6 +7480,98 @@ int main(int argc, char **argv)
       }
     }
   }
+  if (!rc && !emit_library && asm_count > 0 &&
+      (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+       target_arch == ARCH_BSLASH) &&
+      !stop_after_ccb && !stop_after_asm)
+  {
+    if (compiler_verbose_enabled())
+      verbose_section("Processing assembly inputs");
+    for (int ai = 0; !rc && ai < asm_count; ++ai)
+    {
+      const char *asm_input = asm_inputs[ai];
+      if (compiler_verbose_enabled())
+        verbose_progress("asm-proc", ai + 1, asm_count);
+
+      char dir[512], base[512];
+      split_path(asm_input, dir, sizeof(dir), base, sizeof(base));
+
+      char objOut[1024] = {0};
+      int obj_is_temp = 0;
+      if (no_link && obj_override)
+      {
+        build_path_with_ext(dir, base,
+#ifdef _WIN32
+                            ".co.tmp.obj"
+#else
+                            ".co.tmp.o"
+#endif
+                            ,
+                            objOut, sizeof(objOut));
+      }
+      else if (no_link)
+      {
+        build_path_with_ext(dir, base,
+#ifdef _WIN32
+                            ".obj"
+#else
+                            ".o"
+#endif
+                            ,
+                            objOut, sizeof(objOut));
+      }
+      else if (multi_link)
+      {
+        build_path_with_ext(dir, base,
+#ifdef _WIN32
+                            ".co.tmp.obj"
+#else
+                            ".co.tmp.o"
+#endif
+                            ,
+                            objOut, sizeof(objOut));
+        obj_is_temp = 1;
+      }
+      else
+      {
+        build_path_with_ext(dir, base,
+#ifdef _WIN32
+                            ".tmp.obj"
+#else
+                            ".tmp.o"
+#endif
+                            ,
+                            objOut, sizeof(objOut));
+        obj_is_temp = 1;
+      }
+
+      rc = assemble_to_object(host_cc_cmd_to_use, chs_cmd_to_use,
+                              chs_has_override, chs_uses_fallback,
+                              target_arch, target_os, asm_input, objOut,
+                              toolchain_debug_mode,
+                              toolchain_debug_deep,
+                              debug_symbols, freestanding, opt_level);
+      if (rc != 0)
+        break;
+
+      if (!no_link && !multi_link)
+      {
+        snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
+        have_single_obj = 1;
+        single_obj_is_temp = obj_is_temp;
+      }
+
+      if ((no_link && obj_override) || multi_link)
+      {
+        if (to_cnt == to_cap)
+        {
+          to_cap = to_cap ? to_cap * 2 : 8;
+          temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
+        }
+        temp_objs[to_cnt++] = xstrdup(objOut);
+      }
+    }
+  }
   if (!rc && !emit_library && !no_link &&
       (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
        target_arch == ARCH_BSLASH) &&
@@ -8010,6 +8131,12 @@ cleanup:
       free(owned_obj_inputs[i]);
     free(owned_obj_inputs);
   }
+  if (owned_asm_inputs)
+  {
+    for (int i = 0; i < owned_asm_count; ++i)
+      free(owned_asm_inputs[i]);
+    free(owned_asm_inputs);
+  }
   if (project_output_alloc)
     free(project_output_alloc);
   if (project_after_cmd)
@@ -8027,6 +8154,7 @@ cleanup:
   free((void *)ccb_inputs);
   free((void *)cclib_inputs);
   free((void *)obj_inputs);
+  free((void *)asm_inputs);
   free((void *)symbol_ref_ce_inputs);
   free((void *)symbol_ref_cclib_inputs);
   if (strip_map_ready && strip_map_path[0])

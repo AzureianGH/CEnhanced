@@ -6230,11 +6230,28 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
     // 3) extend fun name(params) -> ret;   // default ABI "C"
     Token extend_tok = expect(ps, TK_KW_EXTEND, "extend");
     int is_noreturn = leading_noreturn;
+    int is_jump_target = 0;
+    int is_preserve = 0;
+    int is_entrypoint = 0;
     Token next = lexer_peek(ps->lx);
     if (!is_noreturn && next.kind == TK_KW_NORETURN)
     {
         lexer_next(ps->lx);
         is_noreturn = 1;
+        next = lexer_peek(ps->lx);
+    }
+    while (next.kind == TK_KW_JUMPTARGET || next.kind == TK_KW_PRESERVE || next.kind == TK_KW_ENTRYPOINT)
+    {
+        if (next.kind == TK_KW_JUMPTARGET)
+            is_jump_target = 1;
+        else if (next.kind == TK_KW_PRESERVE)
+            is_preserve = 1;
+        else if (next.kind == TK_KW_ENTRYPOINT)
+        {
+            is_entrypoint = 1;
+            is_preserve = 1;
+        }
+        lexer_next(ps->lx);
         next = lexer_peek(ps->lx);
     }
     if (next.kind == TK_KW_FUN)
@@ -6346,6 +6363,24 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
         s.sig.param_const_flags = param_const_flags;
         s.sig.is_varargs = is_varargs;
         s.is_noreturn = is_noreturn;
+
+        Node *proto = new_node(ND_FUNC);
+        proto->name = s.name;
+        proto->ret_type = s.sig.ret;
+        proto->param_types = param_types;
+        proto->param_count = param_count;
+        proto->is_varargs = is_varargs;
+        proto->is_noreturn = is_noreturn;
+        proto->is_jump_target = is_jump_target;
+        proto->is_preserve = is_preserve;
+        proto->is_entrypoint = is_entrypoint;
+        proto->line = name.line;
+        proto->col = name.col;
+        proto->src = lexer_source(ps->lx);
+        proto->metadata.declared_param_count = -1;
+        proto->metadata.declared_local_count = -1;
+        s.ast_node = proto;
+
         if (ps->ext_count == ps->ext_cap)
         {
             ps->ext_cap = ps->ext_cap ? ps->ext_cap * 2 : 8;
@@ -6353,6 +6388,12 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
         }
         ps->externs[ps->ext_count++] = s;
         return extend_tok.line;
+    }
+    if (is_jump_target || is_preserve || is_entrypoint)
+    {
+        diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                      "function-only modifiers on 'extend' must be followed by 'fun'");
+        exit(1);
     }
     expect(ps, TK_KW_FROM, "from");
     Token abi = lexer_next(ps->lx);

@@ -10,19 +10,21 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Avoid Ninja: do not set a generator here; users can configure with VS or NMake.
 
-add_library(chance_core
-    src/lexer.c
-    src/parser.c
-    src/sema.c
-    src/mangle.c
-    src/includes.c
-    src/preproc.c
-    src/codegen_ccb.c
-    src/ccsim.c
-    src/module_registry.c
-    src/cclib.c
-    src/util.c
+set(CHANCE_CORE_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/lexer.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/parser.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/sema.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/mangle.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/includes.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/preproc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/codegen_ccb.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ccsim.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/module_registry.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/cclib.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/util.c
 )
+
+add_library(chance_core ${CHANCE_CORE_SOURCES})
 
 target_include_directories(chance_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -30,7 +32,7 @@ target_include_directories(chance_core PUBLIC
 )
 
 add_executable(chancec
-    src/main.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/main.c
 )
 
 target_link_libraries(chancec PRIVATE chance_core)
