@@ -29,6 +29,18 @@ note() {
   printf "%s%s%s\n" "$C_DIM" "$1" "$C_RESET"
 }
 
+find_make() {
+  if command -v make >/dev/null 2>&1; then
+    printf "%s" "make"
+    return
+  fi
+  if command -v mingw32-make >/dev/null 2>&1; then
+    printf "%s" "mingw32-make"
+    return
+  fi
+  printf "%s" ""
+}
+
 ok() {
   printf "%s%s%s\n" "$C_GREEN" "$1" "$C_RESET"
 }
@@ -91,8 +103,13 @@ if [ -n "$CHANCECODE_DIR" ] && [ -f "$CHANCECODE_DIR/build.sh" ]; then
 fi
 
 if [ -n "$CHS_DIR" ] && [ -f "$CHS_DIR/Makefile" ]; then
+  MAKE_BIN=$(find_make)
+  if [ -z "$MAKE_BIN" ]; then
+    err "error: no make tool found (need make or mingw32-make)"
+    exit 1
+  fi
   log "Building CHS"
-  (cd "$CHS_DIR" && make)
+  (cd "$CHS_DIR" && "$MAKE_BIN")
   ok "CHS build complete"
 fi
 
@@ -168,13 +185,23 @@ elif [ -x "$CHANCECODE_DIR/build/chancecodec" ]; then
 fi
 
 if [ -n "$CLD_DIR" ] && [ -f "$CLD_DIR/Makefile" ]; then
+  MAKE_BIN=$(find_make)
+  if [ -z "$MAKE_BIN" ]; then
+    err "error: no make tool found (need make or mingw32-make)"
+    exit 1
+  fi
   log "Installing CLD"
-  (cd "$CLD_DIR" && make install PREFIX="$PREFIX")
+  (cd "$CLD_DIR" && "$MAKE_BIN" install PREFIX="$PREFIX")
 fi
 
 if [ -n "$CHS_DIR" ] && [ -f "$CHS_DIR/Makefile" ]; then
+  MAKE_BIN=$(find_make)
+  if [ -z "$MAKE_BIN" ]; then
+    err "error: no make tool found (need make or mingw32-make)"
+    exit 1
+  fi
   log "Installing CHS"
-  (cd "$CHS_DIR" && make install PREFIX="$PREFIX")
+  (cd "$CHS_DIR" && "$MAKE_BIN" install PREFIX="$PREFIX")
 fi
 
 ok "Done"
