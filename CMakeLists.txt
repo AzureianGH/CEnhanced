@@ -21,6 +21,8 @@ set(CHANCE_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ccsim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/module_registry.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cclib.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_cli.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_paths.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/util.c
 )
 
