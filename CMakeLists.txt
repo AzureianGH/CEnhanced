@@ -22,7 +22,15 @@ set(CHANCE_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/module_registry.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/cclib.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_cli.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_overrides.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_paths.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_project.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_options.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_link.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_runtime.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_verbose.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_toolchain.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/driver_validate.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/util.c
 )
 

@@ -2,7 +2,16 @@
 #include "cclib.h"
 #include "chance_version.h"
 #include "driver_cli.h"
+#include "driver_link.h"
+#include "driver_options.h"
+#include "driver_overrides.h"
 #include "driver_paths.h"
+#include "driver_project.h"
+#include "driver_runtime.h"
+#include "driver_toolchain.h"
+#include "driver_types.h"
+#include "driver_validate.h"
+#include "driver_verbose.h"
 #include "includes.h"
 #include "mangle.h"
 #include "module_registry.h"
@@ -50,132 +59,27 @@ extern char **environ;
 #define STRIP_MAP_PATH_MAX 4096
 #endif
 
-typedef enum
-{
-  ARCH_NONE = 0,
-  ARCH_X86,
-  ARCH_ARM64,
-  ARCH_BSLASH
-} TargetArch;
-
 typedef struct LoadedLibrary LoadedLibrary;
 typedef struct LoadedLibraryFunction LoadedLibraryFunction;
-
-static const char *default_chancecodec_name =
-#ifdef _WIN32
-    "chancecodec.exe"
-#else
-    "chancecodec"
-#endif
-    ;
-
-static const char *default_cld_name =
-#ifdef _WIN32
-  "cld.exe"
-#else
-  "cld"
-#endif
-  ;
-
-static const char *default_chs_name =
-#ifdef _WIN32
-  "chs.exe"
-#else
-  "chs"
-#endif
-  ;
 
 static int verbose_use_ansi = 1;
 static const char *target_os_to_option(TargetOS os);
 static char *make_backend_name_from_module(const char *module_full,
                                            const char *fn_name);
 
-static const char *ansi_reset(void)
-{
-  return verbose_use_ansi ? "\x1b[0m" : "";
-}
-
-static const char *ansi_bold(void)
-{
-  return verbose_use_ansi ? "\x1b[1m" : "";
-}
-
-static const char *ansi_cyan(void)
-{
-  return verbose_use_ansi ? "\x1b[36m" : "";
-}
-
-static const char *ansi_green(void)
-{
-  return verbose_use_ansi ? "\x1b[32m" : "";
-}
-
-static const char *ansi_magenta(void)
-{
-  return verbose_use_ansi ? "\x1b[35m" : "";
-}
-
-static const char *bool_str(int value)
-{
-  return value ? "yes" : "no";
-}
-
 static void verbose_section(const char *title)
 {
-  if (!compiler_verbose_enabled() || !title)
-    return;
-  fprintf(stderr, "\n%s%s%s\n", ansi_bold(), title, ansi_reset());
-  size_t len = strlen(title);
-  for (size_t i = 0; i < len; ++i)
-    fputc('-', stderr);
-  fputc('\n', stderr);
+  driver_verbose_section(title);
 }
 
 static void verbose_table_row(const char *label, const char *value)
 {
-  if (!compiler_verbose_enabled() || !label)
-    return;
-  fprintf(stderr, "  %s%-18s%s | %s\n", ansi_cyan(), label, ansi_reset(),
-          value ? value : "-");
+  driver_verbose_table_row(label, value);
 }
 
 static void verbose_progress(const char *tag, int current, int total)
 {
-  if (!compiler_verbose_enabled() || !tag || total <= 0)
-    return;
-  if (current < 0)
-    current = 0;
-  if (current > total)
-    current = total;
-  const int bar_width = 28;
-  int filled = (int)((long long)current * bar_width / (total ? total : 1));
-  if (filled < 0)
-    filled = 0;
-  if (filled > bar_width)
-    filled = bar_width;
-  char bar[bar_width + 1];
-  for (int i = 0; i < bar_width; ++i)
-    bar[i] = (i < filled) ? '=' : ' ';
-  bar[bar_width] = '\0';
-  int pct = total ? (int)((long long)current * 100 / total) : 100;
-  fprintf(stderr, "%s%-12s%s [%s%s%s] %3d%% (%d/%d)\n", ansi_magenta(), tag,
-          ansi_reset(), ansi_green(), bar, ansi_reset(), pct, current, total);
-  fflush(stderr);
-}
-
-static const char *asm_syntax_to_option(AsmSyntax syntax)
-{
-  switch (syntax)
-  {
-  case ASM_INTEL:
-    return "intel";
-  case ASM_ATT:
-    return "att";
-  case ASM_NASM:
-    return "nasm";
-  default:
-    return "unknown";
-  }
+  driver_verbose_progress(tag, current, total);
 }
 
 static const char *target_arch_to_macro(TargetArch arch)
@@ -194,28 +98,6 @@ static const char *target_arch_to_macro(TargetArch arch)
   }
 }
 
-static void maybe_generate_dsym(const char *binary_path, int debug_symbols,
-                                TargetOS target_os)
-{
-#if defined(__APPLE__)
-  if (!binary_path || !debug_symbols || target_os != OS_MACOS)
-    return;
-  char ds_cmd[4096];
-  snprintf(ds_cmd, sizeof(ds_cmd), "dsymutil \"%s\"", binary_path);
-  int ds_rc = system(ds_cmd);
-  if (ds_rc != 0)
-  {
-    fprintf(stderr,
-            "warning: dsymutil failed (rc=%d) while processing '%s'\n",
-            ds_rc, binary_path);
-  }
-#else
-  (void)binary_path;
-  (void)debug_symbols;
-  (void)target_os;
-#endif
-}
-
 static void verbose_print_config(
     const char *output_path, int opt_level, TargetArch target_arch,
     TargetOS target_os, int stop_after_ccb, int stop_after_asm, int no_link,
@@ -227,64 +109,35 @@ static void verbose_print_config(
     int needs_chancecodec, const char *chancecode_backend,
     int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
 {
-  if (!compiler_verbose_enabled())
-    return;
-  verbose_section("Configuration");
-  verbose_table_row("Output", output_path ? output_path : "(default)");
-  char opt_buf[16];
-  snprintf(opt_buf, sizeof(opt_buf), "-O%d", opt_level);
-  verbose_table_row("Optimization", opt_buf);
-  const char *arch = "none";
-  if (target_arch == ARCH_X86)
-    arch = "x86-64";
-  else if (target_arch == ARCH_ARM64)
-    arch = "arm64";
-  else if (target_arch == ARCH_BSLASH)
-    arch = "bslash";
-  verbose_table_row("Backend", arch);
-  verbose_table_row("Target OS", target_os_to_option(target_os));
-  verbose_table_row("Stop after .ccb", bool_str(stop_after_ccb));
-  verbose_table_row("Stop after asm", bool_str(stop_after_asm));
-  verbose_table_row("No link", bool_str(no_link));
-  verbose_table_row("Emit library", bool_str(emit_library));
-  verbose_table_row("Freestanding", bool_str(freestanding));
-  verbose_table_row("Asm syntax", asm_syntax_to_option(asm_syntax));
-  verbose_table_row("Verbose mode", bool_str(verbose_active));
-  verbose_table_row("Verbose deep", bool_str(verbose_deep));
-  char count_buf[32];
-  snprintf(count_buf, sizeof(count_buf), "%d", include_dir_count);
-  verbose_table_row("Include dirs", count_buf);
-  snprintf(count_buf, sizeof(count_buf), "%d", ce_count);
-  verbose_table_row("CE inputs", count_buf);
-  snprintf(count_buf, sizeof(count_buf), "%d", ccb_count);
-  verbose_table_row("CCB inputs", count_buf);
-  snprintf(count_buf, sizeof(count_buf), "%d", cclib_count);
-  verbose_table_row("CCLib inputs", count_buf);
-  snprintf(count_buf, sizeof(count_buf), "%d", obj_count);
-  verbose_table_row("OBJ inputs", count_buf);
-  snprintf(count_buf, sizeof(count_buf), "%d", symbol_ref_ce_count);
-  verbose_table_row("Symbol-ref CE inputs", count_buf);
-  snprintf(count_buf, sizeof(count_buf), "%d", symbol_ref_cclib_count);
-  verbose_table_row("Symbol-ref CCLib inputs", count_buf);
-  verbose_table_row("ChanceCode backend",
-                    chancecode_backend ? chancecode_backend : "(auto)");
-  verbose_table_row("Host CC",
-                    (host_cc_cmd && *host_cc_cmd) ? host_cc_cmd : "cc");
-  verbose_table_row("Host CC override", bool_str(host_cc_has_override));
-  if (needs_chancecodec)
-  {
-    verbose_table_row("Chancecodec cmd",
-                      chancecodec_cmd && *chancecodec_cmd ? chancecodec_cmd
-                                                          : "(unresolved)");
-    verbose_table_row("Chancecodec override",
-                      bool_str(chancecodec_has_override));
-    verbose_table_row("Chancecodec fallback",
-                      bool_str(chancecodec_uses_fallback));
-  }
-  else
-  {
-    verbose_table_row("Chancecodec cmd", "(not required)");
-  }
+  DriverVerboseConfigState state = {
+      .output_path = output_path,
+      .opt_level = opt_level,
+      .target_arch = target_arch,
+      .target_os_name = target_os_to_option(target_os),
+      .stop_after_ccb = stop_after_ccb,
+      .stop_after_asm = stop_after_asm,
+      .no_link = no_link,
+      .emit_library = emit_library,
+      .freestanding = freestanding,
+      .asm_syntax = asm_syntax,
+      .include_dir_count = include_dir_count,
+      .ce_count = ce_count,
+      .ccb_count = ccb_count,
+      .cclib_count = cclib_count,
+      .obj_count = obj_count,
+      .symbol_ref_ce_count = symbol_ref_ce_count,
+      .symbol_ref_cclib_count = symbol_ref_cclib_count,
+      .host_cc_cmd = host_cc_cmd,
+      .host_cc_has_override = host_cc_has_override,
+      .chancecodec_cmd = chancecodec_cmd,
+      .chancecodec_has_override = chancecodec_has_override,
+      .needs_chancecodec = needs_chancecodec,
+      .chancecode_backend = chancecode_backend,
+      .chancecodec_uses_fallback = chancecodec_uses_fallback,
+      .verbose_active = verbose_active,
+      .verbose_deep = verbose_deep,
+  };
+  driver_verbose_print_config(&state);
 }
 
 typedef struct
@@ -304,12 +157,6 @@ typedef struct
   char *stripped;
   Node *unit;
 } SymbolRefUnit;
-
-typedef struct
-{
-  char *original;
-  char *replacement;
-} OverrideFile;
 
 // sema
 int sema_eval_const_i32(Node *expr);
@@ -357,7 +204,8 @@ static int unit_is_embedded_force_inline_literal_only(const Node *unit)
     if (decl->kind == ND_FUNC)
     {
       saw_function = 1;
-      if (!decl->is_exposed || !decl->is_literal || !decl->force_inline_literal || decl->is_preserve)
+      if (!decl->is_exposed || !decl->is_literal || !decl->force_inline_literal ||
+          decl->is_preserve)
         return 0;
       continue;
     }
@@ -366,21 +214,6 @@ static int unit_is_embedded_force_inline_literal_only(const Node *unit)
   }
 
   return saw_function;
-}
-
-static const char *cld_target_name_for_link(TargetArch arch, TargetOS os)
-{
-  switch (arch)
-  {
-  case ARCH_ARM64:
-    return os == OS_MACOS ? "macos-arm64" : NULL;
-  case ARCH_X86:
-    return os == OS_LINUX ? "x86_64-elf" : NULL;
-  case ARCH_BSLASH:
-    return "bslash";
-  default:
-    return NULL;
-  }
 }
 
 static const char *target_os_to_option(TargetOS os)
@@ -431,1403 +264,6 @@ static void append_arm64_arch_flag(char *cmd, size_t cmd_cap, TargetOS target_os
   else
     flag = " -arch arm64";
   strncat(cmd, flag, cmd_cap - strlen(cmd) - 1);
-}
-
-static int parse_override_spec(const char *spec, const char *base_dir,
-                               char *orig, size_t origsz,
-                               char *repl, size_t replsz)
-{
-  if (!spec || !orig || !repl)
-    return -1;
-  const char *eq = strchr(spec, '=');
-  if (!eq || eq == spec || !eq[1])
-    return -1;
-  char left[1024];
-  char right[1024];
-  size_t left_len = (size_t)(eq - spec);
-  if (left_len >= sizeof(left))
-    left_len = sizeof(left) - 1;
-  memcpy(left, spec, left_len);
-  left[left_len] = '\0';
-  snprintf(right, sizeof(right), "%s", eq + 1);
-  char resolved_left[1024];
-  char resolved_right[1024];
-  resolve_project_relative_path(resolved_left, sizeof(resolved_left), base_dir,
-                                left);
-  resolve_project_relative_path(resolved_right, sizeof(resolved_right), base_dir,
-                                right);
-  normalize_path_simple(orig, origsz, resolved_left);
-  normalize_path_simple(repl, replsz, resolved_right);
-  if (!orig[0] || !repl[0])
-    return -1;
-  return 0;
-}
-
-static int add_override_file(const char *spec, const char *base_dir,
-                             OverrideFile **list, int *count, int *cap)
-{
-  if (!spec || !list || !count || !cap)
-    return -1;
-  char orig[1024];
-  char repl[1024];
-  if (parse_override_spec(spec, base_dir, orig, sizeof(orig), repl, sizeof(repl)) != 0)
-    return -1;
-  if (*count == *cap)
-  {
-    int new_cap = *cap ? (*cap * 2) : 4;
-    OverrideFile *grown = (OverrideFile *)realloc(
-        *list, sizeof(OverrideFile) * (size_t)new_cap);
-    if (!grown)
-      return -1;
-    for (int i = *cap; i < new_cap; ++i)
-    {
-      grown[i].original = NULL;
-      grown[i].replacement = NULL;
-    }
-    *list = grown;
-    *cap = new_cap;
-  }
-  OverrideFile *slot = &(*list)[*count];
-  slot->original = xstrdup(orig);
-  slot->replacement = xstrdup(repl);
-  if (!slot->original || !slot->replacement)
-    return -1;
-  (*count)++;
-  return 0;
-}
-
-static const char *find_override_path(const char *input,
-                                      const OverrideFile *list, int count)
-{
-  if (!input || !list || count <= 0)
-    return NULL;
-  char normalized[1024];
-  normalize_path_simple(normalized, sizeof(normalized), input);
-  for (int i = 0; i < count; ++i)
-  {
-    const OverrideFile *entry = &list[i];
-    if (!entry->original || !entry->replacement)
-      continue;
-    if ((normalized[0] && strcmp(normalized, entry->original) == 0) ||
-        strcmp(input, entry->original) == 0)
-      return entry->replacement;
-  }
-  return NULL;
-}
-
-typedef struct
-{
-  const char ***items;
-  int *count;
-  int *cap;
-  char ***owned_items;
-  int *owned_count;
-  int *owned_cap;
-  char ***parallel_strings;
-} ProjectInputList;
-
-static int push_input_entry(const char *value, ProjectInputList list,
-                            int make_copy)
-{
-  if (!value || !list.items || !list.count || !list.cap || !list.owned_items ||
-      !list.owned_count || !list.owned_cap)
-    return -1;
-  const char **arr = *list.items;
-  if (*list.count == *list.cap)
-  {
-    int new_cap = *list.cap ? (*list.cap * 2) : 8;
-    const char **new_arr =
-        (const char **)realloc((void *)arr, sizeof(char *) * (size_t)new_cap);
-    if (!new_arr)
-    {
-      fprintf(stderr,
-              "error: out of memory while growing project input list\n");
-      return -1;
-    }
-    if (list.parallel_strings)
-    {
-      char **parallel = *list.parallel_strings;
-      char **new_parallel =
-          (char **)realloc(parallel, sizeof(char *) * (size_t)new_cap);
-      if (!new_parallel)
-      {
-        fprintf(stderr,
-                "error: out of memory while growing parallel input metadata\n");
-        return -1;
-      }
-      for (int idx = *list.cap; idx < new_cap; ++idx)
-        new_parallel[idx] = NULL;
-      *list.parallel_strings = new_parallel;
-    }
-    *list.items = new_arr;
-    arr = new_arr;
-    *list.cap = new_cap;
-  }
-  const char *stored = value;
-  if (make_copy)
-  {
-    char *dup = xstrdup(value);
-    char **owned = *list.owned_items;
-    if (*list.owned_count == *list.owned_cap)
-    {
-      int new_cap = *list.owned_cap ? (*list.owned_cap * 2) : 8;
-      char **new_owned =
-          (char **)realloc(owned, sizeof(char *) * (size_t)new_cap);
-      if (!new_owned)
-      {
-        fprintf(stderr,
-                "error: out of memory while growing project-owned strings\n");
-        free(dup);
-        return -1;
-      }
-      *list.owned_items = new_owned;
-      owned = new_owned;
-      *list.owned_cap = new_cap;
-    }
-    owned[*list.owned_count] = dup;
-    (*list.owned_count)++;
-    stored = dup;
-  }
-  arr[*list.count] = stored;
-  if (list.parallel_strings && *list.parallel_strings)
-    (*list.parallel_strings)[*list.count] = NULL;
-  (*list.count)++;
-  return 0;
-}
-
-static int add_file_list_entries(const char *value, const char *project_dir,
-                                 ProjectInputList list)
-{
-  if (!value)
-    return 0;
-  const char *cursor = value;
-  while (*cursor)
-  {
-    while (*cursor == ';' || *cursor == ',' || isspace((unsigned char)*cursor))
-      ++cursor;
-    if (!*cursor)
-      break;
-    const char *start = cursor;
-    while (*cursor && *cursor != ';' && *cursor != ',')
-      ++cursor;
-    const char *end = cursor;
-    while (end > start && isspace((unsigned char)*(end - 1)))
-      --end;
-    while (start < end && isspace((unsigned char)*start))
-      ++start;
-    if (end > start)
-    {
-      size_t len = (size_t)(end - start);
-      char token[1024];
-      if (len >= sizeof(token))
-        len = sizeof(token) - 1;
-      memcpy(token, start, len);
-      token[len] = '\0';
-      char resolved[1024];
-      resolve_project_relative_path(resolved, sizeof(resolved), project_dir,
-                                    token);
-      if (push_input_entry(resolved, list, 1) != 0)
-        return -1;
-    }
-    if (*cursor == ';' || *cursor == ',')
-      ++cursor;
-  }
-  return 0;
-}
-
-static int add_include_dir_list(const char *value, const char *project_dir,
-                                char ***include_dirs, int *include_dir_count)
-{
-  if (!value || !include_dirs || !include_dir_count)
-    return 0;
-  const char *cursor = value;
-  while (*cursor)
-  {
-    while (*cursor == ';' || *cursor == ',' || isspace((unsigned char)*cursor))
-      ++cursor;
-    if (!*cursor)
-      break;
-    const char *start = cursor;
-    while (*cursor && *cursor != ';' && *cursor != ',')
-      ++cursor;
-    const char *end = cursor;
-    while (end > start && isspace((unsigned char)*(end - 1)))
-      --end;
-    while (start < end && isspace((unsigned char)*start))
-      ++start;
-    if (end > start)
-    {
-      size_t len = (size_t)(end - start);
-      char token[1024];
-      if (len >= sizeof(token))
-        len = sizeof(token) - 1;
-      memcpy(token, start, len);
-      token[len] = '\0';
-      char resolved[1024];
-      resolve_project_relative_path(resolved, sizeof(resolved), project_dir,
-                                    token);
-      chance_add_include_dir(include_dirs, include_dir_count, resolved);
-    }
-    if (*cursor == ';' || *cursor == ',')
-      ++cursor;
-  }
-  return 0;
-}
-
-static void strip_utf8_bom(char *text)
-{
-  if (!text)
-    return;
-  unsigned char *u = (unsigned char *)text;
-  if (u[0] == 0xEF && u[1] == 0xBB && u[2] == 0xBF)
-    memmove(text, text + 3, strlen(text + 3) + 1);
-}
-
-static int locate_cclib_path(const char *exe_dir, const char *subdir,
-                             const char *filename, const char *default_path,
-                             char *out, size_t outsz)
-{
-  if (!out || outsz == 0 || !subdir || !filename)
-    return 0;
-  out[0] = '\0';
-
-  if (exe_dir && exe_dir[0])
-  {
-    snprintf(out, outsz, "%s%c%s%c%s", exe_dir, CHANCE_PATH_SEP, subdir,
-             CHANCE_PATH_SEP, filename);
-    if (is_regular_file(out))
-      return 1;
-    char parent[1024];
-    if (parent_directory(exe_dir, parent, sizeof(parent)) == 0 && parent[0])
-    {
-      snprintf(out, outsz, "%s%c%s%c%s", parent, CHANCE_PATH_SEP, subdir,
-               CHANCE_PATH_SEP, filename);
-      if (is_regular_file(out))
-        return 1;
-    }
-  }
-
-  if (default_path && default_path[0])
-  {
-    snprintf(out, outsz, "%s", default_path);
-    if (is_regular_file(out))
-      return 1;
-  }
-
-  const char *home_env = getenv("CHANCE_HOME");
-  if (!home_env || !home_env[0])
-    home_env = getenv("CHANCEC_HOME");
-  if (!home_env || !home_env[0])
-    home_env = getenv("CHANCE_ROOT");
-  if (home_env && home_env[0])
-  {
-    snprintf(out, outsz, "%s%c%s%c%s", home_env, CHANCE_PATH_SEP, subdir,
-             CHANCE_PATH_SEP, filename);
-    if (is_regular_file(out))
-      return 1;
-  }
-
-  const char *path_env = getenv("PATH");
-  if (path_env)
-  {
-    const char *p = path_env;
-    while (*p)
-    {
-      const char *s = p;
-      while (*p && *p != ':')
-        p++;
-      size_t seg_len = (size_t)(p - s);
-      if (seg_len > 0)
-      {
-        char candidate[1024];
-        if (snprintf(candidate, sizeof(candidate), "%.*s/%s/%s",
-                     (int)seg_len, s, subdir, filename) > 0)
-        {
-          if (is_regular_file(candidate))
-          {
-            snprintf(out, outsz, "%s", candidate);
-            return 1;
-          }
-        }
-      }
-      if (*p)
-        p++;
-    }
-  }
-
-  return 0;
-}
-
-static int parse_project_block_value(FILE *f, int *lineno,
-                                     const char *initial_value,
-                                     char *out, size_t outsz)
-{
-  if (!out || outsz == 0)
-    return -1;
-  out[0] = '\0';
-  if (!initial_value)
-    return 0;
-
-  const char *start = initial_value;
-  while (*start && isspace((unsigned char)*start))
-    ++start;
-  if (*start != '{')
-  {
-    snprintf(out, outsz, "%s", initial_value);
-    return 0;
-  }
-
-  start++;
-  while (*start && isspace((unsigned char)*start))
-    ++start;
-  size_t len = 0;
-  const char *end = strchr(start, '}');
-  if (end)
-  {
-    const char *after_end = end + 1;
-    while (*after_end && isspace((unsigned char)*after_end))
-      ++after_end;
-    if (*after_end == '\0')
-    {
-      size_t chunk = (size_t)(end - start);
-      if (chunk >= outsz)
-        chunk = outsz - 1;
-      memcpy(out, start, chunk);
-      out[chunk] = '\0';
-      return 0;
-    }
-  }
-
-  if (*start)
-  {
-    len = strnlen(start, outsz - 1);
-    memcpy(out, start, len);
-    out[len] = '\0';
-  }
-
-  char line[2048];
-  while (fgets(line, sizeof(line), f))
-  {
-    if (lineno)
-      (*lineno)++;
-    char work[2048];
-    snprintf(work, sizeof(work), "%s", line);
-    char trimmed[2048];
-    snprintf(trimmed, sizeof(trimmed), "%s", work);
-    trim_whitespace_inplace(trimmed);
-    if (strcmp(trimmed, "}") == 0)
-      return 0;
-
-    size_t seg_len = strlen(work);
-    while (seg_len > 0 && (work[seg_len - 1] == '\n' || work[seg_len - 1] == '\r'))
-      --seg_len;
-    if (seg_len > 0)
-    {
-      if (len + 1 < outsz)
-      {
-        if (len > 0)
-          out[len++] = '\n';
-        size_t copy = seg_len;
-        if (copy > outsz - 1 - len)
-          copy = outsz - 1 - len;
-        memcpy(out + len, work, copy);
-        len += copy;
-        out[len] = '\0';
-      }
-    }
-  }
-  return -1;
-}
-
-typedef struct
-{
-  const char **out;
-  char **project_output_alloc;
-  int *output_overridden;
-  int *stop_after_ccb;
-  int *stop_after_asm;
-  int *no_link;
-  int *emit_library;
-  int *freestanding;
-  int *freestanding_requested;
-  int *m32;
-  int *opt_level;
-  int *debug_symbols;
-  int *strip_metadata;
-  int *strip_hard;
-  int *obfuscate;
-  AsmSyntax *asm_syntax;
-  TargetArch *target_arch;
-  const char **chancecode_backend;
-  const char **chancecodec_cmd_override;
-  const char **chs_cmd_override;
-  const char **host_cc_cmd_override;
-  TargetOS *target_os;
-  char ***include_dirs;
-  int *include_dir_count;
-  const char **obj_override;
-  int *implicit_voidp;
-  int *implicit_void_function;
-  int *implicit_sizeof;
-  int *language_standard;
-  int *request_ast;
-  int *diagnostics_only;
-  int *toolchain_debug_mode;
-  int *toolchain_debug_deep;
-  OverrideFile **override_files;
-  int *override_file_count;
-  int *override_file_cap;
-  ProjectInputList symbol_ref_ce_list;
-  ProjectInputList symbol_ref_cclib_list;
-} ProjectArgState;
-
-static int project_args_push(char ***items, int *count, int *cap, const char *value)
-{
-  if (!items || !count || !cap || !value)
-    return -1;
-  if (*count == *cap)
-  {
-    int new_cap = *cap ? (*cap * 2) : 8;
-    char **grown = (char **)realloc(*items, sizeof(char *) * (size_t)new_cap);
-    if (!grown)
-      return -1;
-    *items = grown;
-    *cap = new_cap;
-  }
-  (*items)[*count] = xstrdup(value);
-  if (!(*items)[*count])
-    return -1;
-  (*count)++;
-  return 0;
-}
-
-static int project_args_tokenize(const char *text, char ***out_args, int *out_count)
-{
-  if (!out_args || !out_count)
-    return -1;
-  *out_args = NULL;
-  *out_count = 0;
-  if (!text)
-    return 0;
-  int cap = 0;
-  const char *p = text;
-  while (*p)
-  {
-    while (*p && (isspace((unsigned char)*p) || *p == ','))
-      ++p;
-    if (!*p)
-      break;
-    char token[1024];
-    size_t len = 0;
-    char quote = 0;
-    if (*p == '"' || *p == '\'')
-    {
-      quote = *p++;
-    }
-    while (*p)
-    {
-      if (quote)
-      {
-        if (*p == quote)
-        {
-          ++p;
-          break;
-        }
-      }
-      else if (isspace((unsigned char)*p) || *p == ',')
-      {
-        break;
-      }
-      if (*p == '\\' && p[1])
-      {
-        if (len + 1 < sizeof(token))
-          token[len++] = p[1];
-        p += 2;
-        continue;
-      }
-      if (len + 1 < sizeof(token))
-        token[len++] = *p;
-      ++p;
-    }
-    token[len] = '\0';
-    if (len > 0)
-    {
-      if (project_args_push(out_args, out_count, &cap, token) != 0)
-        return -1;
-    }
-  }
-  return 0;
-}
-
-static void project_args_free(char **args, int count)
-{
-  if (!args)
-    return;
-  for (int i = 0; i < count; ++i)
-    free(args[i]);
-  free(args);
-}
-
-static int project_args_apply(const char *proj_path, int lineno,
-                              const char *project_dir, char **args, int count,
-                              ProjectArgState *state)
-{
-  if (!state)
-    return -1;
-
-  const char *pending_output = NULL;
-  for (int i = 0; i < count; ++i)
-  {
-    const char *arg = args[i];
-    if (!arg || !*arg)
-      continue;
-    if (strcmp(arg, "-o") == 0)
-    {
-      if (i + 1 >= count)
-      {
-        fprintf(stderr, "error: -o expects a path in '%s' (line %d)\n", proj_path, lineno);
-        return -1;
-      }
-      const char *dest = args[++i];
-      if (!dest || !*dest)
-      {
-        fprintf(stderr, "error: -o expects a path in '%s' (line %d)\n", proj_path, lineno);
-        return -1;
-      }
-      char resolved[1024];
-      resolve_project_relative_path(resolved, sizeof(resolved), project_dir, dest);
-      if (pending_output)
-        free((char *)pending_output);
-      pending_output = xstrdup(resolved);
-      continue;
-    }
-    if (strcmp(arg, "-S") == 0)
-    {
-      if (state->stop_after_asm)
-        *state->stop_after_asm = 1;
-      continue;
-    }
-    if (strcmp(arg, "-Sccb") == 0)
-    {
-      if (state->stop_after_ccb)
-        *state->stop_after_ccb = 1;
-      continue;
-    }
-    if (strcmp(arg, "-g") == 0)
-    {
-      if (state->debug_symbols)
-        *state->debug_symbols = 1;
-      continue;
-    }
-    if (strcmp(arg, "--strip") == 0)
-    {
-      if (state->strip_metadata)
-        *state->strip_metadata = 1;
-      continue;
-    }
-    if (strcmp(arg, "--strip-hard") == 0)
-    {
-      if (state->strip_metadata)
-        *state->strip_metadata = 1;
-      if (state->strip_hard)
-        *state->strip_hard = 1;
-      continue;
-    }
-    if (strcmp(arg, "--obfuscate") == 0)
-    {
-      if (state->strip_metadata)
-        *state->strip_metadata = 1;
-      if (state->strip_hard)
-        *state->strip_hard = 1;
-      if (state->obfuscate)
-        *state->obfuscate = 1;
-      continue;
-    }
-    if (strncmp(arg, "-O", 2) == 0)
-    {
-      const char *level_str = arg + 2;
-      int level = 1;
-      if (*level_str != '\0')
-      {
-        char *endptr = NULL;
-        long parsed = strtol(level_str, &endptr, 10);
-        if (!endptr || *endptr != '\0' || parsed < 0 || parsed > 3)
-        {
-          fprintf(stderr,
-                  "invalid optimization level '%s' in '%s' (line %d)\n",
-                  arg, proj_path, lineno);
-          return -1;
-        }
-        level = (int)parsed;
-      }
-      if (state->opt_level)
-        *state->opt_level = level;
-      continue;
-    }
-    if (strcmp(arg, "--no-link") == 0)
-    {
-      if (state->no_link)
-        *state->no_link = 1;
-      if (i + 1 < count && args[i + 1][0] != '-')
-      {
-        const char *cand = args[i + 1];
-        if (is_object_file_arg(cand))
-        {
-          if (state->obj_override)
-            *state->obj_override = xstrdup(cand);
-          i++;
-        }
-      }
-      continue;
-    }
-    if (strcmp(arg, "-c") == 0)
-    {
-      if (state->no_link)
-        *state->no_link = 1;
-      if (i + 1 < count && args[i + 1][0] != '-')
-      {
-        const char *cand = args[i + 1];
-        if (is_object_file_arg(cand))
-        {
-          if (state->obj_override)
-            *state->obj_override = xstrdup(cand);
-          i++;
-        }
-        else if (is_ce_source_arg(cand))
-        {
-          fprintf(stderr,
-                  "error: -c in project args cannot list .ce inputs; use ce= instead (line %d)\n",
-                  lineno);
-          return -1;
-        }
-      }
-      continue;
-    }
-    if (strcmp(arg, "--asm-syntax") == 0)
-    {
-      if (i + 1 >= count)
-      {
-        fprintf(stderr, "error: --asm-syntax expects a value in '%s' (line %d)\n",
-                proj_path, lineno);
-        return -1;
-      }
-      const char *val = args[++i];
-      if (state->asm_syntax)
-      {
-        if (strcmp(val, "intel") == 0)
-          *state->asm_syntax = ASM_INTEL;
-        else if (strcmp(val, "att") == 0)
-          *state->asm_syntax = ASM_ATT;
-        else if (strcmp(val, "nasm") == 0)
-          *state->asm_syntax = ASM_NASM;
-        else
-        {
-          fprintf(stderr, "Unknown asm syntax '%s' in '%s' (line %d)\n",
-                  val, proj_path, lineno);
-          return -1;
-        }
-      }
-      continue;
-    }
-    if (strcmp(arg, "--chancecodec") == 0)
-    {
-      if (i + 1 >= count)
-      {
-        fprintf(stderr, "error: --chancecodec expects a path in '%s' (line %d)\n",
-                proj_path, lineno);
-        return -1;
-      }
-      if (state->chancecodec_cmd_override)
-        *state->chancecodec_cmd_override = xstrdup(args[++i]);
-      else
-        i++;
-      continue;
-    }
-    if (strcmp(arg, "--cc") == 0)
-    {
-      if (i + 1 >= count)
-      {
-    if (strcmp(arg, "--chs") == 0)
-    {
-      if (i + 1 >= count)
-      {
-        fprintf(stderr, "error: --chs expects a path in '%s' (line %d)\n",
-                proj_path, lineno);
-        return -1;
-      }
-      if (state->chs_cmd_override)
-        *state->chs_cmd_override = xstrdup(args[++i]);
-      else
-        i++;
-      continue;
-    }
-        fprintf(stderr, "error: --cc expects a path in '%s' (line %d)\n",
-                proj_path, lineno);
-        return -1;
-      }
-      if (state->host_cc_cmd_override)
-        *state->host_cc_cmd_override = xstrdup(args[++i]);
-      else
-        i++;
-      continue;
-    }
-    if (strcmp(arg, "--library") == 0)
-    {
-      if (state->emit_library)
-        *state->emit_library = 1;
-      continue;
-    }
-    if (strcmp(arg, "--freestanding") == 0)
-    {
-      if (state->freestanding)
-        *state->freestanding = 1;
-      if (state->freestanding_requested)
-        *state->freestanding_requested = 1;
-      continue;
-    }
-    if (strcmp(arg, "-x86") == 0)
-    {
-      if (state->target_arch)
-        *state->target_arch = ARCH_X86;
-      if (state->chancecode_backend)
-        *state->chancecode_backend = "x86-gas";
-      continue;
-    }
-    if (strcmp(arg, "-arm64") == 0)
-    {
-      if (state->target_arch)
-        *state->target_arch = ARCH_ARM64;
-      if (state->chancecode_backend)
-        *state->chancecode_backend = NULL;
-      continue;
-    }
-    if (strcmp(arg, "-bslash") == 0)
-    {
-      if (state->target_arch)
-        *state->target_arch = ARCH_BSLASH;
-      if (state->chancecode_backend)
-        *state->chancecode_backend = "bslash";
-      continue;
-    }
-    if (strcmp(arg, "-m32") == 0)
-    {
-      if (state->m32)
-        *state->m32 = 1;
-      continue;
-    }
-    if (strcmp(arg, "-m64") == 0)
-    {
-      if (state->m32)
-        *state->m32 = 0;
-      continue;
-    }
-    if (strcmp(arg, "--target-os") == 0)
-    {
-      if (i + 1 >= count)
-      {
-        fprintf(stderr, "error: --target-os expects a value in '%s' (line %d)\n",
-                proj_path, lineno);
-        return -1;
-      }
-      const char *os = args[++i];
-      if (state->target_os)
-      {
-        if (strcmp(os, "windows") == 0)
-          *state->target_os = OS_WINDOWS;
-        else if (strcmp(os, "linux") == 0)
-          *state->target_os = OS_LINUX;
-        else if (strcmp(os, "macos") == 0)
-          *state->target_os = OS_MACOS;
-        else
-        {
-          fprintf(stderr,
-                  "Unknown --target-os '%s' in '%s' (line %d)\n",
-                  os, proj_path, lineno);
-          return -1;
-        }
-      }
-      continue;
-    }
-    if (strcmp(arg, "-I") == 0)
-    {
-      if (i + 1 >= count)
-      {
-        fprintf(stderr, "error: -I expects a directory in '%s' (line %d)\n",
-                proj_path, lineno);
-        return -1;
-      }
-      char resolved[1024];
-      resolve_project_relative_path(resolved, sizeof(resolved), project_dir,
-                                    args[++i]);
-      chance_add_include_dir(state->include_dirs, state->include_dir_count,
-                             resolved);
-      continue;
-    }
-    if (strcmp(arg, "-Nno-formatting") == 0)
-    {
-      parser_set_disable_formatting_notes(1);
-      continue;
-    }
-    if (strcmp(arg, "-vd") == 0 || strcmp(arg, "--verbose-deep") == 0)
-    {
-      compiler_verbose_set_mode(1);
-      compiler_verbose_set_deep(1);
-      if (state->toolchain_debug_mode)
-        *state->toolchain_debug_mode = 1;
-      if (state->toolchain_debug_deep)
-        *state->toolchain_debug_deep = 1;
-      continue;
-    }
-    if (strcmp(arg, "-d") == 0 || strcmp(arg, "--debug") == 0)
-    {
-      if (state->toolchain_debug_mode)
-        *state->toolchain_debug_mode = 1;
-      continue;
-    }
-    if (strcmp(arg, "-v") == 0 || strcmp(arg, "--verbose") == 0)
-    {
-      compiler_verbose_set_mode(1);
-      continue;
-    }
-    if (strcmp(arg, "--no-ansi") == 0)
-    {
-      diag_set_use_ansi(0);
-      verbose_use_ansi = 0;
-      compiler_verbose_set_use_ansi(0);
-      continue;
-    }
-    if (strcmp(arg, "--data-log") == 0)
-    {
-      diag_set_data_log(1);
-      diag_set_use_ansi(0);
-      verbose_use_ansi = 0;
-      compiler_verbose_set_use_ansi(0);
-      continue;
-    }
-    if (strcmp(arg, "--request-ast") == 0)
-    {
-      if (state->request_ast)
-        *state->request_ast = 1;
-      continue;
-    }
-    if (strcmp(arg, "--diagnostics-only") == 0 || strcmp(arg, "--diag-only") == 0)
-    {
-      if (state->diagnostics_only)
-        *state->diagnostics_only = 1;
-      continue;
-    }
-    if (strcmp(arg, "--override-file") == 0)
-    {
-      if (i + 1 >= count)
-      {
-        fprintf(stderr,
-                "error: --override-file expects <original>=<override> in '%s' (line %d)\n",
-                proj_path, lineno);
-        return -1;
-      }
-      const char *spec = args[++i];
-      if (state->override_files && state->override_file_count && state->override_file_cap)
-      {
-        if (add_override_file(spec, project_dir,
-                              state->override_files, state->override_file_count,
-                              state->override_file_cap) != 0)
-        {
-          fprintf(stderr,
-                  "error: invalid --override-file '%s' in '%s' (line %d)\n",
-                  spec, proj_path, lineno);
-          return -1;
-        }
-      }
-      continue;
-    }
-    if (strncmp(arg, "--override-file=", 16) == 0)
-    {
-      const char *spec = arg + 16;
-      if (state->override_files && state->override_file_count && state->override_file_cap)
-      {
-        if (add_override_file(spec, project_dir,
-                              state->override_files, state->override_file_count,
-                              state->override_file_cap) != 0)
-        {
-          fprintf(stderr,
-                  "error: invalid --override-file '%s' in '%s' (line %d)\n",
-                  spec, proj_path, lineno);
-          return -1;
-        }
-      }
-      continue;
-    }
-    if (strncmp(arg, "-sr:", 4) == 0)
-    {
-      const char *sr_path = arg + 4;
-      if (!sr_path || !*sr_path)
-      {
-        fprintf(stderr,
-                "error: -sr: requires a .ce or .cclib path in '%s' (line %d)\n",
-                proj_path, lineno);
-        return -1;
-      }
-      char resolved[1024];
-      resolve_project_relative_path(resolved, sizeof(resolved), project_dir,
-                                    sr_path);
-      if (ends_with_icase(sr_path, ".ce"))
-      {
-        if (push_input_entry(resolved, state->symbol_ref_ce_list, 1) != 0)
-          return -1;
-      }
-      else if (ends_with_icase(sr_path, ".cclib"))
-      {
-        if (push_input_entry(resolved, state->symbol_ref_cclib_list, 1) != 0)
-          return -1;
-      }
-      else
-      {
-        fprintf(stderr,
-                "error: -sr: path '%s' must be a .ce or .cclib file (line %d)\n",
-                sr_path, lineno);
-        return -1;
-      }
-      continue;
-    }
-    if (strcmp(arg, "--implicit-voidp") == 0)
-    {
-      if (state->implicit_voidp)
-        *state->implicit_voidp = 1;
-      continue;
-    }
-    if (strcmp(arg, "--implicit-void-function") == 0)
-    {
-      if (state->implicit_void_function)
-        *state->implicit_void_function = 1;
-      continue;
-    }
-    if (strcmp(arg, "--implicit-sizeof") == 0)
-    {
-      if (state->implicit_sizeof)
-        *state->implicit_sizeof = 1;
-      continue;
-    }
-    if (strcmp(arg, "-H26") == 0)
-    {
-      if (state->language_standard)
-        *state->language_standard = CHANCE_STD_H26;
-      continue;
-    }
-    if (strcmp(arg, "-H27") == 0)
-    {
-      if (state->language_standard)
-        *state->language_standard = CHANCE_STD_H27;
-      continue;
-    }
-    if (arg[0] == '-')
-    {
-      fprintf(stderr,
-              "error: unknown project arg '%s' in '%s' (line %d)\n",
-              arg, proj_path, lineno);
-      return -1;
-    }
-    fprintf(stderr,
-            "error: unexpected token '%s' in project args for '%s' (line %d)\n",
-            arg, proj_path, lineno);
-    return -1;
-  }
-
-  if (pending_output)
-  {
-    if (state->output_overridden)
-      *state->output_overridden = 1;
-    if (state->project_output_alloc && state->out)
-    {
-      if (*state->project_output_alloc)
-        free(*state->project_output_alloc);
-      *state->project_output_alloc = (char *)pending_output;
-      if (state->no_link && *state->no_link && state->obj_override)
-        *state->obj_override = *state->project_output_alloc;
-      else
-        *state->out = *state->project_output_alloc;
-    }
-    else
-    {
-      free((char *)pending_output);
-    }
-  }
-  return 0;
-}
-
-static int parse_ceproj_file(
-    const char *proj_path, ProjectInputList ce_list, ProjectInputList ccb_list,
-  ProjectInputList cclib_list, ProjectInputList obj_list,
-  ProjectInputList asm_list,
-    char ***include_dirs, int *include_dir_count, int *output_overridden,
-    const char **out, char **project_output_alloc, TargetArch *target_arch,
-    const char **chancecode_backend, int *stop_after_ccb, int *stop_after_asm,
-  int *emit_library, int *no_link, int *freestanding, TargetOS *target_os,
-  int *freestanding_requested, int *m32, int *opt_level, int *debug_symbols,
-  int *strip_metadata, int *strip_hard, int *obfuscate,
-  AsmSyntax *asm_syntax, const char **chancecodec_cmd_override,
-  const char **chs_cmd_override, const char **host_cc_cmd_override,
-  const char **obj_override,
-  int *implicit_voidp, int *implicit_void_function, int *implicit_sizeof, int *request_ast,
-  int *language_standard,
-  int *diagnostics_only, int *toolchain_debug_mode,
-  int *toolchain_debug_deep,
-  OverrideFile **override_files, int *override_file_count, int *override_file_cap,
-  ProjectInputList symbol_ref_ce_list,
-  ProjectInputList symbol_ref_cclib_list, char **after_cmd)
-{
-  FILE *f = fopen(proj_path, "rb");
-  if (!f)
-  {
-    fprintf(stderr, "error: failed to open project file '%s': %s\n", proj_path,
-            strerror(errno));
-    return -1;
-  }
-  char project_dir[1024] = {0};
-  if (parent_directory(proj_path, project_dir, sizeof(project_dir)) != 0)
-    project_dir[0] = '\0';
-
-  char line[2048];
-  int lineno = 0;
-  int rc = 0;
-  while (fgets(line, sizeof(line), f))
-  {
-    lineno++;
-    char work[2048];
-    snprintf(work, sizeof(work), "%s", line);
-    trim_whitespace_inplace(work);
-    if (lineno == 1)
-      strip_utf8_bom(work);
-    if (!work[0])
-      continue;
-    if (work[0] == '#' || work[0] == ';')
-      continue;
-    if (work[0] == '/' && work[1] == '/')
-      continue;
-    if (work[0] == '[')
-      continue;
-    char *eq = strchr(work, '=');
-    if (!eq)
-    {
-      fprintf(stderr, "error: expected key=value in '%s' (line %d)\n",
-              proj_path, lineno);
-      rc = -1;
-      break;
-    }
-    *eq = '\0';
-    char *key = work;
-    char *value = eq + 1;
-    trim_whitespace_inplace(key);
-    trim_whitespace_inplace(value);
-    if (!key[0])
-      continue;
-    for (char *p = key; *p; ++p)
-      *p = (char)tolower((unsigned char)*p);
-    char value_buf[2048];
-    strip_wrapping_quotes(value, value_buf, sizeof(value_buf));
-    trim_whitespace_inplace(value_buf);
-    if (strcmp(key, "ce") == 0 || strcmp(key, "source") == 0)
-    {
-      if (add_file_list_entries(value_buf, project_dir, ce_list) != 0)
-      {
-        rc = -1;
-        break;
-      }
-    }
-    else if (strcmp(key, "ccb") == 0)
-    {
-      if (add_file_list_entries(value_buf, project_dir, ccb_list) != 0)
-      {
-        rc = -1;
-        break;
-      }
-    }
-    else if (strcmp(key, "cclib") == 0 || strcmp(key, "library") == 0)
-    {
-      if (add_file_list_entries(value_buf, project_dir, cclib_list) != 0)
-      {
-        rc = -1;
-        break;
-      }
-    }
-    else if (strcmp(key, "obj") == 0 || strcmp(key, "object") == 0)
-    {
-      if (add_file_list_entries(value_buf, project_dir, obj_list) != 0)
-      {
-        rc = -1;
-        break;
-      }
-    }
-    else if (strcmp(key, "asm") == 0 || strcmp(key, "assembly") == 0)
-    {
-      if (add_file_list_entries(value_buf, project_dir, asm_list) != 0)
-      {
-        rc = -1;
-        break;
-      }
-    }
-    else if (strcmp(key, "include") == 0 || strcmp(key, "includedir") == 0)
-    {
-      if (add_include_dir_list(value_buf, project_dir, include_dirs,
-                               include_dir_count) != 0)
-      {
-        rc = -1;
-        break;
-      }
-    }
-    else if (strcmp(key, "output") == 0)
-    {
-      if (!out || !project_output_alloc || !output_overridden)
-        continue;
-      char resolved[1024];
-      resolve_project_relative_path(resolved, sizeof(resolved), project_dir,
-                                    value_buf);
-      if (*project_output_alloc)
-      {
-        free(*project_output_alloc);
-        *project_output_alloc = NULL;
-      }
-      *project_output_alloc = xstrdup(resolved);
-      *out = *project_output_alloc;
-      *output_overridden = 1;
-    }
-    else if (strcmp(key, "backend") == 0)
-    {
-      if (equals_icase(value_buf, "x86"))
-      {
-        if (target_arch)
-          *target_arch = ARCH_X86;
-        if (chancecode_backend)
-          *chancecode_backend = "x86-gas";
-      }
-      else if (equals_icase(value_buf, "arm64"))
-      {
-        if (target_arch)
-          *target_arch = ARCH_ARM64;
-        if (chancecode_backend)
-          *chancecode_backend = NULL;
-      }
-      else if (equals_icase(value_buf, "arm64-macos"))
-      {
-        if (target_arch)
-          *target_arch = ARCH_ARM64;
-        if (chancecode_backend)
-          *chancecode_backend = "arm64-macos";
-        if (target_os)
-          *target_os = OS_MACOS;
-      }
-      else if (equals_icase(value_buf, "arm64-elf") ||
-               equals_icase(value_buf, "arm64-linux"))
-      {
-        if (target_arch)
-          *target_arch = ARCH_ARM64;
-        if (chancecode_backend)
-          *chancecode_backend = "arm64-elf";
-        if (target_os)
-          *target_os = OS_LINUX;
-      }
-      else if (equals_icase(value_buf, "bslash") || equals_icase(value_buf, "bslash"))
-      {
-        if (target_arch)
-          *target_arch = ARCH_BSLASH;
-        if (chancecode_backend)
-          *chancecode_backend = "bslash";
-      }
-      else if (equals_icase(value_buf, "none"))
-      {
-        if (target_arch)
-          *target_arch = ARCH_NONE;
-        if (chancecode_backend)
-          *chancecode_backend = NULL;
-      }
-      else
-      {
-        fprintf(stderr, "error: unknown backend '%s' in '%s' (line %d)\n",
-                value_buf, proj_path, lineno);
-        rc = -1;
-        break;
-      }
-    }
-    else if (strcmp(key, "type") == 0)
-    {
-      if (equals_icase(value_buf, "library"))
-      {
-        if (emit_library)
-          *emit_library = 1;
-      }
-      else if (equals_icase(value_buf, "object") || equals_icase(value_buf, "obj"))
-      {
-        if (no_link)
-          *no_link = 1;
-      }
-    }
-    else if (strcmp(key, "after") == 0)
-    {
-      if (after_cmd)
-      {
-        char block[4096];
-        if (parse_project_block_value(f, &lineno, value_buf, block, sizeof(block)) != 0)
-        {
-          fprintf(stderr, "error: unterminated after block in '%s' (line %d)\n",
-                  proj_path, lineno);
-          rc = -1;
-          break;
-        }
-        if (*after_cmd)
-        {
-          free(*after_cmd);
-          *after_cmd = NULL;
-        }
-        trim_whitespace_inplace(block);
-        *after_cmd = block[0] ? xstrdup(block) : NULL;
-      }
-    }
-    else if (strcmp(key, "args") == 0 || strcmp(key, "control_args") == 0 ||
-             strcmp(key, "control-args") == 0)
-    {
-      ProjectArgState state = {
-          .out = out,
-          .project_output_alloc = project_output_alloc,
-          .output_overridden = output_overridden,
-          .stop_after_ccb = stop_after_ccb,
-          .stop_after_asm = stop_after_asm,
-          .no_link = no_link,
-          .emit_library = emit_library,
-          .freestanding = freestanding,
-          .freestanding_requested = freestanding_requested,
-          .m32 = m32,
-          .opt_level = opt_level,
-          .debug_symbols = debug_symbols,
-          .strip_metadata = strip_metadata,
-          .strip_hard = strip_hard,
-          .obfuscate = obfuscate,
-          .asm_syntax = asm_syntax,
-          .target_arch = target_arch,
-          .chancecode_backend = chancecode_backend,
-          .chancecodec_cmd_override = chancecodec_cmd_override,
-          .chs_cmd_override = chs_cmd_override,
-          .host_cc_cmd_override = host_cc_cmd_override,
-          .target_os = target_os,
-          .include_dirs = include_dirs,
-          .include_dir_count = include_dir_count,
-          .obj_override = obj_override,
-          .implicit_voidp = implicit_voidp,
-          .implicit_void_function = implicit_void_function,
-          .implicit_sizeof = implicit_sizeof,
-          .language_standard = language_standard,
-          .request_ast = request_ast,
-          .diagnostics_only = diagnostics_only,
-          .toolchain_debug_mode = toolchain_debug_mode,
-          .toolchain_debug_deep = toolchain_debug_deep,
-          .override_files = override_files,
-          .override_file_count = override_file_count,
-          .override_file_cap = override_file_cap,
-          .symbol_ref_ce_list = symbol_ref_ce_list,
-          .symbol_ref_cclib_list = symbol_ref_cclib_list};
-
-      char **args = NULL;
-      int arg_count = 0;
-      if (project_args_tokenize(value_buf, &args, &arg_count) != 0)
-      {
-        fprintf(stderr, "error: failed to parse args in '%s' (line %d)\n",
-                proj_path, lineno);
-        rc = -1;
-        break;
-      }
-      if (project_args_apply(proj_path, lineno, project_dir, args, arg_count,
-                             &state) != 0)
-      {
-        project_args_free(args, arg_count);
-        rc = -1;
-        break;
-      }
-      project_args_free(args, arg_count);
-    }
-    else if (strcmp(key, "stop_after") == 0 ||
-             strcmp(key, "stopafter") == 0)
-    {
-      if ((!stop_after_asm || !*stop_after_asm) &&
-          (!stop_after_ccb || !*stop_after_ccb))
-      {
-        if (equals_icase(value_buf, "ccb"))
-        {
-          if (stop_after_ccb)
-            *stop_after_ccb = 1;
-        }
-        else if (equals_icase(value_buf, "asm"))
-        {
-          if (stop_after_asm)
-            *stop_after_asm = 1;
-        }
-      }
-    }
-    else if (strcmp(key, "no_link") == 0 || strcmp(key, "nolink") == 0)
-    {
-      int val = 0;
-      if (parse_bool_value(value_buf, &val) != 0)
-      {
-        fprintf(stderr,
-                "error: expected boolean for no_link in '%s' (line %d)\n",
-                proj_path, lineno);
-        rc = -1;
-        break;
-      }
-      if (no_link)
-        *no_link = val;
-    }
-    else if (strcmp(key, "freestanding") == 0)
-    {
-      int val = 0;
-      if (parse_bool_value(value_buf, &val) != 0)
-      {
-        fprintf(stderr,
-                "error: expected boolean for freestanding in '%s' (line %d)\n",
-                proj_path, lineno);
-        rc = -1;
-        break;
-      }
-      if (freestanding)
-        *freestanding = val;
-    }
-    else if (strcmp(key, "target_os") == 0 || strcmp(key, "targetos") == 0)
-    {
-      if (equals_icase(value_buf, "windows"))
-      {
-        if (target_os)
-          *target_os = OS_WINDOWS;
-      }
-      else if (equals_icase(value_buf, "linux"))
-      {
-        if (target_os)
-          *target_os = OS_LINUX;
-      }
-      else if (equals_icase(value_buf, "macos"))
-      {
-        if (target_os)
-          *target_os = OS_MACOS;
-      }
-      else
-      {
-        fprintf(stderr, "error: unknown target_os '%s' in '%s' (line %d)\n",
-                value_buf, proj_path, lineno);
-        rc = -1;
-        break;
-      }
-    }
-    else
-    {
-      fprintf(stderr,
-              "warning: ignoring unrecognized key '%s' in '%s' (line %d)\n",
-              key, proj_path, lineno);
-    }
-  }
-  fclose(f);
-  if (no_link && *no_link && output_overridden && *output_overridden &&
-      obj_override && out && *out)
-  {
-    if (!*obj_override)
-      *obj_override = *out;
-  }
-  return rc;
 }
 
 static int path_has_separator(const char *name)
@@ -4665,154 +3101,175 @@ static int assemble_to_object(const char *host_cc_cmd_to_use,
                                freestanding, opt_level);
 }
 
-static int run_cld_link_process(const char *cmd, const char *target_name,
-                                const char *output_kind,
-                                const char *output_path, int no_stdlib,
-                                const char **inputs, int input_count,
-                                int toolchain_debug_mode,
-                                int toolchain_debug_deep,
-                                int *spawn_errno_out)
+static int is_codegen_target(TargetArch target_arch)
 {
-  if (spawn_errno_out)
-    *spawn_errno_out = 0;
-  if (!cmd || !*cmd || !output_kind || !*output_kind || !output_path ||
-      !*output_path || !inputs || input_count <= 0)
+  return target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
+         target_arch == ARCH_BSLASH;
+}
+
+static const char *resolve_codegen_backend(TargetArch target_arch,
+                                           TargetOS target_os,
+                                           const char *chancecode_backend)
+{
+  if (chancecode_backend)
+    return chancecode_backend;
+  if (target_arch == ARCH_X86)
+    return "x86-gas";
+  if (target_arch == ARCH_ARM64)
+    return arm64_backend_name_for_os(target_os);
+  return "bslash";
+}
+
+static int run_codegen_backend_step(
+    const char *chancecodec_cmd_to_use, int chancecodec_has_override,
+    int chancecodec_uses_fallback, const char *chancecode_backend,
+    TargetArch target_arch, TargetOS target_os, int opt_level,
+    int strip_metadata, int strip_hard, int obfuscate,
+    const char *strip_map_path_or_null, int debug_symbols,
+    int toolchain_debug_mode, int toolchain_debug_deep,
+    const char *asm_path, const char *input_path)
+{
+  const char *backend =
+      resolve_codegen_backend(target_arch, target_os, chancecode_backend);
+  const char *target_os_option = NULL;
+  if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
+    target_os_option = target_os_to_option(target_os);
+
+  if (target_arch == ARCH_ARM64)
   {
-    if (spawn_errno_out)
-      *spawn_errno_out = EINVAL;
-    return -1;
+    int os_invalid = (!target_os_option ||
+                      (strcmp(target_os_option, "macos") != 0 &&
+                       strcmp(target_os_option, "linux") != 0 &&
+                       strcmp(target_os_option, "windows") != 0));
+    if (os_invalid)
+    {
+      fprintf(stderr,
+              "arm64 backend requires --target-os macos, linux, or windows (current target-os is '%s')\n",
+              target_os_option ? target_os_option : "<unset>");
+      return 1;
+    }
+    if (!backend)
+    {
+      fprintf(stderr,
+              "arm64 backend unavailable for target-os '%s'\n",
+              target_os_option);
+      return 1;
+    }
   }
 
-  size_t arg_cap = (size_t)input_count + 12u + (target_name && *target_name ? 2u : 0u) +
-                   (no_stdlib ? 1u : 0u);
-#ifdef _WIN32
-  const char **args = (const char **)calloc(arg_cap, sizeof(*args));
-#else
-  char **args = (char **)calloc(arg_cap, sizeof(*args));
-#endif
-  if (!args)
+  if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
   {
-    if (spawn_errno_out)
-      *spawn_errno_out = ENOMEM;
-    return -1;
+    fprintf(stderr,
+            "internal error: ChanceCode CLI command unresolved\n");
+    return 1;
   }
 
-  size_t idx = 0;
-    args[idx++] =
-  #ifdef _WIN32
-    cmd;
-  #else
-    (char *)cmd;
-  #endif
-    args[idx++] =
-  #ifdef _WIN32
-    "link";
-  #else
-    (char *)"link";
-  #endif
-    args[idx++] =
-  #ifdef _WIN32
-    "-o";
-  #else
-    (char *)"-o";
-  #endif
-    args[idx++] =
-  #ifdef _WIN32
-    output_path;
-  #else
-    (char *)output_path;
-  #endif
-  if (target_name && *target_name)
-  {
-      args[idx++] =
-  #ifdef _WIN32
-      "--target";
-  #else
-      (char *)"--target";
-  #endif
-      args[idx++] =
-  #ifdef _WIN32
-      target_name;
-  #else
-      (char *)target_name;
-  #endif
-  }
-    args[idx++] =
-  #ifdef _WIN32
-    "--output-kind";
-  #else
-    (char *)"--output-kind";
-  #endif
-    args[idx++] =
-  #ifdef _WIN32
-    output_kind;
-  #else
-    (char *)output_kind;
-  #endif
-  if (no_stdlib)
-      args[idx++] =
-  #ifdef _WIN32
-      "-nostdlib";
-  #else
-      (char *)"-nostdlib";
-  #endif
-    if (toolchain_debug_deep)
-      args[idx++] =
-    #ifdef _WIN32
-      "-vd";
-    #else
-      (char *)"-vd";
-    #endif
-    else if (toolchain_debug_mode)
-      args[idx++] =
-    #ifdef _WIN32
-      "-d";
-    #else
-      (char *)"-d";
-    #endif
-  for (int i = 0; i < input_count; ++i)
-      args[idx++] =
-  #ifdef _WIN32
-      inputs[i];
-  #else
-      (char *)inputs[i];
-  #endif
-  args[idx] = NULL;
+  char display_cmd[4096];
+  build_chancecodec_display_cmd(display_cmd, sizeof(display_cmd),
+                                chancecodec_cmd_to_use, backend,
+                                opt_level, strip_metadata,
+                                strip_hard, obfuscate,
+                                strip_map_path_or_null,
+                                debug_symbols,
+                                toolchain_debug_mode,
+                                toolchain_debug_deep,
+                                target_os_option, asm_path, input_path);
 
-#ifdef _WIN32
-  intptr_t rc = _spawnvp(_P_WAIT, cmd, args);
-  free(args);
-  if (rc == -1)
+  int spawn_errno = 0;
+  int chance_rc = run_chancecodec_process(
+      chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
+      strip_hard, obfuscate,
+      strip_map_path_or_null, debug_symbols,
+      asm_path, input_path, toolchain_debug_mode, toolchain_debug_deep,
+      target_os_option, &spawn_errno);
+  if (chance_rc != 0)
   {
-    if (spawn_errno_out)
-      *spawn_errno_out = errno;
-    return -1;
+    if (chance_rc < 0)
+    {
+      fprintf(stderr, "failed to launch chancecodec '%s': %s\n",
+              chancecodec_cmd_to_use, strerror(spawn_errno));
+    }
+    else
+    {
+      fprintf(stderr, "chancecodec failed (rc=%d): %s\n", chance_rc,
+              display_cmd);
+    }
+    if (!chancecodec_has_override && chancecodec_uses_fallback)
+    {
+      fprintf(stderr,
+              "hint: use --chancecodec <path> or set CHANCECODEC_CMD to "
+              "point at the ChanceCode CLI executable\n");
+    }
+    return 1;
   }
-  return (int)rc;
-#else
-  pid_t pid = 0;
-  int rc = posix_spawnp(&pid, cmd, NULL, NULL, args, environ);
-  free(args);
-  if (rc != 0)
+
+  return 0;
+}
+
+static int run_codegen_assembly_step(
+    const char *host_cc_cmd_to_use, const char *chs_cmd_to_use,
+    int chs_has_override, int chs_uses_fallback,
+    TargetArch target_arch, TargetOS target_os,
+    const char *asm_path, const char *objOut,
+    int need_obj, int toolchain_debug_mode,
+    int toolchain_debug_deep, int debug_symbols,
+    int freestanding, int opt_level)
+{
+  if (!need_obj)
   {
-    if (spawn_errno_out)
-      *spawn_errno_out = rc;
-    errno = rc;
-    return -1;
+    fprintf(stderr,
+            "internal error: object output expected but path missing\n");
+    return 1;
   }
-  int status = 0;
-  if (waitpid(pid, &status, 0) == -1)
+
+  return assemble_to_object(host_cc_cmd_to_use, chs_cmd_to_use,
+                            chs_has_override, chs_uses_fallback,
+                            target_arch, target_os, asm_path, objOut,
+                            toolchain_debug_mode,
+                            toolchain_debug_deep,
+                            debug_symbols, freestanding, opt_level);
+}
+
+static int append_temp_object(char ***temp_objs, int *to_cnt, int *to_cap,
+                              const char *obj_path)
+{
+  if (!temp_objs || !to_cnt || !to_cap || !obj_path || !*obj_path)
+    return 1;
+  if (*to_cnt == *to_cap)
   {
-    if (spawn_errno_out)
-      *spawn_errno_out = errno;
-    return -1;
+    int new_cap = *to_cap ? *to_cap * 2 : 8;
+    char **grown = (char **)realloc(*temp_objs, sizeof(char *) * (size_t)new_cap);
+    if (!grown)
+      return 1;
+    *temp_objs = grown;
+    *to_cap = new_cap;
   }
-  if (WIFEXITED(status))
-    return WEXITSTATUS(status);
-  if (WIFSIGNALED(status))
-    return 128 + WTERMSIG(status);
-  return -1;
-#endif
+  (*temp_objs)[(*to_cnt)++] = xstrdup(obj_path);
+  return 0;
+}
+
+static void maybe_capture_single_obj(int no_link, int multi_link,
+                                     const char *objOut, int obj_is_temp,
+                                     char *single_obj_path,
+                                     size_t single_obj_path_size,
+                                     int *have_single_obj,
+                                     int *single_obj_is_temp)
+{
+  if (no_link || multi_link)
+    return;
+  snprintf(single_obj_path, single_obj_path_size, "%s", objOut);
+  *have_single_obj = 1;
+  *single_obj_is_temp = obj_is_temp;
+}
+
+static int maybe_track_output_obj(int no_link, const char *obj_override,
+                                  int multi_link, const char *objOut,
+                                  char ***temp_objs, int *to_cnt,
+                                  int *to_cap)
+{
+  if (((no_link && obj_override) || multi_link) && objOut && objOut[0] != '\0')
+    return append_temp_object(temp_objs, to_cnt, to_cap, objOut);
+  return 0;
 }
 
 static int is_relocatable_obj(const char *path)
@@ -4859,7 +3316,6 @@ int main(int argc, char **argv)
 #else
   const char *out = "a";
 #endif
-  const char *pending_output = NULL;
   int output_overridden = 0;
   int stop_after_asm = 0;
   int stop_after_ccb = 0;
@@ -4886,7 +3342,6 @@ int main(int argc, char **argv)
   int override_file_cap = 0;
   char strip_map_path[STRIP_MAP_PATH_MAX] = {0};
   int strip_map_ready = 0;
-  int pending_ce_output_index = -1;
   AsmSyntax asm_syntax = ASM_INTEL;
   TargetArch target_arch = ARCH_NONE;
   const char *chancecode_backend = NULL;
@@ -4957,697 +3412,154 @@ int main(int argc, char **argv)
   int have_single_obj = 0;
   int single_obj_is_temp = 0;
 
-  ProjectInputList ce_cli_list = {&ce_inputs, &ce_count, &ce_cap,
-                                  &owned_ce_inputs, &owned_ce_count,
-                                  &owned_ce_cap, &ce_obj_outputs};
+  DriverOptionsState options_state = {
+      .prog_name = argv[0],
+      .cwd = cwd,
+      .out = &out,
+      .obj_override = &obj_override,
+      .output_overridden = &output_overridden,
+      .stop_after_asm = &stop_after_asm,
+      .stop_after_ccb = &stop_after_ccb,
+      .no_link = &no_link,
+      .emit_library = &emit_library,
+      .freestanding = &freestanding,
+      .freestanding_requested = &freestanding_requested,
+      .m32 = &m32,
+      .opt_level = &opt_level,
+      .debug_symbols = &debug_symbols,
+      .strip_metadata = &strip_metadata,
+      .strip_hard = &strip_hard,
+      .obfuscate = &obfuscate,
+      .implicit_voidp = &implicit_voidp,
+      .implicit_void_function = &implicit_void_function,
+      .implicit_sizeof = &implicit_sizeof,
+      .request_ast = &request_ast,
+      .diagnostics_only = &diagnostics_only,
+      .toolchain_debug_mode = &toolchain_debug_mode,
+      .toolchain_debug_deep = &toolchain_debug_deep,
+      .language_standard = &language_standard,
+      .verbose_use_ansi = &verbose_use_ansi,
+      .asm_syntax = &asm_syntax,
+      .target_arch = &target_arch,
+      .target_os = &target_os,
+      .chancecode_backend = &chancecode_backend,
+      .chancecodec_cmd_override = &chancecodec_cmd_override,
+      .chs_cmd_override = &chs_cmd_override,
+      .host_cc_cmd_override = &host_cc_cmd_override,
+      .ce_inputs = &ce_inputs,
+      .ce_count = &ce_count,
+      .ce_cap = &ce_cap,
+      .ce_obj_outputs = &ce_obj_outputs,
+      .ccb_inputs = &ccb_inputs,
+      .ccb_count = &ccb_count,
+      .ccb_cap = &ccb_cap,
+      .cclib_inputs = &cclib_inputs,
+      .cclib_count = &cclib_count,
+      .cclib_cap = &cclib_cap,
+      .obj_inputs = &obj_inputs,
+      .obj_count = &obj_count,
+      .obj_cap = &obj_cap,
+      .asm_inputs = &asm_inputs,
+      .asm_count = &asm_count,
+      .asm_cap = &asm_cap,
+      .symbol_ref_ce_inputs = &symbol_ref_ce_inputs,
+      .symbol_ref_ce_count = &symbol_ref_ce_count,
+      .symbol_ref_ce_cap = &symbol_ref_ce_cap,
+      .symbol_ref_cclib_inputs = &symbol_ref_cclib_inputs,
+      .symbol_ref_cclib_count = &symbol_ref_cclib_count,
+      .symbol_ref_cclib_cap = &symbol_ref_cclib_cap,
+      .owned_ce_inputs = &owned_ce_inputs,
+      .owned_ce_count = &owned_ce_count,
+      .owned_ce_cap = &owned_ce_cap,
+      .owned_ccb_inputs = &owned_ccb_inputs,
+      .owned_ccb_count = &owned_ccb_count,
+      .owned_ccb_cap = &owned_ccb_cap,
+      .owned_cclib_inputs = &owned_cclib_inputs,
+      .owned_cclib_count = &owned_cclib_count,
+      .owned_cclib_cap = &owned_cclib_cap,
+      .owned_obj_inputs = &owned_obj_inputs,
+      .owned_obj_count = &owned_obj_count,
+      .owned_obj_cap = &owned_obj_cap,
+      .owned_asm_inputs = &owned_asm_inputs,
+      .owned_asm_count = &owned_asm_count,
+      .owned_asm_cap = &owned_asm_cap,
+      .include_dirs = &include_dirs,
+      .include_dir_count = &include_dir_count,
+      .override_files = &override_files,
+      .override_file_count = &override_file_count,
+      .override_file_cap = &override_file_cap,
+      .project_output_alloc = &project_output_alloc,
+      .project_after_cmd = &project_after_cmd,
+  };
 
-  for (int i = 1; i < argc; i++)
-  {
-    if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
-    {
-      usage(argv[0]);
-      return 0;
-    }
-    if (strcmp(argv[i], "--version") == 0)
-    {
-          printf("chancec: CHance Compiler version %s\n",
-            CHANCEC_VERSION_STRING);
-          printf("chancec: CE language standard default: %s\n",
-            chance_standard_name(CHANCEC_DEFAULT_STANDARD));
-      printf("chancec: License: OpenAzure License\n");
-      printf("chancec: Compiled on %s %s\n", __DATE__, __TIME__);
-      printf("chancec: Created by Nathan Hornby (AzureianGH)\n");
-      return 0;
-    }
-    if (strcmp(argv[i], "-o") == 0)
-    {
-      if (i + 1 >= argc)
-      {
-        fprintf(stderr, "error: -o expects an output path\n");
-        return 2;
-      }
-      const char *dest = argv[++i];
-      if (pending_ce_output_index >= 0 && no_link)
-      {
-        if (!ce_obj_outputs)
-        {
-          fprintf(stderr, "error: internal state mismatch for -o handling\n");
-          goto fail;
-        }
-        char *dup = xstrdup(dest);
-        if (!dup)
-        {
-          fprintf(stderr, "error: out of memory while assigning -o path\n");
-          goto fail;
-        }
-        if (ce_obj_outputs[pending_ce_output_index])
-          free(ce_obj_outputs[pending_ce_output_index]);
-        ce_obj_outputs[pending_ce_output_index] = dup;
-        pending_ce_output_index = -1;
-      }
-      else
-      {
-        pending_output = dest;
-        output_overridden = 1;
-      }
-      continue;
-    }
-    if (strcmp(argv[i], "-S") == 0)
-    {
-      stop_after_asm = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "-Sccb") == 0)
-    {
-      stop_after_ccb = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "-g") == 0)
-    {
-      debug_symbols = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "--strip") == 0)
-    {
-      strip_metadata = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "--strip-hard") == 0)
-    {
-      strip_metadata = 1;
-      strip_hard = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "--obfuscate") == 0)
-    {
-      strip_metadata = 1;
-      strip_hard = 1;
-      obfuscate = 1;
-      continue;
-    }
-    if (strncmp(argv[i], "-O", 2) == 0)
-    {
-      const char *level_str = argv[i] + 2;
-      int level = 1;
-      if (*level_str != '\0')
-      {
-        char *endptr = NULL;
-        long parsed = strtol(level_str, &endptr, 10);
-        if (!endptr || *endptr != '\0' || parsed < 0 || parsed > 3)
-        {
-          fprintf(stderr,
-                  "invalid optimization level '%s' (use -O0|-O1|-O2|-O3)\n",
-                  argv[i]);
-          return 2;
-        }
-        level = (int)parsed;
-      }
-      opt_level = level;
-      continue;
-    }
-    if (strcmp(argv[i], "--no-link") == 0)
-    {
-      no_link = 1;
-      if (i + 1 < argc && argv[i + 1][0] != '-')
-      {
-        const char *cand = argv[i + 1];
-        if (is_object_file_arg(cand))
-        {
-          obj_override = cand;
-          i++;
-        }
-      }
-      continue;
-    }
-    if (strcmp(argv[i], "-c") == 0)
-    {
-      no_link = 1;
-      if (i + 1 < argc && argv[i + 1][0] != '-')
-      {
-        const char *cand = argv[i + 1];
-        if (is_ce_source_arg(cand))
-        {
-          if (push_input_entry(cand, ce_cli_list, 0) != 0)
-            goto fail;
-          pending_ce_output_index = ce_count - 1;
-          i++;
-          continue;
-        }
-        if (is_object_file_arg(cand))
-        {
-          obj_override = cand;
-          i++;
-          continue;
-        }
-      }
-      continue;
-    }
-    if (strcmp(argv[i], "--asm-syntax") == 0 && i + 1 < argc)
-    {
-      const char *arg = argv[++i];
-      if (strcmp(arg, "intel") == 0)
-        asm_syntax = ASM_INTEL;
-      else if (strcmp(arg, "att") == 0)
-        asm_syntax = ASM_ATT;
-      else if (strcmp(arg, "nasm") == 0)
-        asm_syntax = ASM_NASM;
-      else
-      {
-        fprintf(stderr, "Unknown asm syntax '%s' (use intel|att|nasm)\n", arg);
-        return 2;
-      }
-      continue;
-    }
-    if (strcmp(argv[i], "--chancecodec") == 0 && i + 1 < argc)
-    {
-      chancecodec_cmd_override = argv[++i];
-      continue;
-    }
-    if (strcmp(argv[i], "--chs") == 0)
-    {
-      if (i + 1 >= argc)
-      {
-        fprintf(stderr, "error: --chs expects an assembler path\n");
-        return 2;
-      }
-      chs_cmd_override = argv[++i];
-      continue;
-    }
-    if (strcmp(argv[i], "--cc") == 0)
-    {
-      if (i + 1 >= argc)
-      {
-        fprintf(stderr, "error: --cc expects a compiler path\n");
-        return 2;
-      }
-      host_cc_cmd_override = argv[++i];
-      continue;
-    }
-    if (strcmp(argv[i], "--library") == 0)
-    {
-      emit_library = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "--freestanding") == 0)
-    {
-      freestanding = 1;
-      freestanding_requested = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "-x86") == 0)
-    {
-      target_arch = ARCH_X86;
-      chancecode_backend = "x86-gas";
-      continue;
-    }
-    if (strcmp(argv[i], "-arm64") == 0)
-    {
-      target_arch = ARCH_ARM64;
-      chancecode_backend = NULL;
-      continue;
-    }
-    if (strcmp(argv[i], "-bslash") == 0)
-    {
-      target_arch = ARCH_BSLASH;
-      chancecode_backend = "bslash";
-      continue;
-    }
-    if (strcmp(argv[i], "-m32") == 0)
-    {
-      m32 = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "-m64") == 0)
-    {
-      m32 = 0;
-      continue;
-    }
-    if (strcmp(argv[i], "--target-os") == 0 && i + 1 < argc)
-    {
-      const char *os = argv[++i];
-      if (strcmp(os, "windows") == 0)
-        target_os = OS_WINDOWS;
-      else if (strcmp(os, "linux") == 0)
-        target_os = OS_LINUX;
-      else if (strcmp(os, "macos") == 0)
-        target_os = OS_MACOS;
-      else
-      {
-        fprintf(stderr,
-                "Unknown --target-os '%s' (use windows|linux|macos)\n", os);
-        return 2;
-      }
-      continue;
-    }
-    if (strcmp(argv[i], "-I") == 0 && i + 1 < argc)
-    {
-      chance_add_include_dir(&include_dirs, &include_dir_count, argv[++i]);
-      continue;
-    }
-    if (strcmp(argv[i], "-Nno-formatting") == 0)
-    {
-      parser_set_disable_formatting_notes(1);
-      continue;
-    }
-    if (strcmp(argv[i], "-vd") == 0 || strcmp(argv[i], "--verbose-deep") == 0)
-    {
-      compiler_verbose_set_mode(1);
-      compiler_verbose_set_deep(1);
-      toolchain_debug_mode = 1;
-      toolchain_debug_deep = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--debug") == 0)
-    {
-      toolchain_debug_mode = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0)
-    {
-      compiler_verbose_set_mode(1);
-      continue;
-    }
-    if (strcmp(argv[i], "--no-ansi") == 0)
-    {
-      diag_set_use_ansi(0);
-      verbose_use_ansi = 0;
-      compiler_verbose_set_use_ansi(0);
-      continue;
-    }
-    if (strcmp(argv[i], "--data-log") == 0)
-    {
-      diag_set_data_log(1);
-      diag_set_use_ansi(0);
-      verbose_use_ansi = 0;
-      compiler_verbose_set_use_ansi(0);
-      continue;
-    }
-    if (strcmp(argv[i], "--request-ast") == 0)
-    {
-      request_ast = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "--diagnostics-only") == 0 || strcmp(argv[i], "--diag-only") == 0)
-    {
-      diagnostics_only = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "--override-file") == 0)
-    {
-      if (i + 1 >= argc)
-      {
-        fprintf(stderr, "error: --override-file expects <original>=<override>\n");
-        return 2;
-      }
-      const char *spec = argv[++i];
-      if (add_override_file(spec, cwd, &override_files, &override_file_count,
-                            &override_file_cap) != 0)
-      {
-        fprintf(stderr, "error: invalid --override-file '%s'\n", spec);
-        return 2;
-      }
-      continue;
-    }
-    if (strncmp(argv[i], "--override-file=", 16) == 0)
-    {
-      const char *spec = argv[i] + 16;
-      if (add_override_file(spec, cwd, &override_files, &override_file_count,
-                            &override_file_cap) != 0)
-      {
-        fprintf(stderr, "error: invalid --override-file '%s'\n", spec);
-        return 2;
-      }
-      continue;
-    }
-    if (strcmp(argv[i], "--implicit-voidp") == 0)
-    {
-      implicit_voidp = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "--implicit-void-function") == 0)
-    {
-      implicit_void_function = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "--implicit-sizeof") == 0)
-    {
-      implicit_sizeof = 1;
-      continue;
-    }
-    if (strcmp(argv[i], "-H26") == 0)
-    {
-      language_standard = CHANCE_STD_H26;
-      continue;
-    }
-    if (strcmp(argv[i], "-H27") == 0)
-    {
-      language_standard = CHANCE_STD_H27;
-      continue;
-    }
-    if (strncmp(argv[i], "-sr:", 4) == 0)
-    {
-      const char *sr_path = argv[i] + 4;
-      if (!sr_path || !*sr_path)
-      {
-        fprintf(stderr,
-                "error: -sr: requires a .ce or .cclib path immediately following\n");
-        return 2;
-      }
-      if (ends_with_icase(sr_path, ".ce"))
-      {
-        if (symbol_ref_ce_count == symbol_ref_ce_cap)
-        {
-          symbol_ref_ce_cap = symbol_ref_ce_cap ? symbol_ref_ce_cap * 2 : 4;
-          symbol_ref_ce_inputs = (const char **)realloc(
-              (void *)symbol_ref_ce_inputs,
-              sizeof(char *) * (size_t)symbol_ref_ce_cap);
-        }
-        symbol_ref_ce_inputs[symbol_ref_ce_count++] = sr_path;
-      }
-      else if (ends_with_icase(sr_path, ".cclib"))
-      {
-        if (symbol_ref_cclib_count == symbol_ref_cclib_cap)
-        {
-          symbol_ref_cclib_cap = symbol_ref_cclib_cap ? symbol_ref_cclib_cap * 2 : 4;
-          symbol_ref_cclib_inputs = (const char **)realloc(
-              (void *)symbol_ref_cclib_inputs,
-              sizeof(char *) * (size_t)symbol_ref_cclib_cap);
-        }
-        symbol_ref_cclib_inputs[symbol_ref_cclib_count++] = sr_path;
-      }
-      else
-      {
-        fprintf(stderr,
-                "error: -sr: path '%s' must be a .ce or .cclib file\n",
-                sr_path);
-        return 2;
-      }
-      continue;
-    }
-    if (argv[i][0] == '-')
-    {
-      usage(argv[0]);
-      return 2;
-    }
-    // classify input
-    const char *arg = argv[i];
-    if (ends_with_icase(arg, ".ceproj"))
-    {
-      ProjectInputList ce_list = {&ce_inputs, &ce_count,
-                                  &ce_cap, &owned_ce_inputs,
-                                  &owned_ce_count, &owned_ce_cap,
-                                  &ce_obj_outputs};
-      ProjectInputList ccb_list = {&ccb_inputs, &ccb_count,
-                                   &ccb_cap, &owned_ccb_inputs,
-                                   &owned_ccb_count, &owned_ccb_cap,
-                                   NULL};
-      ProjectInputList cclib_list = {&cclib_inputs, &cclib_count,
-                                     &cclib_cap, &owned_cclib_inputs,
-                                     &owned_cclib_count, &owned_cclib_cap,
-                                     NULL};
-      ProjectInputList obj_list = {&obj_inputs, &obj_count,
-                                   &obj_cap, &owned_obj_inputs,
-                                   &owned_obj_count, &owned_obj_cap,
-                                   NULL};
-        ProjectInputList asm_list = {&asm_inputs, &asm_count,
-                       &asm_cap, &owned_asm_inputs,
-                       &owned_asm_count, &owned_asm_cap,
-                       NULL};
-      int freestanding_before = freestanding;
-      int perr = parse_ceproj_file(
-          arg, ce_list, ccb_list, cclib_list, obj_list, asm_list,
-          &include_dirs,
-          &include_dir_count, &output_overridden, &out, &project_output_alloc,
-          &target_arch, &chancecode_backend, &stop_after_ccb, &stop_after_asm,
-          &emit_library, &no_link, &freestanding, &target_os,
-          &freestanding_requested, &m32, &opt_level, &debug_symbols,
-          &strip_metadata, &strip_hard, &obfuscate, &asm_syntax,
-            &chancecodec_cmd_override, &chs_cmd_override,
-            &host_cc_cmd_override, &obj_override,
-              &implicit_voidp, &implicit_void_function, &implicit_sizeof, &request_ast,
-          &language_standard,
-          &diagnostics_only, &toolchain_debug_mode, &toolchain_debug_deep,
-          &override_files, &override_file_count, &override_file_cap,
-          (ProjectInputList){&symbol_ref_ce_inputs, &symbol_ref_ce_count,
-                   &symbol_ref_ce_cap, &owned_ce_inputs,
-                   &owned_ce_count, &owned_ce_cap, NULL},
-          (ProjectInputList){&symbol_ref_cclib_inputs,
-                   &symbol_ref_cclib_count,
-                             &symbol_ref_cclib_cap, &owned_cclib_inputs,
-                             &owned_cclib_count, &owned_cclib_cap, NULL},
-          &project_after_cmd);
-      if (perr != 0)
-        return 2;
-      if (!freestanding_requested && !freestanding_before && freestanding)
-        freestanding_requested = 1;
-      continue;
-    }
-    if (ends_with_icase(arg, ".ce"))
-    {
-      if (push_input_entry(arg, ce_cli_list, 0) != 0)
-        goto fail;
-      pending_ce_output_index = -1;
-    }
-    else if (ends_with_icase(arg, ".ccb"))
-    {
-      if (ccb_count == ccb_cap)
-      {
-        ccb_cap = ccb_cap ? ccb_cap * 2 : 8;
-        ccb_inputs = (const char **)realloc((void *)ccb_inputs,
-                                            sizeof(char *) * ccb_cap);
-      }
-      ccb_inputs[ccb_count++] = arg;
-    }
-    else if (ends_with_icase(arg, ".cclib"))
-    {
-      if (cclib_count == cclib_cap)
-      {
-        cclib_cap = cclib_cap ? cclib_cap * 2 : 4;
-        cclib_inputs = (const char **)realloc((void *)cclib_inputs,
-                                              sizeof(char *) * cclib_cap);
-      }
-      cclib_inputs[cclib_count++] = arg;
-    }
-    else if (ends_with_icase(arg, ".o") || ends_with_icase(arg, ".obj"))
-    {
-      if (obj_count == obj_cap)
-      {
-        obj_cap = obj_cap ? obj_cap * 2 : 8;
-        obj_inputs = (const char **)realloc((void *)obj_inputs,
-                                            sizeof(char *) * obj_cap);
-      }
-      obj_inputs[obj_count++] = arg;
-    }
-    else
-    {
-      fprintf(stderr,
-              "error: unknown input type '%s' (expected .ce or .o/.obj)\n",
-              arg);
-      return 2;
-    }
-  }
-  if (pending_output)
-  {
-    if (no_link)
-      obj_override = pending_output;
-    else
-      out = pending_output;
-  }
-  if (strip_metadata)
-    debug_symbols = 0;
-  if (stop_after_asm && stop_after_ccb)
-  {
-    fprintf(stderr, "error: -S and -Sccb cannot be used together\n");
+  int options_rc = parse_driver_options_argv(argc, argv, &options_state);
+  if (options_rc == 1)
+    return 0;
+  if (options_rc == 2)
     return 2;
-  }
-  if (stop_after_asm && target_arch == ARCH_NONE && !request_ast && !diagnostics_only)
-  {
-    fprintf(stderr, "error: -S requires a backend selection (e.g., -x86 or -arm64)\n");
-    return 2;
-  }
-  if (!emit_library && target_arch == ARCH_NONE && !request_ast && !diagnostics_only)
-  {
-    if (!stop_after_ccb)
-    {
-      fprintf(stderr, "error: selecting a backend (e.g., -x86 or -arm64) is required "
-                      "unless stopping at bytecode with -Sccb\n");
-      return 2;
-    }
-    if (no_link)
-    {
-      fprintf(stderr, "error: -c/--no-link is incompatible with -Sccb (no "
-                      "object emission when stopping at bytecode)\n");
-      return 2;
-    }
-    if (obj_count > 0 || ccb_count > 0 || asm_count > 0)
-    {
-      fprintf(stderr, "error: providing .ccb/.o/.obj inputs requires selecting "
-                      "a backend (e.g., -x86 or -arm64)\n");
-      return 2;
-    }
-  }
-  if (ce_count == 0 && obj_count == 0 && ccb_count == 0 && asm_count == 0)
-  {
-    usage(argv[0]);
-    return 2;
-  }
-  if (emit_library)
-  {
-    if (stop_after_asm)
-    {
-      fprintf(stderr, "error: --library cannot be combined with -S\n");
-      return 2;
-    }
-    if (stop_after_ccb)
-    {
-      fprintf(stderr, "error: --library already stops after bytecode output\n");
-      return 2;
-    }
-    if (no_link)
-    {
-      fprintf(stderr, "error: --library is incompatible with -c/--no-link\n");
-      return 2;
-    }
-    if (target_arch != ARCH_NONE)
-    {
-      fprintf(stderr, "error: --library cannot be combined with backend "
-                      "selection (e.g., -x86 or -arm64)\n");
-      return 2;
-    }
-    if (ccb_count > 0 || obj_count > 0 || asm_count > 0 || cclib_count > 0)
-    {
-      fprintf(stderr, "error: --library currently only accepts .ce inputs\n");
-      return 2;
-    }
-    if (ce_count == 0)
-    {
-      fprintf(stderr, "error: --library requires at least one .ce input\n");
-      return 2;
-    }
-    if (!output_overridden)
-    {
-      out = "a.cclib";
-    }
-    if (!ends_with_icase(out, ".cclib"))
-    {
-      fprintf(stderr, "error: --library output must end with .cclib\n");
-      return 2;
-    }
-  }
-  if (m32)
-  {
-    fprintf(stderr, "Error: -m32 not implemented yet\n");
-    return 2;
-  }
-  if (language_standard == CHANCE_STD_H26 && implicit_void_function)
-  {
-    fprintf(stderr,
-            "error: --implicit-void-function is only available in H27 mode\n");
-    return 2;
-  }
+  if (options_rc != 0)
+    goto fail;
+  driver_verbose_set_use_ansi(verbose_use_ansi);
 
-  char host_cc_override_buf[1024] = {0};
-  const char *host_cc_cmd_to_use = "cc";
-  int host_cc_has_override = 0;
-  if (host_cc_cmd_override && *host_cc_cmd_override)
-  {
-    strip_wrapping_quotes(host_cc_cmd_override, host_cc_override_buf,
-                          sizeof(host_cc_override_buf));
-    if (!host_cc_override_buf[0])
-    {
-      fprintf(stderr, "error: --cc path is empty after trimming quotes/whitespace\n");
-      return 2;
-    }
-    host_cc_cmd_to_use = host_cc_override_buf;
-    host_cc_has_override = 1;
-  }
+  DriverValidationState validation_state = {
+      .prog_name = argv[0],
+      .out = &out,
+      .output_overridden = &output_overridden,
+      .stop_after_asm = &stop_after_asm,
+      .stop_after_ccb = &stop_after_ccb,
+      .no_link = &no_link,
+      .emit_library = &emit_library,
+      .freestanding = &freestanding,
+      .m32 = &m32,
+      .debug_symbols = &debug_symbols,
+      .strip_metadata = &strip_metadata,
+      .implicit_void_function = &implicit_void_function,
+      .language_standard = &language_standard,
+      .request_ast = &request_ast,
+      .diagnostics_only = &diagnostics_only,
+      .target_arch = &target_arch,
+      .ce_count = &ce_count,
+      .ccb_count = &ccb_count,
+      .cclib_count = &cclib_count,
+      .obj_count = &obj_count,
+      .asm_count = &asm_count,
+  };
+  if (validate_driver_options(&validation_state) != 0)
+    return 2;
 
-  char chancecodec_exec_buf[1024] = {0};
-  char chancecodec_override_buf[1024] = {0};
-  const char *chancecodec_cmd_to_use = NULL;
-  int chancecodec_uses_fallback = 0;
-  int chancecodec_has_override = 0;
-  int needs_chancecodec = (target_arch != ARCH_NONE) || emit_library;
-  if (needs_chancecodec)
-  {
-    if (chancecodec_cmd_override && *chancecodec_cmd_override)
-    {
-      strip_wrapping_quotes(chancecodec_cmd_override, chancecodec_override_buf,
-                            sizeof(chancecodec_override_buf));
-      if (!chancecodec_override_buf[0])
-      {
-        fprintf(stderr, "error: --chancecodec path is empty after trimming "
-                        "quotes/whitespace\n");
-        return 2;
-      }
-      chancecodec_cmd_to_use = chancecodec_override_buf;
-      chancecodec_has_override = 1;
-    }
-    else if (locate_chancecodec(chancecodec_exec_buf,
-                                sizeof(chancecodec_exec_buf), exe_dir) == 0 &&
-             chancecodec_exec_buf[0])
-    {
-      chancecodec_cmd_to_use = chancecodec_exec_buf;
-    }
-    else
-    {
-      chancecodec_cmd_to_use = default_chancecodec_name;
-      chancecodec_uses_fallback = 1;
-    }
-  }
+  DriverToolchainInputs toolchain_inputs = {
+      .exe_dir = exe_dir,
+      .host_cc_cmd_override = host_cc_cmd_override,
+      .chancecodec_cmd_override = chancecodec_cmd_override,
+      .chs_cmd_override = chs_cmd_override,
+      .target_arch = target_arch,
+      .target_os = target_os,
+      .emit_library = emit_library,
+      .stop_after_ccb = stop_after_ccb,
+      .stop_after_asm = stop_after_asm,
+  };
+  DriverToolchainSelection toolchain = {0};
+  int toolchain_rc = resolve_driver_toolchain(&toolchain_inputs, &toolchain);
+  if (toolchain_rc != 0)
+    return toolchain_rc;
 
-  char chs_exec_buf[1024] = {0};
-  char chs_override_buf[1024] = {0};
-  const char *chs_cmd_to_use = NULL;
-  int chs_uses_fallback = 0;
-  int chs_has_override = 0;
-  int needs_chs = !emit_library && !stop_after_ccb && !stop_after_asm &&
-                  (target_arch == ARCH_ARM64 || target_arch == ARCH_BSLASH);
-  if (needs_chs)
-  {
-    if (chs_cmd_override && *chs_cmd_override)
-    {
-      strip_wrapping_quotes(chs_cmd_override, chs_override_buf,
-                            sizeof(chs_override_buf));
-      if (!chs_override_buf[0])
-      {
-        fprintf(stderr,
-                "error: --chs path is empty after trimming quotes/whitespace\n");
-        return 2;
-      }
-      chs_cmd_to_use = chs_override_buf;
-      chs_has_override = 1;
-    }
-    else if (locate_chs(chs_exec_buf, sizeof(chs_exec_buf), exe_dir) == 0 &&
-             chs_exec_buf[0])
-    {
-      chs_cmd_to_use = chs_exec_buf;
-    }
-    else
-    {
-      chs_cmd_to_use = default_chs_name;
-      chs_uses_fallback = 1;
-    }
-  }
+  const char *host_cc_cmd_to_use = toolchain.host_cc_cmd_to_use;
+  int host_cc_has_override = toolchain.host_cc_has_override;
 
-  char cld_exec_buf[1024] = {0};
-  const char *cld_cmd_to_use = NULL;
-  int cld_uses_fallback = 0;
-  const char *cld_target_to_use = cld_target_name_for_link(target_arch, target_os);
-  int cld_supported_link_target = cld_target_to_use && *cld_target_to_use;
-  if (!emit_library && cld_supported_link_target)
-  {
-    if (locate_cld(cld_exec_buf, sizeof(cld_exec_buf), exe_dir) == 0 &&
-        cld_exec_buf[0])
-    {
-      cld_cmd_to_use = cld_exec_buf;
-    }
-    else
-    {
-      cld_cmd_to_use = default_cld_name;
-      cld_uses_fallback = 1;
-    }
-  }
+  const char *chancecodec_cmd_to_use = toolchain.chancecodec_cmd_to_use;
+  int chancecodec_uses_fallback = toolchain.chancecodec_uses_fallback;
+  int chancecodec_has_override = toolchain.chancecodec_has_override;
+  int needs_chancecodec = toolchain.needs_chancecodec;
+
+  const char *chs_cmd_to_use = toolchain.chs_cmd_to_use;
+  int chs_uses_fallback = toolchain.chs_uses_fallback;
+  int chs_has_override = toolchain.chs_has_override;
+  int needs_chs = toolchain.needs_chs;
+
+  const char *cld_cmd_to_use = toolchain.cld_cmd_to_use;
+  int cld_uses_fallback = toolchain.cld_uses_fallback;
+  const char *cld_target_to_use = toolchain.cld_target_to_use;
+  int cld_supported_link_target = toolchain.cld_supported_link_target;
 
 #ifndef DEFAULT_STDLIB
 #define DEFAULT_STDLIB ""
@@ -5656,65 +3568,22 @@ int main(int argc, char **argv)
 #define DEFAULT_RUNTIME ""
 #endif
 
-  if (!no_link)
-  {
-    if (!freestanding_requested)
-    {
-      char stdlib_path[1024];
-      if (!locate_cclib_path(exe_dir, "stdlib", "stdlib.cclib", DEFAULT_STDLIB,
-                             stdlib_path, sizeof(stdlib_path)))
-      {
-        (void)locate_cclib_path(exe_dir, "src/stdlib", "stdlib.cclib",
-                                DEFAULT_STDLIB, stdlib_path,
-                                sizeof(stdlib_path));
-      }
-
-      if (stdlib_path[0] && is_regular_file(stdlib_path))
-      {
-        ProjectInputList cclib_list = {&cclib_inputs, &cclib_count, &cclib_cap,
-                                       &owned_cclib_inputs, &owned_cclib_count,
-                                       &owned_cclib_cap, NULL};
-        if (push_input_entry(stdlib_path, cclib_list, 1) != 0)
-          goto fail;
-      }
-      else
-      {
-        freestanding = 1;
-        fprintf(stderr,
-                "warning: stdlib not found at '%s'; enabling freestanding (--nostdlib)\n",
-                stdlib_path[0] ? stdlib_path : "<unknown>");
-      }
-    }
-
-    if (!freestanding)
-    {
-      char runtime_path[1024];
-      if (!locate_cclib_path(exe_dir, "runtime", "runtime.cclib",
-                             DEFAULT_RUNTIME, runtime_path,
-                             sizeof(runtime_path)))
-      {
-        (void)locate_cclib_path(exe_dir, "stdlib", "runtime.cclib",
-                                DEFAULT_RUNTIME, runtime_path,
-                                sizeof(runtime_path));
-      }
-
-      if (runtime_path[0] && is_regular_file(runtime_path))
-      {
-        ProjectInputList cclib_list = {&cclib_inputs, &cclib_count, &cclib_cap,
-                                       &owned_cclib_inputs, &owned_cclib_count,
-                                       &owned_cclib_cap, NULL};
-        if (push_input_entry(runtime_path, cclib_list, 1) != 0)
-          goto fail;
-      }
-      else
-      {
-        fprintf(stderr,
-                "error: runtime.cclib not found at '%s'\n",
-                runtime_path[0] ? runtime_path : "<unknown>");
-        goto fail;
-      }
-    }
-  }
+  DriverRuntimeLibState runtime_libs = {
+      .exe_dir = exe_dir,
+      .no_link = no_link,
+      .freestanding_requested = &freestanding_requested,
+      .freestanding = &freestanding,
+      .default_stdlib_path = DEFAULT_STDLIB,
+      .default_runtime_path = DEFAULT_RUNTIME,
+      .cclib_inputs = &cclib_inputs,
+      .cclib_count = &cclib_count,
+      .cclib_cap = &cclib_cap,
+      .owned_cclib_inputs = &owned_cclib_inputs,
+      .owned_cclib_count = &owned_cclib_count,
+      .owned_cclib_cap = &owned_cclib_cap,
+  };
+  if (maybe_inject_default_runtime_libs(&runtime_libs) != 0)
+    goto fail;
 
   if (compiler_verbose_enabled())
   {
@@ -5728,89 +3597,25 @@ int main(int argc, char **argv)
                          chancecode_backend, chancecodec_uses_fallback,
                          compiler_verbose_enabled(),
                          compiler_verbose_deep_enabled());
-    if (include_dir_count > 0)
-    {
-      verbose_section("Include Directories");
-      for (int idx = 0; idx < include_dir_count; ++idx)
-      {
-        char label[32];
-        snprintf(label, sizeof(label), "dir[%d]", idx);
-        verbose_table_row(label,
-                          (include_dirs && include_dirs[idx])
-                              ? include_dirs[idx]
-                              : "(null)");
-      }
-    }
-    if (ce_count > 0 && ce_inputs)
-    {
-      verbose_section("CE Inputs");
-      for (int idx = 0; idx < ce_count; ++idx)
-      {
-        char label[32];
-        snprintf(label, sizeof(label), "ce[%d]", idx);
-        verbose_table_row(label, ce_inputs[idx]);
-      }
-    }
-    if (symbol_ref_ce_count > 0 && symbol_ref_ce_inputs)
-    {
-      verbose_section("Symbol-ref CE Inputs");
-      for (int idx = 0; idx < symbol_ref_ce_count; ++idx)
-      {
-        char label[32];
-        snprintf(label, sizeof(label), "sr-ce[%d]", idx);
-        verbose_table_row(label, symbol_ref_ce_inputs[idx]);
-      }
-    }
-    if (ccb_count > 0 && ccb_inputs)
-    {
-      verbose_section("CCB Inputs");
-      for (int idx = 0; idx < ccb_count; ++idx)
-      {
-        char label[32];
-        snprintf(label, sizeof(label), "ccb[%d]", idx);
-        verbose_table_row(label, ccb_inputs[idx]);
-      }
-    }
-    if (cclib_count > 0 && cclib_inputs)
-    {
-      verbose_section("CCLib Inputs");
-      for (int idx = 0; idx < cclib_count; ++idx)
-      {
-        char label[32];
-        snprintf(label, sizeof(label), "cclib[%d]", idx);
-        verbose_table_row(label, cclib_inputs[idx]);
-      }
-    }
-    if (symbol_ref_cclib_count > 0 && symbol_ref_cclib_inputs)
-    {
-      verbose_section("Symbol-ref CCLib Inputs");
-      for (int idx = 0; idx < symbol_ref_cclib_count; ++idx)
-      {
-        char label[32];
-        snprintf(label, sizeof(label), "sr-cclib[%d]", idx);
-        verbose_table_row(label, symbol_ref_cclib_inputs[idx]);
-      }
-    }
-    if (obj_count > 0 && obj_inputs)
-    {
-      verbose_section("Object Inputs");
-      for (int idx = 0; idx < obj_count; ++idx)
-      {
-        char label[32];
-        snprintf(label, sizeof(label), "obj[%d]", idx);
-        verbose_table_row(label, obj_inputs[idx]);
-      }
-    }
-    if (asm_count > 0 && asm_inputs)
-    {
-      verbose_section("Assembly Inputs");
-      for (int idx = 0; idx < asm_count; ++idx)
-      {
-        char label[32];
-        snprintf(label, sizeof(label), "asm[%d]", idx);
-        verbose_table_row(label, asm_inputs[idx]);
-      }
-    }
+    DriverVerboseInputsState verbose_inputs = {
+        .include_dir_count = include_dir_count,
+        .include_dirs = include_dirs,
+        .ce_count = ce_count,
+        .ce_inputs = ce_inputs,
+        .symbol_ref_ce_count = symbol_ref_ce_count,
+        .symbol_ref_ce_inputs = symbol_ref_ce_inputs,
+        .ccb_count = ccb_count,
+        .ccb_inputs = ccb_inputs,
+        .cclib_count = cclib_count,
+        .cclib_inputs = cclib_inputs,
+        .symbol_ref_cclib_count = symbol_ref_cclib_count,
+        .symbol_ref_cclib_inputs = symbol_ref_cclib_inputs,
+        .obj_count = obj_count,
+        .obj_inputs = obj_inputs,
+        .asm_count = asm_count,
+        .asm_inputs = asm_inputs,
+    };
+    driver_verbose_print_inputs(&verbose_inputs);
   }
   // Allow multiple inputs: if linking to an executable (no -c) with multiple
   // .ce and/or .o, we will compile .ce to temporary objects and link them
@@ -6382,120 +4187,30 @@ int main(int argc, char **argv)
         }
       }
 
-      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 || target_arch == ARCH_BSLASH) &&
-          !stop_after_ccb)
+      if (!rc && is_codegen_target(target_arch) && !stop_after_ccb)
       {
-        const char *backend = chancecode_backend;
-        if (!backend)
-        {
-          if (target_arch == ARCH_X86)
-            backend = "x86-gas";
-          else if (target_arch == ARCH_ARM64)
-            backend = arm64_backend_name_for_os(target_os);
-          else
-            backend = "bslash";
-        }
-        const char *target_os_option = NULL;
-        if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
-          target_os_option = target_os_to_option(target_os);
-        if (target_arch == ARCH_ARM64)
-        {
-          int os_invalid = (!target_os_option ||
-                            (strcmp(target_os_option, "macos") != 0 &&
-                             strcmp(target_os_option, "linux") != 0 &&
-                             strcmp(target_os_option, "windows") != 0));
-          if (os_invalid)
-          {
-            fprintf(stderr,
-                    "arm64 backend requires --target-os macos, linux, or windows (current target-os is '%s')\n",
-                    target_os_option ? target_os_option : "<unset>");
-            rc = 1;
-          }
-          else if (!backend)
-          {
-            fprintf(stderr,
-                    "arm64 backend unavailable for target-os '%s'\n",
-                    target_os_option);
-            rc = 1;
-          }
-        }
-        if (rc)
-          break;
-        if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
-        {
-          fprintf(stderr,
-                  "internal error: ChanceCode CLI command unresolved\n");
-          rc = 1;
-        }
-        else
-        {
-          char display_cmd[4096];
-          build_chancecodec_display_cmd(display_cmd, sizeof(display_cmd),
-                                        chancecodec_cmd_to_use, backend,
-                                        opt_level, strip_metadata,
-                                        strip_hard, obfuscate,
-                                        strip_map_ready ? strip_map_path
-                                                        : NULL,
-                                        debug_symbols,
-                                        toolchain_debug_mode,
-                                        toolchain_debug_deep,
-                                        target_os_option, asm_path, ccb_path);
-
-          int spawn_errno = 0;
-          int chance_rc = run_chancecodec_process(
-              chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
-              strip_hard, obfuscate,
-              strip_map_ready ? strip_map_path : NULL,
-              debug_symbols, asm_path, ccb_path,
-              toolchain_debug_mode, toolchain_debug_deep,
-              target_os_option, &spawn_errno);
-          if (chance_rc != 0)
-          {
-            if (chance_rc < 0)
-            {
-              fprintf(stderr, "failed to launch chancecodec '%s': %s\n",
-                      chancecodec_cmd_to_use, strerror(spawn_errno));
-            }
-            else
-            {
-              fprintf(stderr, "chancecodec failed (rc=%d): %s\n", chance_rc,
-                      display_cmd);
-            }
-            if (!chancecodec_has_override && chancecodec_uses_fallback)
-            {
-              fprintf(stderr,
-                      "hint: use --chancecodec <path> or set CHANCECODEC_CMD "
-                      "to point at the ChanceCode CLI executable\n");
-            }
-            rc = 1;
-          }
-        }
+        rc = run_codegen_backend_step(
+            chancecodec_cmd_to_use, chancecodec_has_override,
+            chancecodec_uses_fallback, chancecode_backend,
+            target_arch, target_os, opt_level, strip_metadata,
+            strip_hard, obfuscate,
+            strip_map_ready ? strip_map_path : NULL,
+            debug_symbols, toolchain_debug_mode,
+            toolchain_debug_deep, asm_path, ccb_path);
       }
 
-        if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
-              target_arch == ARCH_BSLASH) &&
-          !stop_after_ccb &&
-          !stop_after_asm)
+      if (!rc && is_codegen_target(target_arch) &&
+          !stop_after_ccb && !stop_after_asm)
       {
-        if (!need_obj)
-        {
-          fprintf(stderr,
-                  "internal error: object output expected but path missing\n");
-          rc = 1;
-        }
-        else
-        {
-          rc = assemble_to_object(host_cc_cmd_to_use, chs_cmd_to_use,
-                                  chs_has_override, chs_uses_fallback,
-                                  target_arch, target_os, asm_path, objOut,
-                                  toolchain_debug_mode,
-                                  toolchain_debug_deep,
-                                  debug_symbols, freestanding, opt_level);
-        }
+        rc = run_codegen_assembly_step(
+            host_cc_cmd_to_use, chs_cmd_to_use,
+            chs_has_override, chs_uses_fallback,
+            target_arch, target_os, asm_path, objOut, need_obj,
+            toolchain_debug_mode, toolchain_debug_deep,
+            debug_symbols, freestanding, opt_level);
       }
 
-      if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
-                  target_arch == ARCH_BSLASH))
+      if (!rc && is_codegen_target(target_arch))
       {
         if (!stop_after_ccb && ccb_is_temp)
           remove(ccb_path);
@@ -6503,25 +4218,21 @@ int main(int argc, char **argv)
           remove(asm_path);
       }
 
-        if (!rc && (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
-              target_arch == ARCH_BSLASH) &&
-          !stop_after_ccb &&
-          !stop_after_asm && !no_link && !multi_link)
+      if (!rc && is_codegen_target(target_arch) &&
+          !stop_after_ccb && !stop_after_asm)
       {
-        snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
-        have_single_obj = 1;
-        single_obj_is_temp = obj_is_temp;
+        maybe_capture_single_obj(no_link, multi_link, objOut, obj_is_temp,
+                                 single_obj_path,
+                                 sizeof(single_obj_path),
+                                 &have_single_obj,
+                                 &single_obj_is_temp);
       }
 
-      if (!rc && ((no_link && obj_override) || multi_link) &&
-          objOut[0] != '\0')
+      if (!rc)
       {
-        if (to_cnt == to_cap)
-        {
-          to_cap = to_cap ? to_cap * 2 : 8;
-          temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
-        }
-        temp_objs[to_cnt++] = xstrdup(objOut);
+        if (maybe_track_output_obj(no_link, obj_override, multi_link, objOut,
+                                   &temp_objs, &to_cnt, &to_cap) != 0)
+          rc = 1;
       }
     }
     else
@@ -6639,141 +4350,54 @@ int main(int argc, char **argv)
         }
       }
 
-      if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
-           target_arch == ARCH_BSLASH) &&
-          !stop_after_ccb)
+      if (is_codegen_target(target_arch) && !stop_after_ccb)
       {
-        const char *backend = chancecode_backend;
-        if (!backend)
-        {
-          if (target_arch == ARCH_X86)
-            backend = "x86-gas";
-          else if (target_arch == ARCH_ARM64)
-            backend = arm64_backend_name_for_os(target_os);
-          else
-            backend = "bslash";
-        }
-        const char *target_os_option = NULL;
-        if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
-          target_os_option = target_os_to_option(target_os);
-        if (target_arch == ARCH_ARM64)
-        {
-          int os_invalid = (!target_os_option ||
-                            (strcmp(target_os_option, "macos") != 0 &&
-                             strcmp(target_os_option, "linux") != 0 &&
-                             strcmp(target_os_option, "windows") != 0));
-          if (os_invalid)
-          {
-            fprintf(stderr,
-                    "arm64 backend requires --target-os macos, linux, or windows (current target-os is '%s')\n",
-                    target_os_option ? target_os_option : "<unset>");
-            rc = 1;
-            break;
-          }
-          if (!backend)
-          {
-            fprintf(stderr,
-                    "arm64 backend unavailable for target-os '%s'\n",
-                    target_os_option);
-            rc = 1;
-            break;
-          }
-        }
-        if (!chancecodec_cmd_to_use || !*chancecodec_cmd_to_use)
-        {
-          fprintf(stderr,
-                  "internal error: ChanceCode CLI command unresolved\n");
-          rc = 1;
-          break;
-        }
-        char display_cmd[4096];
-        build_chancecodec_display_cmd(display_cmd, sizeof(display_cmd),
-                                      chancecodec_cmd_to_use, backend,
-                                      opt_level, strip_metadata,
-                                      strip_hard, obfuscate,
-                                      strip_map_ready ? strip_map_path : NULL,
-                                      debug_symbols,
-                                      toolchain_debug_mode,
-                                      toolchain_debug_deep,
-                                      target_os_option, asm_path, ccb_path);
-
-        int spawn_errno = 0;
-        int chance_rc = run_chancecodec_process(
-            chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
+        rc = run_codegen_backend_step(
+            chancecodec_cmd_to_use, chancecodec_has_override,
+            chancecodec_uses_fallback, chancecode_backend,
+            target_arch, target_os, opt_level, strip_metadata,
             strip_hard, obfuscate,
-            strip_map_ready ? strip_map_path : NULL, debug_symbols,
-          asm_path, ccb_path, toolchain_debug_mode, toolchain_debug_deep,
-          target_os_option, &spawn_errno);
-        if (chance_rc != 0)
-        {
-          if (chance_rc < 0)
-          {
-            fprintf(stderr, "failed to launch chancecodec '%s': %s\n",
-                    chancecodec_cmd_to_use, strerror(spawn_errno));
-          }
-          else
-          {
-            fprintf(stderr, "chancecodec failed (rc=%d): %s\n", chance_rc,
-                    display_cmd);
-          }
-          if (!chancecodec_has_override && chancecodec_uses_fallback)
-          {
-            fprintf(stderr,
-                    "hint: use --chancecodec <path> or set CHANCECODEC_CMD to "
-                    "point at the ChanceCode CLI executable\n");
-          }
-          rc = 1;
+            strip_map_ready ? strip_map_path : NULL,
+            debug_symbols, toolchain_debug_mode,
+            toolchain_debug_deep, asm_path, ccb_path);
+        if (rc)
           break;
-        }
       }
 
-       if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
-         target_arch == ARCH_BSLASH) &&
+      if (is_codegen_target(target_arch) &&
           !stop_after_ccb && !stop_after_asm)
       {
-        if (!need_obj)
-        {
-          fprintf(stderr,
-                  "internal error: object output expected but path missing\n");
-          rc = 1;
-          break;
-        }
-
-        rc = assemble_to_object(host_cc_cmd_to_use, chs_cmd_to_use,
-                                chs_has_override, chs_uses_fallback,
-                                target_arch, target_os, asm_path, objOut,
-                                toolchain_debug_mode,
-                                toolchain_debug_deep,
-                                debug_symbols, freestanding, opt_level);
+        rc = run_codegen_assembly_step(
+            host_cc_cmd_to_use, chs_cmd_to_use,
+            chs_has_override, chs_uses_fallback,
+            target_arch, target_os, asm_path, objOut, need_obj,
+            toolchain_debug_mode, toolchain_debug_deep,
+            debug_symbols, freestanding, opt_level);
         if (rc != 0)
           break;
       }
 
-      if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
-          target_arch == ARCH_BSLASH)
+      if (is_codegen_target(target_arch))
       {
         if (!stop_after_asm)
           remove(asm_path);
       }
 
-       if ((target_arch == ARCH_X86 || target_arch == ARCH_ARM64 ||
-         target_arch == ARCH_BSLASH) &&
-          !stop_after_ccb && !stop_after_asm &&
-          !no_link && !multi_link)
+      if (is_codegen_target(target_arch) &&
+          !stop_after_ccb && !stop_after_asm)
       {
-        snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
-        have_single_obj = 1;
-        single_obj_is_temp = obj_is_temp;
+        maybe_capture_single_obj(no_link, multi_link, objOut, obj_is_temp,
+                                 single_obj_path,
+                                 sizeof(single_obj_path),
+                                 &have_single_obj,
+                                 &single_obj_is_temp);
       }
 
-      if (((no_link && obj_override) || multi_link) && objOut[0] != '\0')
+      if (maybe_track_output_obj(no_link, obj_override, multi_link, objOut,
+                                 &temp_objs, &to_cnt, &to_cap) != 0)
       {
-        if (to_cnt == to_cap)
-        {
-          to_cap = to_cap ? to_cap * 2 : 8;
-          temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
-        }
-        temp_objs[to_cnt++] = xstrdup(objOut);
+        rc = 1;
+        break;
       }
     }
   }
@@ -6842,30 +4466,24 @@ int main(int argc, char **argv)
         obj_is_temp = 1;
       }
 
-      rc = assemble_to_object(host_cc_cmd_to_use, chs_cmd_to_use,
-                              chs_has_override, chs_uses_fallback,
-                              target_arch, target_os, asm_input, objOut,
-                              toolchain_debug_mode,
-                              toolchain_debug_deep,
-                              debug_symbols, freestanding, opt_level);
+      rc = run_codegen_assembly_step(
+          host_cc_cmd_to_use, chs_cmd_to_use,
+          chs_has_override, chs_uses_fallback,
+          target_arch, target_os, asm_input, objOut, 1,
+          toolchain_debug_mode, toolchain_debug_deep,
+          debug_symbols, freestanding, opt_level);
       if (rc != 0)
         break;
 
-      if (!no_link && !multi_link)
-      {
-        snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
-        have_single_obj = 1;
-        single_obj_is_temp = obj_is_temp;
-      }
+      maybe_capture_single_obj(no_link, multi_link, objOut, obj_is_temp,
+                               single_obj_path, sizeof(single_obj_path),
+                               &have_single_obj, &single_obj_is_temp);
 
-      if ((no_link && obj_override) || multi_link)
+      if (maybe_track_output_obj(no_link, obj_override, multi_link, objOut,
+                                 &temp_objs, &to_cnt, &to_cap) != 0)
       {
-        if (to_cnt == to_cap)
-        {
-          to_cap = to_cap ? to_cap * 2 : 8;
-          temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
-        }
-        temp_objs[to_cnt++] = xstrdup(objOut);
+        rc = 1;
+        break;
       }
     }
   }
@@ -6989,93 +4607,25 @@ int main(int argc, char **argv)
           }
         }
 
-        const char *backend = chancecode_backend;
-        if (!backend)
-        {
-          if (target_arch == ARCH_X86)
-            backend = "x86-gas";
-          else if (target_arch == ARCH_ARM64)
-            backend = arm64_backend_name_for_os(target_os);
-          else
-            backend = "bslash";
-        }
-        const char *target_os_option = NULL;
-        if (target_arch == ARCH_X86 || target_arch == ARCH_ARM64)
-          target_os_option = target_os_to_option(target_os);
-        if (target_arch == ARCH_ARM64)
-        {
-          int os_invalid = (!target_os_option ||
-                            (strcmp(target_os_option, "macos") != 0 &&
-                             strcmp(target_os_option, "linux") != 0 &&
-                             strcmp(target_os_option, "windows") != 0));
-          if (os_invalid)
-          {
-            fprintf(stderr,
-                    "arm64 backend requires --target-os macos, linux, or windows (current target-os is '%s')\n",
-                    target_os_option ? target_os_option : "<unset>");
-            rc = 1;
-            break;
-          }
-          if (!backend)
-          {
-            fprintf(stderr,
-                    "arm64 backend unavailable for target-os '%s'\n",
-                    target_os_option);
-            rc = 1;
-            break;
-          }
-        }
-        char display_cmd[4096];
-        build_chancecodec_display_cmd(display_cmd, sizeof(display_cmd),
-                                      chancecodec_cmd_to_use, backend,
-                                      opt_level, strip_metadata,
-                                      strip_hard, obfuscate,
-                                      strip_map_ready ? strip_map_path : NULL,
-                                      debug_symbols,
-                                      toolchain_debug_mode,
-                                      toolchain_debug_deep,
-                                      target_os_option, asm_path, ccbin_path);
-
-        int spawn_errno = 0;
-        int chance_rc = run_chancecodec_process(
-            chancecodec_cmd_to_use, backend, opt_level, strip_metadata,
+        rc = run_codegen_backend_step(
+            chancecodec_cmd_to_use, chancecodec_has_override,
+            chancecodec_uses_fallback, chancecode_backend,
+            target_arch, target_os, opt_level, strip_metadata,
             strip_hard, obfuscate,
-            strip_map_ready ? strip_map_path : NULL, debug_symbols,
-          asm_path, ccbin_path, toolchain_debug_mode, toolchain_debug_deep,
-          target_os_option, &spawn_errno);
-        if (chance_rc != 0)
-        {
-          if (chance_rc < 0)
-            fprintf(stderr, "failed to launch chancecodec '%s': %s\n",
-                    chancecodec_cmd_to_use, strerror(spawn_errno));
-          else
-            fprintf(stderr, "chancecodec failed (rc=%d): %s\n", chance_rc,
-                    display_cmd);
-          if (!chancecodec_has_override && chancecodec_uses_fallback)
-            fprintf(stderr,
-                    "hint: use --chancecodec <path> or set CHANCECODEC_CMD to "
-                    "point at the ChanceCode CLI executable\n");
-          rc = 1;
+            strip_map_ready ? strip_map_path : NULL,
+            debug_symbols, toolchain_debug_mode,
+            toolchain_debug_deep, asm_path, ccbin_path);
+        if (rc)
           break;
-        }
 
         if (!stop_after_ccb && !stop_after_asm)
         {
-          if (!need_obj)
-          {
-            fprintf(
-                stderr,
-                "internal error: object output expected but path missing\n");
-            rc = 1;
-            break;
-          }
-
-          rc = assemble_to_object(host_cc_cmd_to_use, chs_cmd_to_use,
-                                  chs_has_override, chs_uses_fallback,
-                                  target_arch, target_os, asm_path, objOut,
-                                  toolchain_debug_mode,
-                                  toolchain_debug_deep,
-                                  debug_symbols, freestanding, opt_level);
+          rc = run_codegen_assembly_step(
+              host_cc_cmd_to_use, chs_cmd_to_use,
+              chs_has_override, chs_uses_fallback,
+              target_arch, target_os, asm_path, objOut, need_obj,
+              toolchain_debug_mode, toolchain_debug_deep,
+              debug_symbols, freestanding, opt_level);
           if (rc != 0)
             break;
         }
@@ -7083,21 +4633,20 @@ int main(int argc, char **argv)
         if (!stop_after_asm)
           remove(asm_path);
 
-        if (!stop_after_ccb && !stop_after_asm && !no_link && !multi_link)
+        if (!stop_after_ccb && !stop_after_asm)
         {
-          snprintf(single_obj_path, sizeof(single_obj_path), "%s", objOut);
-          have_single_obj = 1;
-          single_obj_is_temp = obj_is_temp;
+          maybe_capture_single_obj(no_link, multi_link, objOut, obj_is_temp,
+                                   single_obj_path,
+                                   sizeof(single_obj_path),
+                                   &have_single_obj,
+                                   &single_obj_is_temp);
         }
 
-        if (((no_link && obj_override) || multi_link) && objOut[0] != '\0')
+        if (maybe_track_output_obj(no_link, obj_override, multi_link, objOut,
+                                   &temp_objs, &to_cnt, &to_cap) != 0)
         {
-          if (to_cnt == to_cap)
-          {
-            to_cap = to_cap ? to_cap * 2 : 8;
-            temp_objs = (char **)realloc(temp_objs, sizeof(char *) * to_cap);
-          }
-          temp_objs[to_cnt++] = xstrdup(objOut);
+          rc = 1;
+          break;
         }
 
         remove(ccbin_path);
@@ -7138,197 +4687,32 @@ int main(int argc, char **argv)
     goto cleanup;
   }
 
-  if (!rc && multi_link)
+  if (!rc)
   {
-    if (cld_supported_link_target)
-    {
-      int input_count = to_cnt + obj_count;
-      const char **link_inputs =
-          (const char **)xcalloc((size_t)input_count, sizeof(const char *));
-      if (!link_inputs)
-      {
-        fprintf(stderr, "error: out of memory allocating linker inputs\n");
-        rc = 1;
-      }
-      else
-      {
-        int input_index = 0;
-        for (int i = 0; i < to_cnt; ++i)
-          link_inputs[input_index++] = temp_objs[i];
-        for (int i = 0; i < obj_count; ++i)
-          link_inputs[input_index++] = obj_inputs[i];
-        if (compiler_verbose_enabled())
-        {
-          verbose_section("Linking executable");
-          verbose_table_row("Linker", cld_cmd_to_use);
-          verbose_table_row("Target", cld_target_to_use);
-        }
-        int spawn_errno = 0;
-        int lrc = run_cld_link_process(cld_cmd_to_use, cld_target_to_use,
-                                       "executable", out, freestanding,
-                                       link_inputs, input_count,
-                                       toolchain_debug_mode,
-                                       toolchain_debug_deep,
-                                       &spawn_errno);
-        free(link_inputs);
-        if (lrc != 0)
-        {
-          if (lrc < 0)
-          {
-            fprintf(stderr, "failed to launch cld '%s': %s\n",
-                    cld_cmd_to_use, strerror(spawn_errno));
-            if (cld_uses_fallback)
-              fprintf(stderr, "hint: install cld or set CLD_CMD to point at the CLD executable\n");
-          }
-          else
-          {
-            fprintf(stderr, "cld link failed (rc=%d)\n", lrc);
-          }
-          rc = 1;
-        }
-        else
-        {
-          maybe_generate_dsym(out, debug_symbols, target_os);
-        }
-      }
-    }
-    else
-    {
-      fprintf(stderr,
-              "error: self-hosted linking is required; no CLD target is available for this build/target\n");
-      fprintf(stderr,
-              "hint: use a CLD-supported target or extend CLD for this architecture/object format\n");
-      rc = 1;
-    }
-    // cleanup temp objects
-    for (int i = 0; i < to_cnt; ++i)
-    {
-      remove(temp_objs[i]);
-      free(temp_objs[i]);
-    }
-    free(temp_objs);
-    temp_objs = NULL;
-    to_cnt = 0;
-    to_cap = 0;
-  }
-  if (!rc && have_single_obj)
-  {
-    if (cld_supported_link_target)
-    {
-      const char *link_inputs[1] = {single_obj_path};
-      if (compiler_verbose_enabled())
-      {
-        verbose_section("Linking single object");
-        verbose_table_row("Linker", cld_cmd_to_use);
-        verbose_table_row("Target", cld_target_to_use);
-      }
-      int spawn_errno = 0;
-      int lrc = run_cld_link_process(cld_cmd_to_use, cld_target_to_use,
-                                     "executable", out, freestanding,
-                                     link_inputs, 1,
-                                     toolchain_debug_mode,
-                                     toolchain_debug_deep,
-                                     &spawn_errno);
-      if (lrc != 0)
-      {
-        if (lrc < 0)
-        {
-          fprintf(stderr, "failed to launch cld '%s': %s\n", cld_cmd_to_use,
-                  strerror(spawn_errno));
-          if (cld_uses_fallback)
-            fprintf(stderr, "hint: install cld or set CLD_CMD to point at the CLD executable\n");
-        }
-        else
-        {
-          fprintf(stderr, "cld link failed (rc=%d)\n", lrc);
-        }
-        rc = 1;
-      }
-      else
-      {
-        maybe_generate_dsym(out, debug_symbols, target_os);
-      }
-    }
-    else
-    {
-      fprintf(stderr,
-              "error: self-hosted linking is required; no CLD target is available for this build/target\n");
-      fprintf(stderr,
-              "hint: use a CLD-supported target or extend CLD for this architecture/object format\n");
-      rc = 1;
-    }
-    if (single_obj_is_temp)
-      remove(single_obj_path);
-  }
-  if (!rc && no_link && obj_override)
-  {
-    if (cld_supported_link_target)
-    {
-      int input_count = to_cnt + obj_count;
-      const char **link_inputs =
-          (const char **)xcalloc((size_t)input_count, sizeof(const char *));
-      if (!link_inputs)
-      {
-        fprintf(stderr, "error: out of memory allocating linker inputs\n");
-        rc = 1;
-      }
-      else
-      {
-        int input_index = 0;
-        for (int i = 0; i < to_cnt; ++i)
-          link_inputs[input_index++] = temp_objs[i];
-        for (int i = 0; i < obj_count; ++i)
-          link_inputs[input_index++] = obj_inputs[i];
-        if (compiler_verbose_enabled())
-        {
-          verbose_section("Merging objects");
-          verbose_table_row("Linker", cld_cmd_to_use);
-          verbose_table_row("Target", cld_target_to_use);
-        }
-        int spawn_errno = 0;
-        int lrc = run_cld_link_process(cld_cmd_to_use, cld_target_to_use,
-                                       "relocatable", obj_override,
-                                       freestanding, link_inputs,
-                                       input_count,
-                                       toolchain_debug_mode,
-                                       toolchain_debug_deep,
-                                       &spawn_errno);
-        free(link_inputs);
-        if (lrc != 0)
-        {
-          if (lrc < 0)
-          {
-            fprintf(stderr, "failed to launch cld '%s': %s\n",
-                    cld_cmd_to_use, strerror(spawn_errno));
-            if (cld_uses_fallback)
-              fprintf(stderr, "hint: install cld or set CLD_CMD to point at the CLD executable\n");
-          }
-          else
-          {
-            fprintf(stderr, "cld relocatable link failed (rc=%d)\n", lrc);
-          }
-          rc = 1;
-        }
-      }
-    }
-    else
-    {
-      fprintf(stderr,
-              "error: self-hosted relocatable linking is required; no CLD target is available for this build/target\n");
-      fprintf(stderr,
-              "hint: use a CLD-supported target or extend CLD relocatable output for this architecture/object format\n");
-      rc = 1;
-    }
-    // cleanup temp objects
-    for (int i = 0; i < to_cnt; ++i)
-    {
-      remove(temp_objs[i]);
-      free(temp_objs[i]);
-    }
-    free(temp_objs);
-    temp_objs = NULL;
-    to_cnt = 0;
-    to_cap = 0;
+    DriverLinkPhaseState link_state = {
+        .multi_link = multi_link,
+        .have_single_obj = have_single_obj,
+        .single_obj_is_temp = single_obj_is_temp,
+        .no_link = no_link,
+        .obj_override = obj_override,
+        .cld_supported_link_target = cld_supported_link_target,
+        .cld_cmd_to_use = cld_cmd_to_use,
+        .cld_target_to_use = cld_target_to_use,
+        .cld_uses_fallback = cld_uses_fallback,
+        .freestanding = freestanding,
+        .toolchain_debug_mode = toolchain_debug_mode,
+        .toolchain_debug_deep = toolchain_debug_deep,
+        .debug_symbols = debug_symbols,
+        .target_os = target_os,
+        .out = out,
+        .obj_inputs = obj_inputs,
+        .obj_count = obj_count,
+        .single_obj_path = single_obj_path,
+        .temp_objs = &temp_objs,
+        .to_cnt = &to_cnt,
+        .to_cap = &to_cap,
+    };
+    rc = run_driver_link_phase(&link_state);
   }
 cleanup:
   if (!rc && project_after_cmd && project_after_cmd[0])
