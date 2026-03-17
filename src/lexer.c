@@ -1,5 +1,6 @@
 #include "ast.h"
 #include <ctype.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -389,7 +390,8 @@ static Token lex_number(Lexer *lx)
             Token t = make_tok(lx, TK_INT, lx->src.src + start, len);
             t.int_val = any ? (int64_t)v : 0;
             t.int_uval = any ? v : 0;
-            t.int_is_unsigned = saw_suffix_u;
+            /* C-like rule: unsuffixed non-decimal literals may become unsigned. */
+            t.int_is_unsigned = saw_suffix_u || (!saw_suffix_l && base != 10 && any && v > (uint64_t)INT32_MAX);
             t.int_width = saw_suffix_l > 0 ? 64 : 0;
             return t;
         }

@@ -67,6 +67,8 @@ static int sema_check_function(SemaContext *sc, Node *fn);
 static void sema_ensure_call_args_checked(SemaContext *sc, Node *call_expr, int *args_checked);
 static const Symbol *sema_resolve_local_overload(SemaContext *sc, const char *name, Node *call_expr, int *args_checked);
 
+static Type ty_u64;
+
 static Type *canonicalize_type_deep(Type *ty)
 {
     ty = module_registry_canonical_type(ty);
@@ -119,6 +121,66 @@ static Type *make_function_type_from_sig(const FuncSig *sig)
     fn_ty->func.is_varargs = sig->is_varargs;
     fn_ty->func.has_signature = 1;
     return fn_ty;
+}
+
+static Type *sema_runtime_helper_signature(const char *name)
+{
+    if (!name)
+        return NULL;
+
+    Type *fn_ty = type_func();
+    fn_ty->func.is_varargs = 0;
+    fn_ty->func.has_signature = 1;
+
+    if (strcmp(name, "__cert__exception_enter_try") == 0 ||
+        strcmp(name, "__cert__exception_leave_try") == 0 ||
+        strcmp(name, "__cert__exception_clear") == 0 ||
+        strcmp(name, "__cert__exception_propagate") == 0)
+    {
+        fn_ty->func.param_count = 0;
+        fn_ty->func.params = NULL;
+        fn_ty->func.ret = type_void();
+        return fn_ty;
+    }
+
+    if (strcmp(name, "__cert__exception_has_pending") == 0 ||
+        strcmp(name, "__cert__exception_get_code") == 0)
+    {
+        fn_ty->func.param_count = 0;
+        fn_ty->func.params = NULL;
+        fn_ty->func.ret = type_i32();
+        return fn_ty;
+    }
+
+    if (strcmp(name, "__cert__exception_get_line") == 0)
+    {
+        fn_ty->func.param_count = 0;
+        fn_ty->func.params = NULL;
+        fn_ty->func.ret = &ty_u64;
+        return fn_ty;
+    }
+
+    if (strcmp(name, "__cert__exception_get_category") == 0 ||
+        strcmp(name, "__cert__exception_get_message") == 0 ||
+        strcmp(name, "__cert__exception_get_file") == 0 ||
+        strcmp(name, "__cert__exception_get_symbol") == 0)
+    {
+        fn_ty->func.param_count = 0;
+        fn_ty->func.params = NULL;
+        fn_ty->func.ret = type_ptr(type_char());
+        return fn_ty;
+    }
+
+    if (strcmp(name, "__cert__exception_matches_type") == 0)
+    {
+        fn_ty->func.param_count = 1;
+        fn_ty->func.params = (Type **)xcalloc(1, sizeof(Type *));
+        fn_ty->func.params[0] = type_ptr(type_char());
+        fn_ty->func.ret = type_i32();
+        return fn_ty;
+    }
+
+    return NULL;
 }
 
 struct SymTable
@@ -5452,6 +5514,16 @@ static void check_expr(SemaContext *sc, Node *e)
             const Symbol *overload = sema_resolve_local_overload(sc, resolved_name, e, &args_checked);
             if (overload)
                 direct_sym = overload;
+        }
+
+        if (!func_sig && !direct_sym && resolved_name)
+        {
+            Type *runtime_sig = sema_runtime_helper_signature(resolved_name);
+            if (runtime_sig)
+            {
+                func_sig = runtime_sig;
+                call_is_indirect = 0;
+            }
         }
 
         if (!func_sig && direct_sym && direct_sym->ast_node &&

@@ -12,6 +12,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool g_ccb_pointer_32bit = false;
+
+static CCValueType ccb_pointer_int_type(void)
+{
+    return g_ccb_pointer_32bit ? CC_TYPE_I32 : CC_TYPE_I64;
+}
+
+static size_t ccb_pointer_size_bytes(void)
+{
+    return g_ccb_pointer_32bit ? 4u : 8u;
+}
+
 typedef struct
 {
     char **items;
@@ -442,6 +454,7 @@ static int ccb_emit_expr_basic(CcbFunctionBuilder *fb, const Node *expr);
 static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt);
 static int ccb_emit_stmt_basic(CcbFunctionBuilder *fb, const Node *stmt);
 static int ccb_emit_active_try_pending_branch(CcbFunctionBuilder *fb);
+static bool ccb_node_contains_return(const Node *node);
 static void ccb_make_label(CcbFunctionBuilder *fb, char *buffer, size_t bufsz, const char *prefix);
 static bool ccb_emit_load_indirect(StringList *body, CCValueType ty);
 static bool ccb_emit_store_indirect(StringList *body, CCValueType ty);
@@ -567,6 +580,21 @@ static void ccb_module_free(CcbModule *mod)
     mod->emit_debug = false;
 }
 
+static const char *ccb_label_with_varargs_suffix(const char *base, bool is_varargs,
+                                                  char *buffer, size_t bufsz)
+{
+    if (!base || !*base)
+        return base;
+    if (!is_varargs)
+        return base;
+    if (!buffer || bufsz == 0)
+        return base;
+    int written = snprintf(buffer, bufsz, "%s_varargs", base);
+    if (written <= 0 || (size_t)written >= bufsz)
+        return base;
+    return buffer;
+}
+
 static const char *ccb_effective_function_name(const Node *fn)
 {
     if (!fn || !fn->name)
@@ -574,7 +602,20 @@ static const char *ccb_effective_function_name(const Node *fn)
     const char *backend = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
     if (fn->export_name && !fn->raw_export_name)
         backend = fn->name;
-    return backend;
+    static char varargs_name[1024];
+    return ccb_label_with_varargs_suffix(backend, fn->is_varargs, varargs_name, sizeof(varargs_name));
+}
+
+static bool ccb_name_has_varargs_suffix(const char *name)
+{
+    static const char suffix[] = "_varargs";
+    if (!name)
+        return false;
+    size_t nlen = strlen(name);
+    size_t slen = sizeof(suffix) - 1;
+    if (nlen < slen)
+        return false;
+    return strcmp(name + (nlen - slen), suffix) == 0;
 }
 
 static void ccb_module_collect_defined_functions(CcbModule *mod, const Node *unit)
@@ -637,6 +678,29 @@ static CcbEntrypointShimKind ccb_entrypoint_shim_kind(const Node *fn, const Code
     }
 
     return CCB_ENTRY_SHIM_NONE;
+}
+
+static bool ccb_node_contains_return(const Node *node)
+{
+    if (!node)
+        return false;
+    if (node->kind == ND_RET)
+        return true;
+    if (node->lhs && ccb_node_contains_return(node->lhs))
+        return true;
+    if (node->rhs && ccb_node_contains_return(node->rhs))
+        return true;
+    if (node->body && ccb_node_contains_return(node->body))
+        return true;
+    if (node->stmts)
+    {
+        for (int i = 0; i < node->stmt_count; ++i)
+        {
+            if (node->stmts[i] && ccb_node_contains_return(node->stmts[i]))
+                return true;
+        }
+    }
+    return false;
 }
 
 static bool ccb_append_entrypoint_result_as_i32(StringList *body, CCValueType ret_ty)
@@ -798,7 +862,10 @@ static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym)
     if (!mod || !sym)
         return true;
 
-    const char *symbol_name = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
+    const char *symbol_name_base = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
+    char symbol_name_buf[1024];
+    const char *symbol_name = ccb_label_with_varargs_suffix(symbol_name_base, sym->sig.is_varargs,
+                                                             symbol_name_buf, sizeof(symbol_name_buf));
     if (!symbol_name || !*symbol_name)
         return true;
 
@@ -907,7 +974,10 @@ static int ccb_emit_symbol_list(CcbModule *mod, const Symbol *syms, int count, S
             continue;
         if (ccb_symbol_is_embedded_force_inline_literal(sym))
             continue;
-        const char *symbol_name = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
+        const char *symbol_name_base = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
+        char symbol_name_buf[1024];
+        const char *symbol_name = ccb_label_with_varargs_suffix(symbol_name_base, sym->sig.is_varargs,
+                                                                 symbol_name_buf, sizeof(symbol_name_buf));
         if (!symbol_name || !*symbol_name)
             continue;
         if (string_list_contains(emitted, symbol_name))
@@ -6630,8 +6700,9 @@ static size_t ccb_type_size_bytes(const Type *ty)
     case TY_I64:
     case TY_U64:
     case TY_F64:
-    case TY_PTR:
         return 8;
+    case TY_PTR:
+        return ccb_pointer_size_bytes();
     case TY_F128:
         return 16;
     case TY_STRUCT:
@@ -6682,6 +6753,7 @@ static int ccb_emit_pointer_add_like(CcbFunctionBuilder *fb, const Node *expr, b
     }
 
     size_t elem_size = ccb_pointer_elem_size(ptr_type);
+    CCValueType ptr_int_ty = ccb_pointer_int_type();
 
     CcbLocal *lhs_local = ccb_local_add(fb, NULL, lhs_type, false, false);
     if (!lhs_local)
@@ -6711,27 +6783,27 @@ static int ccb_emit_pointer_add_like(CcbFunctionBuilder *fb, const Node *expr, b
 
     if (!ccb_emit_load_local(fb, ptr_local))
         return 1;
-    if (ccb_emit_convert_between(fb, ptr_local->value_type, CC_TYPE_I64, ptr_node))
+    if (ccb_emit_convert_between(fb, ptr_local->value_type, ptr_int_ty, ptr_node))
         return 1;
 
     if (!ccb_emit_load_local(fb, idx_local))
         return 1;
-    if (ccb_emit_convert_between(fb, idx_local->value_type, CC_TYPE_I64, idx_node))
+    if (ccb_emit_convert_between(fb, idx_local->value_type, ptr_int_ty, idx_node))
         return 1;
 
     if (elem_size > 1)
     {
-        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+        if (!ccb_emit_const(&fb->body, ptr_int_ty, (int64_t)elem_size))
             return 1;
-        if (!string_list_appendf(&fb->body, "  binop mul %s", cc_type_name(CC_TYPE_I64)))
+        if (!string_list_appendf(&fb->body, "  binop mul %s", cc_type_name(ptr_int_ty)))
             return 1;
     }
 
     const char *op = is_add ? "add" : "sub";
-    if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(CC_TYPE_I64)))
+    if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(ptr_int_ty)))
         return 1;
 
-    if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+    if (ccb_emit_convert_between(fb, ptr_int_ty, CC_TYPE_PTR, expr))
         return 1;
 
     return 0;
@@ -6754,6 +6826,7 @@ static int ccb_emit_pointer_difference(CcbFunctionBuilder *fb, const Node *expr)
     }
 
     size_t elem_size = ccb_pointer_elem_size(lhs_type);
+    CCValueType ptr_int_ty = ccb_pointer_int_type();
 
     CcbLocal *lhs_local = ccb_local_add(fb, NULL, lhs_type, false, false);
     if (!lhs_local)
@@ -6773,22 +6846,22 @@ static int ccb_emit_pointer_difference(CcbFunctionBuilder *fb, const Node *expr)
 
     if (!ccb_emit_load_local(fb, lhs_local))
         return 1;
-    if (ccb_emit_convert_between(fb, lhs_local->value_type, CC_TYPE_I64, lhs))
+    if (ccb_emit_convert_between(fb, lhs_local->value_type, ptr_int_ty, lhs))
         return 1;
 
     if (!ccb_emit_load_local(fb, rhs_local))
         return 1;
-    if (ccb_emit_convert_between(fb, rhs_local->value_type, CC_TYPE_I64, rhs))
+    if (ccb_emit_convert_between(fb, rhs_local->value_type, ptr_int_ty, rhs))
         return 1;
 
-    if (!string_list_appendf(&fb->body, "  binop sub %s", cc_type_name(CC_TYPE_I64)))
+    if (!string_list_appendf(&fb->body, "  binop sub %s", cc_type_name(ptr_int_ty)))
         return 1;
 
     if (elem_size > 1)
     {
-        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+        if (!ccb_emit_const(&fb->body, ptr_int_ty, (int64_t)elem_size))
             return 1;
-        if (!string_list_appendf(&fb->body, "  binop div %s", cc_type_name(CC_TYPE_I64)))
+        if (!string_list_appendf(&fb->body, "  binop div %s", cc_type_name(ptr_int_ty)))
             return 1;
     }
 
@@ -7150,7 +7223,9 @@ static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
         return 1;
     }
 
-    if (ccb_emit_convert_between(fb, base_ty, CC_TYPE_I64, base))
+    CCValueType ptr_int_ty = ccb_pointer_int_type();
+
+    if (ccb_emit_convert_between(fb, base_ty, ptr_int_ty, base))
         return 1;
 
     if (ccb_emit_expr_basic(fb, index))
@@ -7164,7 +7239,7 @@ static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
         return 1;
     }
 
-    if (ccb_emit_convert_between(fb, idx_ty, CC_TYPE_I64, index))
+    if (ccb_emit_convert_between(fb, idx_ty, ptr_int_ty, index))
         return 1;
 
     const Type *elem_type = NULL;
@@ -7188,16 +7263,16 @@ static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
 
     if (elem_size > 1)
     {
-        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+        if (!ccb_emit_const(&fb->body, ptr_int_ty, (int64_t)elem_size))
             return 1;
-        if (!string_list_appendf(&fb->body, "  binop mul %s", cc_type_name(CC_TYPE_I64)))
+        if (!string_list_appendf(&fb->body, "  binop mul %s", cc_type_name(ptr_int_ty)))
             return 1;
     }
 
-    if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
+    if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(ptr_int_ty)))
         return 1;
 
-    if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+    if (ccb_emit_convert_between(fb, ptr_int_ty, CC_TYPE_PTR, expr))
         return 1;
 
     if (out_elem_ty)
@@ -7298,13 +7373,14 @@ static int ccb_emit_member_address(CcbFunctionBuilder *fb, const Node *expr, CCV
 
     if (field_offset != 0)
     {
-        if (ccb_emit_convert_between(fb, CC_TYPE_PTR, CC_TYPE_I64, expr))
+        CCValueType ptr_int_ty = ccb_pointer_int_type();
+        if (ccb_emit_convert_between(fb, CC_TYPE_PTR, ptr_int_ty, expr))
             return 1;
-        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)field_offset))
+        if (!ccb_emit_const(&fb->body, ptr_int_ty, (int64_t)field_offset))
             return 1;
-        if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
+        if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(ptr_int_ty)))
             return 1;
-        if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+        if (ccb_emit_convert_between(fb, ptr_int_ty, CC_TYPE_PTR, expr))
             return 1;
     }
 
@@ -7866,13 +7942,14 @@ static int ccb_emit_pointer_offset(CcbFunctionBuilder *fb, int offset, const Nod
         return 1;
     if (offset == 0)
         return 0;
-    if (ccb_emit_convert_between(fb, CC_TYPE_PTR, CC_TYPE_I64, node))
+    CCValueType ptr_int_ty = ccb_pointer_int_type();
+    if (ccb_emit_convert_between(fb, CC_TYPE_PTR, ptr_int_ty, node))
         return 1;
-    if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)offset))
+    if (!ccb_emit_const(&fb->body, ptr_int_ty, (int64_t)offset))
         return 1;
-    if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
+    if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(ptr_int_ty)))
         return 1;
-    if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, node))
+    if (ccb_emit_convert_between(fb, ptr_int_ty, CC_TYPE_PTR, node))
         return 1;
     return 0;
 }
@@ -8978,6 +9055,10 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
             }
             else
             {
+                char direct_name_buf[1024];
+                if (call_is_varargs && !ccb_name_has_varargs_suffix(direct_name))
+                    direct_name = ccb_label_with_varargs_suffix(direct_name, true,
+                                                                direct_name_buf, sizeof(direct_name_buf));
                 const char *suffix = call_is_varargs ? " varargs" : "";
                 if (!string_list_appendf(&fb->body, "  call %s %s %s%s", direct_name, ret_name, arg_text, suffix))
                     rc = 1;
@@ -9424,16 +9505,23 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
         size_t size_bytes = ccb_value_type_size(val_ty);
         if (size_bytes == 0)
-            size_bytes = sizeof(void *);
+            size_bytes = 4;
         if (size_bytes < 1)
             size_bytes = 1;
 
-        // align pointer up to size_bytes
-        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)(size_bytes - 1)))
+        // CCB varargs are materialized as 32-bit parameter slots on BSlash.
+        // Keep va_arg slot walking in that ABI domain so ptr/u32 consume one slot.
+        const size_t slot_size = 4;
+        const size_t align_bytes = slot_size;
+        if (val_ty == CC_TYPE_PTR)
+            size_bytes = slot_size;
+
+        // align pointer up to ABI slot size
+        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)(align_bytes - 1)))
             return 1;
         if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
             return 1;
-        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)(~((int64_t)size_bytes - 1))))
+        if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)(~((int64_t)align_bytes - 1))))
             return 1;
         if (!string_list_appendf(&fb->body, "  binop and %s", cc_type_name(CC_TYPE_I64)))
             return 1;
@@ -9462,9 +9550,6 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
 
         // add size constant
-        size_t slot_size = ccb_value_type_size(CC_TYPE_PTR);
-        if (slot_size == 0)
-            slot_size = sizeof(void *);
         size_t size_advance = size_bytes;
         if (size_advance == 0)
             size_advance = slot_size;
@@ -9609,13 +9694,14 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
             if (is_ptr)
             {
-                if (ccb_emit_convert_between(fb, elem_ty, CC_TYPE_I64, expr))
+                CCValueType ptr_int_ty = ccb_pointer_int_type();
+                if (ccb_emit_convert_between(fb, elem_ty, ptr_int_ty, expr))
                     return 1;
-                if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+                if (!ccb_emit_const(&fb->body, ptr_int_ty, (int64_t)elem_size))
                     return 1;
-                if (!string_list_appendf(&fb->body, "  binop %s i64", op))
+                if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(ptr_int_ty)))
                     return 1;
-                if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+                if (ccb_emit_convert_between(fb, ptr_int_ty, CC_TYPE_PTR, expr))
                     return 1;
             }
             else
@@ -9688,15 +9774,16 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
         if (is_ptr)
         {
+            CCValueType ptr_int_ty = ccb_pointer_int_type();
             if (!ccb_emit_load_local(fb, local))
                 return 1;
-            if (ccb_emit_convert_between(fb, val_ty, CC_TYPE_I64, expr))
+            if (ccb_emit_convert_between(fb, val_ty, ptr_int_ty, expr))
                 return 1;
-            if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+            if (!ccb_emit_const(&fb->body, ptr_int_ty, (int64_t)elem_size))
                 return 1;
-            if (!string_list_appendf(&fb->body, "  binop %s i64", op))
+            if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(ptr_int_ty)))
                 return 1;
-            if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+            if (ccb_emit_convert_between(fb, ptr_int_ty, CC_TYPE_PTR, expr))
                 return 1;
         }
         else
@@ -9770,13 +9857,14 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 return 1;
             if (is_ptr)
             {
-                if (ccb_emit_convert_between(fb, elem_ty, CC_TYPE_I64, expr))
+                CCValueType ptr_int_ty = ccb_pointer_int_type();
+                if (ccb_emit_convert_between(fb, elem_ty, ptr_int_ty, expr))
                     return 1;
-                if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+                if (!ccb_emit_const(&fb->body, ptr_int_ty, (int64_t)elem_size))
                     return 1;
-                if (!string_list_appendf(&fb->body, "  binop %s i64", op))
+                if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(ptr_int_ty)))
                     return 1;
-                if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+                if (ccb_emit_convert_between(fb, ptr_int_ty, CC_TYPE_PTR, expr))
                     return 1;
             }
             else
@@ -9876,13 +9964,14 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         if (is_ptr)
         {
-            if (ccb_emit_convert_between(fb, val_ty, CC_TYPE_I64, expr))
+            CCValueType ptr_int_ty = ccb_pointer_int_type();
+            if (ccb_emit_convert_between(fb, val_ty, ptr_int_ty, expr))
                 return 1;
-            if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)elem_size))
+            if (!ccb_emit_const(&fb->body, ptr_int_ty, (int64_t)elem_size))
                 return 1;
-            if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(CC_TYPE_I64)))
+            if (!string_list_appendf(&fb->body, "  binop %s %s", op, cc_type_name(ptr_int_ty)))
                 return 1;
-            if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
+            if (ccb_emit_convert_between(fb, ptr_int_ty, CC_TYPE_PTR, expr))
                 return 1;
         }
         else
@@ -10661,7 +10750,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             if (expr->var_is_global)
             {
                 int is_array_addr = expr->var_is_array ||
-                                    (expr->var_type && expr->var_type->kind == TY_ARRAY);
+                                    (expr->var_type && expr->var_type->kind == TY_ARRAY &&
+                                     !expr->var_type->array.is_unsized);
                 if (type_is_address_only(expr->type) || is_array_addr)
                 {
                     if (!ccb_emit_addr_global(&fb->body, expr->var_ref))
@@ -10890,6 +10980,13 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             if (ccb_emit_index_address(fb, target, &elem_ty, &elem_type))
                 return 1;
 
+            Type *addr_ptr_ty = type_ptr(elem_type ? (Type *)elem_type : (Type *)target->type);
+            CcbLocal *addr_local = ccb_local_add(fb, NULL, addr_ptr_ty, false, false);
+            if (!addr_local)
+                return 1;
+            if (!ccb_emit_store_local(fb, addr_local))
+                return 1;
+
             if (type_is_address_only(elem_type))
             {
                 Type *ptr_ty = type_ptr((Type *)elem_type);
@@ -10951,6 +11048,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
             if (!ccb_emit_store_local(fb, temp))
                 return 1;
+            if (!ccb_emit_load_local(fb, addr_local))
+                return 1;
             if (!ccb_emit_load_local(fb, temp))
                 return 1;
             if (!ccb_emit_store_indirect(&fb->body, elem_ty))
@@ -10973,6 +11072,13 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             CCValueType elem_ty = CC_TYPE_I32;
             const Type *elem_type = NULL;
             if (ccb_emit_deref_address(fb, target, &elem_ty, &elem_type))
+                return 1;
+
+            Type *addr_ptr_ty = type_ptr(elem_type ? (Type *)elem_type : (Type *)target->type);
+            CcbLocal *addr_local = ccb_local_add(fb, NULL, addr_ptr_ty, false, false);
+            if (!addr_local)
+                return 1;
+            if (!ccb_emit_store_local(fb, addr_local))
                 return 1;
 
             if (type_is_address_only(elem_type))
@@ -11036,6 +11142,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
             if (!ccb_emit_store_local(fb, temp))
                 return 1;
+            if (!ccb_emit_load_local(fb, addr_local))
+                return 1;
             if (!ccb_emit_load_local(fb, temp))
                 return 1;
             if (!ccb_emit_store_indirect(&fb->body, elem_ty))
@@ -11058,6 +11166,13 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             CCValueType field_ty = CC_TYPE_I32;
             const Type *field_type = NULL;
             if (ccb_emit_member_address(fb, target, &field_ty, &field_type))
+                return 1;
+
+            Type *addr_ptr_ty = type_ptr(field_type ? (Type *)field_type : (Type *)target->type);
+            CcbLocal *addr_local = ccb_local_add(fb, NULL, addr_ptr_ty, false, false);
+            if (!addr_local)
+                return 1;
+            if (!ccb_emit_store_local(fb, addr_local))
                 return 1;
 
             if (type_is_address_only(field_type))
@@ -11120,6 +11235,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             }
 
             if (!ccb_emit_store_local(fb, temp))
+                return 1;
+            if (!ccb_emit_load_local(fb, addr_local))
                 return 1;
             if (!ccb_emit_load_local(fb, temp))
                 return 1;
@@ -11646,6 +11763,25 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
             {
                 char catch_meta[128];
                 ccb_type_metadata_name(stmt->var_type, catch_meta, sizeof(catch_meta));
+
+                bool has_struct_fallback = false;
+                char catch_meta_exception[128];
+                char catch_meta_std_exception[128];
+                if (strncmp(catch_meta, "struct:", 7) == 0 && catch_meta[7] != '\0')
+                {
+                    has_struct_fallback = true;
+                    snprintf(catch_meta_exception, sizeof(catch_meta_exception), "Exception.%s", catch_meta + 7);
+                    snprintf(catch_meta_std_exception, sizeof(catch_meta_std_exception), "Std.Exception.%s", catch_meta + 7);
+                }
+
+                char catch_match_fallback_label[32];
+                char catch_match_fallback_end_label[32];
+                if (has_struct_fallback)
+                {
+                    ccb_make_label(fb, catch_match_fallback_label, sizeof(catch_match_fallback_label), "try_catch_match_fb");
+                    ccb_make_label(fb, catch_match_fallback_end_label, sizeof(catch_match_fallback_end_label), "try_catch_match_fb_end");
+                }
+
                 if (ccb_emit_const_str_lit(fb, catch_meta))
                     return 1;
                 if (!string_list_appendf(&fb->body, "  call __cert__exception_matches_type i32 (ptr)"))
@@ -11654,8 +11790,44 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
                     return 1;
                 if (!string_list_appendf(&fb->body, "  compare ne i32"))
                     return 1;
-                if (!string_list_appendf(&fb->body, "  branch %s %s", catch_match_label, uncaught_label))
-                    return 1;
+
+                if (has_struct_fallback)
+                {
+                    if (!string_list_appendf(&fb->body, "  branch %s %s", catch_match_label, catch_match_fallback_label))
+                        return 1;
+                    if (!string_list_appendf(&fb->body, "label %s", catch_match_fallback_label))
+                        return 1;
+
+                    if (ccb_emit_const_str_lit(fb, catch_meta_exception))
+                        return 1;
+                    if (!string_list_appendf(&fb->body, "  call __cert__exception_matches_type i32 (ptr)"))
+                        return 1;
+                    if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+                        return 1;
+                    if (!string_list_appendf(&fb->body, "  compare ne i32"))
+                        return 1;
+                    if (!string_list_appendf(&fb->body, "  branch %s %s", catch_match_label, catch_match_fallback_end_label))
+                        return 1;
+
+                    if (!string_list_appendf(&fb->body, "label %s", catch_match_fallback_end_label))
+                        return 1;
+                    if (ccb_emit_const_str_lit(fb, catch_meta_std_exception))
+                        return 1;
+                    if (!string_list_appendf(&fb->body, "  call __cert__exception_matches_type i32 (ptr)"))
+                        return 1;
+                    if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
+                        return 1;
+                    if (!string_list_appendf(&fb->body, "  compare ne i32"))
+                        return 1;
+                    if (!string_list_appendf(&fb->body, "  branch %s %s", catch_match_label, uncaught_label))
+                        return 1;
+                }
+                else
+                {
+                    if (!string_list_appendf(&fb->body, "  branch %s %s", catch_match_label, uncaught_label))
+                        return 1;
+                }
+
                 if (!string_list_appendf(&fb->body, "label %s", catch_match_label))
                     return 1;
             }
@@ -12584,9 +12756,12 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
     if (!mod || !fn || fn->kind != ND_FUNC || !fn->name)
         return 1;
 
-    const char *backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+    const char *backend_name_base = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
     if (fn->export_name && !fn->raw_export_name)
-        backend_name = fn->name;
+        backend_name_base = fn->name;
+    char backend_name_buf[1024];
+    const char *backend_name = ccb_label_with_varargs_suffix(backend_name_base, fn->is_varargs,
+                                                              backend_name_buf, sizeof(backend_name_buf));
     const char *ret_name = cc_type_name(map_type_to_cc(fn->ret_type));
     int declared_params = (fn->metadata.declared_param_count >= 0)
                               ? fn->metadata.declared_param_count
@@ -12680,7 +12855,7 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
             return 1;
     }
 
-    if (fn->is_noreturn)
+    if (fn->is_noreturn && !ccb_node_contains_return(fn->body))
     {
         if (!ccb_module_appendf(mod, ".no-return %s", backend_name))
             return 1;
@@ -12702,9 +12877,12 @@ static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const Codeg
         return 1;
     }
 
-    const char *backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+    const char *backend_name_base = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
     if (fn->export_name && !fn->raw_export_name)
-        backend_name = fn->name;
+        backend_name_base = fn->name;
+    char backend_name_buf[1024];
+    const char *backend_name = ccb_label_with_varargs_suffix(backend_name_base, fn->is_varargs,
+                                                              backend_name_buf, sizeof(backend_name_buf));
     const char *ret_name = cc_type_name(map_type_to_cc(fn->ret_type));
     int declared_params = (fn->metadata.declared_param_count >= 0)
                               ? fn->metadata.declared_param_count
@@ -12779,7 +12957,7 @@ static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const Codeg
             return 1;
     }
 
-    if (fn->is_noreturn)
+    if (fn->is_noreturn && !ccb_node_contains_return(fn->body))
     {
         if (!ccb_module_appendf(mod, ".no-return %s", backend_name))
             return 1;
@@ -12833,9 +13011,12 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         ccb_function_optimize(&fb, opts);
     if (!rc)
     {
-        const char *backend_name = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
+        const char *backend_name_base = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
         if (fn->export_name && !fn->raw_export_name)
-            backend_name = fn->name;
+            backend_name_base = fn->name;
+        char backend_name_buf[1024];
+        const char *backend_name = ccb_label_with_varargs_suffix(backend_name_base, fn->is_varargs,
+                                                                  backend_name_buf, sizeof(backend_name_buf));
 
         if (fn->metadata.func_line)
         {
@@ -12897,7 +13078,7 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
             }
         }
 
-        if (!rc && fn->is_noreturn)
+        if (!rc && fn->is_noreturn && !ccb_node_contains_return(fn->body))
         {
             if (!ccb_module_appendf(mod, ".no-return %s", backend_name))
                 rc = 1;
@@ -13018,8 +13199,9 @@ static size_t ccb_value_type_size(CCValueType ty)
     case CC_TYPE_I64:
     case CC_TYPE_U64:
     case CC_TYPE_F64:
-    case CC_TYPE_PTR:
         return 8;
+    case CC_TYPE_PTR:
+        return ccb_pointer_size_bytes();
     default:
         return 8;
     }
@@ -13828,6 +14010,7 @@ int codegen_ccb_write_module(const Node *unit, const CodegenOptions *opts)
 
     CcbModule mod;
     ccb_module_init(&mod);
+    g_ccb_pointer_32bit = (opts && opts->m32);
     if (opts)
         mod.emit_debug = opts->debug_symbols;
     CcbEntrypointShimKind hosted_entry_kind = CCB_ENTRY_SHIM_NONE;

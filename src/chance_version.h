@@ -7,7 +7,7 @@
 #define CHANCE_STRINGIFY(value) CHANCE_STRINGIFY_IMPL(value)
 
 #define CHANCEC_VERSION_MAJOR 2
-#define CHANCEC_VERSION_MINOR 2
+#define CHANCEC_VERSION_MINOR 5
 #define CHANCEC_VERSION_PATCH 0
 
 #define CHANCEC_VERSION_COMPACT                                        \

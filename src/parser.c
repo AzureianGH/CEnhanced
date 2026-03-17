@@ -1614,6 +1614,17 @@ static Node *parser_make_land(Parser *ps, Node *lhs, Node *rhs, int line, int co
     return n;
 }
 
+static Node *parser_make_lor(Parser *ps, Node *lhs, Node *rhs, int line, int col)
+{
+    Node *n = new_node(ND_LOR);
+    n->lhs = lhs;
+    n->rhs = rhs;
+    n->line = line;
+    n->col = col;
+    n->src = lexer_source(ps->lx);
+    return n;
+}
+
 static char *parser_catch_type_meta(Type *ty)
 {
     if (!ty)
@@ -1737,23 +1748,8 @@ static Node *parse_try_stmt(Parser *ps)
                 parser_try_append_stmt(clause_block, decl);
 
                 parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
-                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "symbol", try_tok.line, try_tok.col),
-                    parser_make_call0(ps, "__cert__exception_get_symbol", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
-                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
-                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "line", try_tok.line, try_tok.col),
-                    parser_make_call0(ps, "__cert__exception_get_line", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
-                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
-                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "file", try_tok.line, try_tok.col),
-                    parser_make_call0(ps, "__cert__exception_get_file", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
-                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
                     parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "message", try_tok.line, try_tok.col),
                     parser_make_call0(ps, "__cert__exception_get_message", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
-                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
-                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "category", try_tok.line, try_tok.col),
-                    parser_make_call0(ps, "__cert__exception_get_category", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
-                parser_try_append_stmt(clause_block, parser_make_assign_stmt(ps,
-                    parser_make_member(ps, parser_make_var_ref(ps, clause_name, try_tok.line, try_tok.col), "code", try_tok.line, try_tok.col),
-                    parser_make_call0(ps, "__cert__exception_get_code", try_tok.line, try_tok.col), try_tok.line, try_tok.col));
             }
 
             Node *mark_matched = parser_make_assign_stmt(
@@ -1787,6 +1783,39 @@ static Node *parse_try_stmt(Parser *ps)
             char *meta = parser_catch_type_meta(clause_type);
             Node *match_call = parser_make_call1(ps, "__cert__exception_matches_type", parser_make_string_lit(ps, meta, try_tok.line, try_tok.col), try_tok.line, try_tok.col);
             free(meta);
+
+            const char *catch_type_name = NULL;
+            if (clause_type)
+            {
+                if (clause_type->kind == TY_STRUCT && clause_type->struct_name && clause_type->struct_name[0] != '\0')
+                    catch_type_name = clause_type->struct_name;
+                else if (clause_type->kind == TY_IMPORT && clause_type->import_type_name && clause_type->import_type_name[0] != '\0')
+                    catch_type_name = clause_type->import_type_name;
+            }
+
+            if (catch_type_name)
+            {
+                char alias_exception[256];
+                char alias_std_exception[256];
+                snprintf(alias_exception, sizeof(alias_exception), "Exception.%s", catch_type_name);
+                snprintf(alias_std_exception, sizeof(alias_std_exception), "Std.Exception.%s", catch_type_name);
+
+                Node *alias_match_exception = parser_make_call1(
+                    ps,
+                    "__cert__exception_matches_type",
+                    parser_make_string_lit(ps, alias_exception, try_tok.line, try_tok.col),
+                    try_tok.line,
+                    try_tok.col);
+                Node *alias_match_std_exception = parser_make_call1(
+                    ps,
+                    "__cert__exception_matches_type",
+                    parser_make_string_lit(ps, alias_std_exception, try_tok.line, try_tok.col),
+                    try_tok.line,
+                    try_tok.col);
+
+                match_call = parser_make_lor(ps, match_call, alias_match_exception, try_tok.line, try_tok.col);
+                match_call = parser_make_lor(ps, match_call, alias_match_std_exception, try_tok.line, try_tok.col);
+            }
 
             Node *cond = match_call;
             cond = parser_make_land(ps,

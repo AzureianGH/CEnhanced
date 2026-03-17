@@ -4049,7 +4049,7 @@ int main(int argc, char **argv)
       Symbol *imported_global_syms = sema_copy_imported_global_symbols(sc, &imported_global_count);
 
       CodegenOptions co = {.freestanding = freestanding != 0,
-                           .m32 = m32 != 0,
+                           .m32 = (m32 != 0) || (target_arch == ARCH_BSLASH),
                            .debug_symbols = debug_symbols != 0,
                            .emit_asm = stop_after_asm != 0,
                            .no_link = (no_link || multi_link ||
