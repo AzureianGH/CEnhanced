@@ -10984,6 +10984,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             CcbLocal *addr_local = ccb_local_add(fb, NULL, addr_ptr_ty, false, false);
             if (!addr_local)
                 return 1;
+            ptrdiff_t addr_slot = addr_local ? (ptrdiff_t)(addr_local - fb->locals) : -1;
             if (!ccb_emit_store_local(fb, addr_local))
                 return 1;
 
@@ -10993,6 +10994,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 CcbLocal *dst_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
                 if (!dst_ptr)
                     return 1;
+                ptrdiff_t dst_slot = dst_ptr ? (ptrdiff_t)(dst_ptr - fb->locals) : -1;
                 if (!ccb_emit_store_local(fb, dst_ptr))
                     return 1;
 
@@ -11009,7 +11011,11 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 CcbLocal *src_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
                 if (!src_ptr)
                     return 1;
+                ptrdiff_t src_slot = src_ptr ? (ptrdiff_t)(src_ptr - fb->locals) : -1;
                 if (!ccb_emit_store_local(fb, src_ptr))
+                    return 1;
+
+                if (!ccb_struct_copy_refresh(fb, dst_slot, src_slot, &dst_ptr, &src_ptr))
                     return 1;
 
                 if (ccb_emit_struct_copy(fb, elem_type, dst_ptr, src_ptr))
@@ -11018,6 +11024,12 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 CCValueType result_ty = ccb_type_for_expr(expr);
                 if (result_ty != CC_TYPE_VOID)
                 {
+                    if (dst_slot >= 0)
+                    {
+                        dst_ptr = ccb_local_from_slot(fb, dst_slot);
+                        if (!dst_ptr)
+                            return 1;
+                    }
                     if (!ccb_emit_load_local(fb, dst_ptr))
                         return 1;
                 }
@@ -11045,9 +11057,23 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                               "failed to allocate temporary for indexed assignment");
                 return 1;
             }
+            ptrdiff_t temp_slot = temp ? (ptrdiff_t)(temp - fb->locals) : -1;
 
             if (!ccb_emit_store_local(fb, temp))
                 return 1;
+
+            if (addr_slot >= 0)
+            {
+                addr_local = ccb_local_from_slot(fb, addr_slot);
+                if (!addr_local)
+                    return 1;
+            }
+            if (temp_slot >= 0)
+            {
+                temp = ccb_local_from_slot(fb, temp_slot);
+                if (!temp)
+                    return 1;
+            }
             if (!ccb_emit_load_local(fb, addr_local))
                 return 1;
             if (!ccb_emit_load_local(fb, temp))
@@ -11078,6 +11104,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             CcbLocal *addr_local = ccb_local_add(fb, NULL, addr_ptr_ty, false, false);
             if (!addr_local)
                 return 1;
+            ptrdiff_t addr_slot = addr_local ? (ptrdiff_t)(addr_local - fb->locals) : -1;
             if (!ccb_emit_store_local(fb, addr_local))
                 return 1;
 
@@ -11087,6 +11114,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 CcbLocal *dst_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
                 if (!dst_ptr)
                     return 1;
+                ptrdiff_t dst_slot = dst_ptr ? (ptrdiff_t)(dst_ptr - fb->locals) : -1;
                 if (!ccb_emit_store_local(fb, dst_ptr))
                     return 1;
 
@@ -11103,7 +11131,11 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 CcbLocal *src_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
                 if (!src_ptr)
                     return 1;
+                ptrdiff_t src_slot = src_ptr ? (ptrdiff_t)(src_ptr - fb->locals) : -1;
                 if (!ccb_emit_store_local(fb, src_ptr))
+                    return 1;
+
+                if (!ccb_struct_copy_refresh(fb, dst_slot, src_slot, &dst_ptr, &src_ptr))
                     return 1;
 
                 if (ccb_emit_struct_copy(fb, elem_type, dst_ptr, src_ptr))
@@ -11112,6 +11144,12 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 CCValueType result_ty = ccb_type_for_expr(expr);
                 if (result_ty != CC_TYPE_VOID)
                 {
+                    if (dst_slot >= 0)
+                    {
+                        dst_ptr = ccb_local_from_slot(fb, dst_slot);
+                        if (!dst_ptr)
+                            return 1;
+                    }
                     if (!ccb_emit_load_local(fb, dst_ptr))
                         return 1;
                 }
@@ -11139,9 +11177,23 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                               "failed to allocate temporary for dereference assignment");
                 return 1;
             }
+            ptrdiff_t temp_slot = temp ? (ptrdiff_t)(temp - fb->locals) : -1;
 
             if (!ccb_emit_store_local(fb, temp))
                 return 1;
+
+            if (addr_slot >= 0)
+            {
+                addr_local = ccb_local_from_slot(fb, addr_slot);
+                if (!addr_local)
+                    return 1;
+            }
+            if (temp_slot >= 0)
+            {
+                temp = ccb_local_from_slot(fb, temp_slot);
+                if (!temp)
+                    return 1;
+            }
             if (!ccb_emit_load_local(fb, addr_local))
                 return 1;
             if (!ccb_emit_load_local(fb, temp))
@@ -11172,6 +11224,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             CcbLocal *addr_local = ccb_local_add(fb, NULL, addr_ptr_ty, false, false);
             if (!addr_local)
                 return 1;
+            ptrdiff_t addr_slot = addr_local ? (ptrdiff_t)(addr_local - fb->locals) : -1;
             if (!ccb_emit_store_local(fb, addr_local))
                 return 1;
 
@@ -11181,6 +11234,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 CcbLocal *dst_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
                 if (!dst_ptr)
                     return 1;
+                ptrdiff_t dst_slot = dst_ptr ? (ptrdiff_t)(dst_ptr - fb->locals) : -1;
                 if (!ccb_emit_store_local(fb, dst_ptr))
                     return 1;
 
@@ -11197,7 +11251,11 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 CcbLocal *src_ptr = ccb_local_add(fb, NULL, ptr_ty, false, false);
                 if (!src_ptr)
                     return 1;
+                ptrdiff_t src_slot = src_ptr ? (ptrdiff_t)(src_ptr - fb->locals) : -1;
                 if (!ccb_emit_store_local(fb, src_ptr))
+                    return 1;
+
+                if (!ccb_struct_copy_refresh(fb, dst_slot, src_slot, &dst_ptr, &src_ptr))
                     return 1;
 
                 if (ccb_emit_struct_copy(fb, field_type, dst_ptr, src_ptr))
@@ -11206,6 +11264,12 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 CCValueType result_ty = ccb_type_for_expr(expr);
                 if (result_ty != CC_TYPE_VOID)
                 {
+                    if (dst_slot >= 0)
+                    {
+                        dst_ptr = ccb_local_from_slot(fb, dst_slot);
+                        if (!dst_ptr)
+                            return 1;
+                    }
                     if (!ccb_emit_load_local(fb, dst_ptr))
                         return 1;
                 }
@@ -11233,9 +11297,23 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                               "failed to allocate temporary for member assignment");
                 return 1;
             }
+            ptrdiff_t temp_slot = temp ? (ptrdiff_t)(temp - fb->locals) : -1;
 
             if (!ccb_emit_store_local(fb, temp))
                 return 1;
+
+            if (addr_slot >= 0)
+            {
+                addr_local = ccb_local_from_slot(fb, addr_slot);
+                if (!addr_local)
+                    return 1;
+            }
+            if (temp_slot >= 0)
+            {
+                temp = ccb_local_from_slot(fb, temp_slot);
+                if (!temp)
+                    return 1;
+            }
             if (!ccb_emit_load_local(fb, addr_local))
                 return 1;
             if (!ccb_emit_load_local(fb, temp))
