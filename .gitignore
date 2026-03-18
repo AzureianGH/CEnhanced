@@ -4,3 +4,4 @@ tests/examples/build/SampleTests
 tests/.DS_Store
 /vscode-ext
 /tmp
+/.vscode
