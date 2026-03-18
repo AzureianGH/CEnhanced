@@ -20,7 +20,7 @@ typedef struct
   int *owned_cclib_cap;
 } DriverRuntimeLibState;
 
-// Returns 0 on success, non-zero on fatal errors.
+
 int maybe_inject_default_runtime_libs(const DriverRuntimeLibState *state);
 
 #endif

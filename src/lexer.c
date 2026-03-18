@@ -77,7 +77,7 @@ static Token lex_char_literal(Lexer *lx)
     int start = lx->idx;
     int line = lx->line;
     int col = lx->col;
-    getc2(lx); // consume opening quote
+    getc2(lx); 
     if (at_end(lx))
     {
         diag_error_at(&lx->src, line, col, "unterminated character literal");
@@ -292,14 +292,14 @@ static void skip_ws_and_comments(Lexer *lx)
         {
             int start_line = lx->line;
             int start_col = lx->col;
-            getc2(lx); // '/'
-            getc2(lx); // '*'
+            getc2(lx); 
+            getc2(lx); 
             while (!at_end(lx))
             {
                 char cc = getc2(lx);
                 if (cc == '*' && peekc(lx) == '/')
                 {
-                    getc2(lx); // consume '/'
+                    getc2(lx); 
                     break;
                 }
             }
@@ -346,7 +346,7 @@ static Token lex_number(Lexer *lx)
     int is_prefixed = 0;
     int saw_suffix_u = 0;
     int saw_suffix_l = 0;
-    // Check for base prefixes: 0x, 0b, 0o, 0d
+    
     if (peekc(lx) == '0' && lx->idx + 1 < lx->src.length)
     {
         char p2 = lx->src.src[lx->idx + 1];
@@ -361,7 +361,7 @@ static Token lex_number(Lexer *lx)
             base = 10;
         if (base != 0)
         {
-            // consume '0' and prefix char
+            
             getc2(lx);
             getc2(lx);
             is_prefixed = 1;
@@ -390,27 +390,27 @@ static Token lex_number(Lexer *lx)
             Token t = make_tok(lx, TK_INT, lx->src.src + start, len);
             t.int_val = any ? (int64_t)v : 0;
             t.int_uval = any ? v : 0;
-            /* C-like rule: unsuffixed non-decimal literals may become unsigned. */
+            
             t.int_is_unsigned = saw_suffix_u || (!saw_suffix_l && base != 10 && any && v > (uint64_t)INT32_MAX);
             t.int_width = saw_suffix_l > 0 ? 64 : 0;
             return t;
         }
     }
-    // Default: decimal without prefix
+    
     while (isdigit((unsigned char)peekc(lx)))
         getc2(lx);
 
-    // Fractional part
+    
     if (!is_prefixed && peekc(lx) == '.' && lx->idx + 1 < lx->src.length &&
         isdigit((unsigned char)lx->src.src[lx->idx + 1]))
     {
         has_fraction = 1;
-        getc2(lx); // consume '.'
+        getc2(lx); 
         while (isdigit((unsigned char)peekc(lx)))
             getc2(lx);
     }
 
-    // Exponent part
+    
     if (!is_prefixed)
     {
         int exp_idx = lx->idx;
@@ -426,7 +426,7 @@ static Token lex_number(Lexer *lx)
                 if (lookahead < lx->src.length && isdigit((unsigned char)lx->src.src[lookahead]))
                 {
                     has_exponent = 1;
-                    getc2(lx); // consume 'e' or 'E'
+                    getc2(lx); 
                     if (sign == '+' || sign == '-')
                         getc2(lx);
                     while (isdigit((unsigned char)peekc(lx)))
@@ -477,7 +477,7 @@ static Token lex_number(Lexer *lx)
         return t;
     }
 
-    // Integer literal fall-back
+    
     t = make_tok(lx, TK_INT, lx->src.src + start, token_len);
     uint64_t v = 0;
     for (int i = start; i < literal_end; i++)
@@ -695,7 +695,7 @@ Token lexer_next(Lexer *lx)
         return lex_number(lx);
     if (c == '"')
     {
-        // string literal
+        
         int start = lx->idx;
         getc2(lx);
         while (!at_end(lx))
@@ -716,7 +716,7 @@ Token lexer_next(Lexer *lx)
         return lex_char_literal(lx);
     if (is_ident_start((unsigned char)c))
         return lex_ident_or_kw(lx);
-    // punctuation
+    
     if (c == '(')
     {
         getc2(lx);
@@ -878,7 +878,7 @@ Token lexer_next(Lexer *lx)
             getc2(lx);
             return make_tok(lx, TK_SLASHEQ, lx->src.src + lx->idx - 2, 2);
         }
-        // we've already handled '//' comments above; single '/' is division
+        
         getc2(lx);
         return make_tok(lx, TK_SLASH, lx->src.src + lx->idx - 1, 1);
     }
@@ -1010,7 +1010,7 @@ Token lexer_next(Lexer *lx)
         getc2(lx);
         return make_tok(lx, TK_BANG, lx->src.src + lx->idx - 1, 1);
     }
-    // unknown
+    
     diag_error_at(&lx->src, lx->line, lx->col, "unexpected character '%c'", c);
     getc2(lx);
     return make_tok(lx, TK_EOF, lx->src.src + lx->idx, 0);

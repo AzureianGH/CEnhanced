@@ -190,7 +190,7 @@ static void append_mangled_type(char **out_buf, size_t *out_len, size_t *out_cap
     (*out_buf)[*out_len] = '\0';
 }
 
-// FNV-1a 64-bit hash to make long mangled names unique yet compact.
+
 static uint64_t fnv1a64(const char *s)
 {
     uint64_t hash = 1469598103934665603ULL;
@@ -205,12 +205,12 @@ static uint64_t fnv1a64(const char *s)
     return hash;
 }
 
-// If a mangled name grows too large for toolchains, shorten it and append a
-// stable hash to avoid collisions when -g includes full type spellings.
+
+
 static char *shorten_mangled(char *name)
 {
-    const size_t MAX_LEN = 180; // avoid extremely long assembler symbols
-    const size_t KEEP_LEN = 96; // keep a readable prefix
+    const size_t MAX_LEN = 180; 
+    const size_t KEEP_LEN = 96; 
     if (!name)
         return NULL;
     size_t len = strlen(name);
@@ -219,7 +219,7 @@ static char *shorten_mangled(char *name)
 
     uint64_t h = fnv1a64(name);
     size_t keep = (len < KEEP_LEN) ? len : KEEP_LEN;
-    // prefix + '_' + 16 hex digits + null terminator
+    
     size_t out_len = keep + 1 + 16 + 1;
     char *out = (char *)xmalloc(out_len);
     snprintf(out, out_len, "%.*s_%016llx", (int)keep, name, (unsigned long long)h);

@@ -564,7 +564,7 @@ static void ccb_module_init(CcbModule *mod)
     mod->emit_debug = false;
 }
 
-// forward declarations
+
 static bool ccb_emit_addr_global(StringList *body, const char *name);
 
 static void ccb_module_free(CcbModule *mod)
@@ -869,7 +869,7 @@ static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym)
     if (!symbol_name || !*symbol_name)
         return true;
 
-    size_t params_len = 2; // opening and closing paren
+    size_t params_len = 2; 
     if (sym->sig.param_count > 0 && sym->sig.params)
     {
         for (int i = 0; i < sym->sig.param_count; ++i)
@@ -882,7 +882,7 @@ static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym)
             if (ccb_symbol_param_has_managed_length(sym, i))
                 params_len += 1 + strlen(cc_type_name(CC_TYPE_U64));
             if (i + 1 < sym->sig.param_count)
-                params_len += 1; // comma separator
+                params_len += 1; 
         }
     }
 
@@ -2829,13 +2829,13 @@ static bool ccb_parse_or_store_block(const StringList *body, size_t start,
     char expected_line[64] = {0};
     snprintf(expected_line, sizeof(expected_line), "load_indirect %s", type_name);
 
-    // Form A (direct stack):
-    //   [addr-expr]
-    //   [dup]
-    //   load_indirect T
-    //   const T C
-    //   binop or T
-    //   store_indirect T
+    
+    
+    
+    
+    
+    
+    
     size_t q = p;
     if (q < body->count && ccb_is_prefix_line(body->items[q], "dup"))
         q = ccb_skip_loc_directives(body, q + 1);
@@ -5334,11 +5334,11 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
     if (!fb || !opts || opts->opt_level <= 0)
         return;
 
-    /*
-     * The frontend CCB optimizer is currently unsound for some nested address
-     * arithmetic and short-circuit boolean patterns. Leave frontend bytecode in
-     * its unoptimized form until these passes are repaired.
-     */
+    
+
+
+
+
     return;
 
     const char *fn_name = (fb->fn && fb->fn->name) ? fb->fn->name : "<anon>";
@@ -7052,7 +7052,7 @@ static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
     }
     else if (base_type && base_type->kind == TY_REF)
     {
-        // treat refs like pointers for codegen; may need runtime null-check
+        
         base_ty = CC_TYPE_PTR;
     }
     else if (base_ty != CC_TYPE_PTR)
@@ -7073,7 +7073,7 @@ static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
     CCValueType elem_cc_ty = map_type_to_cc(elem_type);
     if (elem_type && elem_type->kind == TY_STRUCT)
     {
-        // struct loads handled by caller via address-only path
+        
     }
     else if (elem_cc_ty == CC_TYPE_INVALID || elem_cc_ty == CC_TYPE_VOID)
     {
@@ -7084,16 +7084,16 @@ static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
         *out_elem_ty = elem_cc_ty;
     if (out_elem_type)
         *out_elem_type = elem_type;
-    // If base is a checked nullable ref, insert runtime null-check before any subsequent load.
+    
     if (base_type && base_type->kind == TY_REF && base_type->ref_nullability == 1)
     {
-        // Keep pointer on stack for continuation and test a duplicate for null.
+        
         if (!string_list_appendf(&fb->body, "  dup ptr"))
             return 1;
         if (!string_list_appendf(&fb->body, "  test_null"))
             return 1;
 
-        // create labels
+        
         char call_label[64];
         char cont_label[64];
         snprintf(call_label, sizeof(call_label), "Lcc_nullchk_call_%d", fb->next_label_id++);
@@ -7102,7 +7102,7 @@ static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
         if (!string_list_appendf(&fb->body, "  branch %s %s", call_label, cont_label))
             return 1;
 
-        // call path
+        
         if (!string_list_appendf(&fb->body, "label %s", call_label))
             return 1;
 
@@ -7120,7 +7120,7 @@ static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
                 return 1;
         }
 
-        // file literal global
+        
         const char *fname = expr->src && expr->src->filename ? expr->src->filename : "";
         size_t flen = strlen(fname);
         uint8_t *fbytes = (uint8_t *)malloc(flen + 1);
@@ -7133,7 +7133,7 @@ static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
         if (!file_sym)
             return 1;
 
-        // name literal (var name if available)
+        
         const char *vname = "";
         if (base->kind == ND_VAR && base->var_ref)
             vname = base->var_ref;
@@ -7167,7 +7167,7 @@ static int ccb_emit_deref_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
         else if (!string_list_appendf(&fb->body, "  call __cert__null_deref_fallback ptr (ptr,u64,ptr)"))
             return 1;
 
-        // continuation label
+        
         if (!string_list_appendf(&fb->body, "label %s", cont_label))
             return 1;
 
@@ -7249,8 +7249,8 @@ static int ccb_emit_index_address(CcbFunctionBuilder *fb, const Node *expr, CCVa
     CCValueType elem_cc_ty = map_type_to_cc(elem_type);
     if (elem_type && elem_type->kind == TY_STRUCT)
     {
-        // Struct: use struct type
-        // (leave elem_cc_ty as mapped)
+        
+        
     }
     else if (elem_cc_ty == CC_TYPE_INVALID || elem_cc_ty == CC_TYPE_VOID)
     {
@@ -8910,7 +8910,7 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
         bool is_vararg_slot = call_is_varargs && (fixed_param_count < 0 || i >= fixed_param_count);
         if (is_vararg_slot)
         {
-            // Default promotions: float -> double, small ints -> int
+            
             if (arg_ty == CC_TYPE_F32)
             {
                 if (ccb_emit_convert_between(fb, CC_TYPE_F32, CC_TYPE_F64, arg))
@@ -9148,7 +9148,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         }
 
-        // Compute allocation size (u64)
+        
         if (expr->lhs)
         {
             if (ccb_emit_expr_basic(fb, expr->lhs))
@@ -9166,7 +9166,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 return 1;
         }
 
-        // Ensure extern for malloc wrapper
+        
         if (!ccb_module_has_function(fb->module, "__cert__new") && !ccb_module_has_extern(fb->module, "__cert__new"))
         {
             if (!ccb_module_appendf(fb->module, ".extern __cert__new params=(u64) returns=ptr"))
@@ -9416,13 +9416,13 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
     }
     case ND_VA_START:
     {
-        // va_start() -> produce an addr_param pointing at the first vararg
+        
         if (!fb || !fb->fn)
         {
             diag_error_at(expr->src, expr->line, expr->col, "va_start used outside function context");
             return 1;
         }
-        // index of first vararg == number of declared parameters
+        
         size_t first_vararg_index = fb->param_count;
         if (!string_list_appendf(&fb->body, "  addr_param %zu", first_vararg_index))
             return 1;
@@ -9430,7 +9430,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
     }
     case ND_VA_ARG:
     {
-        // va_arg(list, T) -> load value at pointer in 'list' and advance pointer
+        
         if (!expr->lhs)
         {
             diag_error_at(expr->src, expr->line, expr->col, "va_arg requires a va_list expression");
@@ -9438,8 +9438,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         }
 
         const Node *list_expr = expr->lhs;
-        CcbLocal *list_local = NULL;          // direct va_list local/param
-        CcbLocal *list_addr_local = NULL;     // address holding a va_list slot for indirection
+        CcbLocal *list_local = NULL;          
+        CcbLocal *list_addr_local = NULL;     
         bool lhs_is_indirect = false;
 
         if (list_expr->kind == ND_VAR && list_expr->var_ref)
@@ -9453,7 +9453,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         }
         else if (list_expr->kind == ND_DEREF)
         {
-            // Support passing va_list by pointer (e.g., va_list* param)
+            
             CCValueType elem_ty = CC_TYPE_PTR;
             const Type *elem_type = NULL;
             if (ccb_emit_deref_address(fb, list_expr, &elem_ty, &elem_type))
@@ -9480,13 +9480,13 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
             return 1;
         }
 
-        // Determine the requested result type from semantic analysis (falls back to parser hint)
+        
         const Type *target_type = expr->type ? expr->type : expr->var_type;
         CCValueType val_ty = map_type_to_cc(target_type);
         if (val_ty == CC_TYPE_INVALID && type_is_address_only(target_type))
             val_ty = CC_TYPE_PTR;
 
-        // Load current pointer to the next argument and align to value size
+        
         if (lhs_is_indirect)
         {
             if (!ccb_emit_load_local(fb, list_addr_local))
@@ -9509,14 +9509,14 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         if (size_bytes < 1)
             size_bytes = 1;
 
-        // CCB varargs are materialized as 32-bit parameter slots on BSlash.
-        // Keep va_arg slot walking in that ABI domain so ptr/u32 consume one slot.
+        
+        
         const size_t slot_size = 4;
         const size_t align_bytes = slot_size;
         if (val_ty == CC_TYPE_PTR)
             size_bytes = slot_size;
 
-        // align pointer up to ABI slot size
+        
         if (!ccb_emit_const(&fb->body, CC_TYPE_I64, (int64_t)(align_bytes - 1)))
             return 1;
         if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
@@ -9526,30 +9526,30 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         if (!string_list_appendf(&fb->body, "  binop and %s", cc_type_name(CC_TYPE_I64)))
             return 1;
 
-        // convert aligned ptr back
+        
         if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
             return 1;
 
-        // stash aligned pointer in a temp so we can both load and advance
+        
         CcbLocal *aligned_ptr = ccb_local_add(fb, NULL, type_ptr(type_void()), false, false);
         if (!aligned_ptr)
             return 1;
         if (!ccb_emit_store_local(fb, aligned_ptr))
             return 1;
 
-        // load value from aligned pointer
+        
         if (!ccb_emit_load_local(fb, aligned_ptr))
             return 1;
         if (!ccb_emit_load_indirect(&fb->body, val_ty))
             return 1;
 
-        // prepare to advance pointer using the stashed aligned ptr
+        
         if (!ccb_emit_load_local(fb, aligned_ptr))
             return 1;
         if (ccb_emit_convert_between(fb, CC_TYPE_PTR, CC_TYPE_I64, expr))
             return 1;
 
-        // add size constant
+        
         size_t size_advance = size_bytes;
         if (size_advance == 0)
             size_advance = slot_size;
@@ -9562,13 +9562,13 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         if (!string_list_appendf(&fb->body, "  binop add %s", cc_type_name(CC_TYPE_I64)))
             return 1;
 
-        // convert i64 -> ptr
+        
         if (ccb_emit_convert_between(fb, CC_TYPE_I64, CC_TYPE_PTR, expr))
             return 1;
 
         if (lhs_is_indirect)
         {
-            // store updated pointer back through the va_list*
+            
             CcbLocal *tmp_ptr = ccb_local_add(fb, NULL, type_va_list(), false, false);
             if (!tmp_ptr)
                 return 1;
@@ -9583,7 +9583,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         }
         else
         {
-            // store updated pointer back into the va_list variable
+            
             if (!ccb_emit_store_local(fb, list_local))
                 return 1;
         }
@@ -9592,13 +9592,13 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
     }
     case ND_VA_END:
     {
-        // va_end(list) is a no-op in our IR
+        
         if (!expr->lhs)
         {
             diag_error_at(expr->src, expr->line, expr->col, "va_end requires a va_list expression");
             return 1;
         }
-        // Evaluate the operand for side-effects (if any)
+        
         if (ccb_emit_expr_basic(fb, expr->lhs))
             return 1;
         return 0;
@@ -9950,7 +9950,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
         if (!ccb_emit_store_local(fb, temp))
             return 1;
 
-        // Adding a temporary can reallocate the locals array; refresh the pointer
+        
         local = ccb_local_lookup(fb, target->var_ref);
         if (!local)
         {
@@ -10550,7 +10550,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
         if (elem_type && elem_type->kind == TY_STRUCT)
         {
-            // Caller will handle address-only struct accesses
+            
             return 0;
         }
 
@@ -10577,7 +10577,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
         if (elem_type && elem_type->kind == TY_STRUCT)
         {
-            // Address of struct element is already on the stack
+            
             return 0;
         }
 
@@ -10612,7 +10612,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
         if (field_type && (field_type->kind == TY_STRUCT || field_type->kind == TY_ARRAY))
         {
-            // Struct/array fields are handled by address; caller will copy or index as needed
+            
             return 0;
         }
 
@@ -11537,7 +11537,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
     case ND_RET:
         if (stmt->lhs)
         {
-            // if this is the entrypoint, call GC prep exit before returning
+            
             if (fb->fn && fb->fn->is_entrypoint && fb->needs_gc_prep)
             {
                 if (!ccb_module_has_function(fb->module, "__cert__GC__prep_exit") && !ccb_module_has_extern(fb->module, "__cert__GC__prep_exit"))
@@ -11555,7 +11555,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
         }
         else
         {
-            // if this is the entrypoint, call GC prep exit before returning
+            
             if (fb->fn && fb->fn->is_entrypoint && fb->needs_gc_prep)
             {
                 if (!ccb_module_has_function(fb->module, "__cert__GC__prep_exit") && !ccb_module_has_extern(fb->module, "__cert__GC__prep_exit"))
@@ -11631,18 +11631,18 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
             return 1;
         }
 
-        // Ensure extern for free wrapper
+        
         if (!ccb_module_has_function(fb->module, "__cert__delete") && !ccb_module_has_extern(fb->module, "__cert__delete"))
         {
             if (!ccb_module_appendf(fb->module, ".extern __cert__delete params=(ptr) returns=void"))
                 return 1;
         }
 
-        // Handle different lvalue kinds so we can null the pointer after free.
+        
         const Node *target = stmt->lhs;
         if (target->kind == ND_VAR && target->var_ref)
         {
-            // Load variable value, call free, then store null into variable
+            
             CcbLocal *local = ccb_local_lookup(fb, target->var_ref);
             if (local)
             {
@@ -11658,7 +11658,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
             }
             else
             {
-                // global
+                
                 if (!ccb_emit_load_global(&fb->body, target->var_ref))
                     return 1;
                 if (!string_list_appendf(&fb->body, "  call __cert__delete void (ptr)"))
@@ -11675,7 +11675,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
         {
             CCValueType elem_ty = CC_TYPE_PTR;
             const Type *elem_type = NULL;
-            // Compute address and stash it in a temp local
+            
             CcbLocal *addr_local = ccb_local_add(fb, NULL, type_ptr(type_void()), false, false);
             if (!addr_local)
                 return 1;
@@ -11690,7 +11690,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
                 if (ccb_emit_index_address(fb, target, &elem_ty, &elem_type))
                     return 1;
             }
-            else // ND_MEMBER
+            else 
             {
                 if (ccb_emit_member_address(fb, target, &elem_ty, &elem_type))
                     return 1;
@@ -11699,7 +11699,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
             if (!ccb_emit_store_local(fb, addr_local))
                 return 1;
 
-            // load the pointer from address, call free
+            
             if (!ccb_emit_load_local(fb, addr_local))
                 return 1;
             if (!ccb_emit_load_indirect(&fb->body, CC_TYPE_PTR))
@@ -11707,7 +11707,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
             if (!string_list_appendf(&fb->body, "  call __cert__delete void (ptr)"))
                 return 1;
 
-            // store null back through the address
+            
             if (!ccb_emit_load_local(fb, addr_local))
                 return 1;
             if (!ccb_emit_const_zero(&fb->body, CC_TYPE_PTR))
@@ -11717,7 +11717,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
             return 0;
         }
 
-        // Fallback: evaluate expression, call free
+        
         if (ccb_emit_expr_basic(fb, stmt->lhs))
             return 1;
         if (!string_list_appendf(&fb->body, "  call __cert__delete void (ptr)"))
@@ -12630,12 +12630,12 @@ static bool ccb_format_global_initializer(const Node *expr, const Type *ty, char
     }
     case ND_ADDR:
     {
-        // Encode address-of in data initializers as a zero placeholder; backend/linker may patch later.
+        
         snprintf(buffer, bufsz, "0");
         return true;
     }
     case ND_STRING:
-        // String literals decay to pointers; encode as placeholder for now.
+        
         snprintf(buffer, bufsz, "0");
         return true;
     case ND_NEG:
@@ -13061,7 +13061,7 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
     fb.needs_gc_prep = ccb_node_uses_tracked_alloc(fn->body);
     int rc = 0;
 
-    // If this function is the entry point, arrange for GC prep calls.
+    
     if (fn->is_entrypoint && fb.needs_gc_prep)
     {
         if (!ccb_module_has_function(mod, "__cert__GC__prep_enter") && !ccb_module_has_extern(mod, "__cert__GC__prep_enter"))
@@ -13344,11 +13344,11 @@ static bool ccb_eval_const_int64(const Node *expr, int64_t *out_value)
     case ND_CAST:
         return ccb_eval_const_int64(expr->lhs, out_value);
     case ND_ADDR:
-        // Treat address-of globals/functions as link-time constants; encode as 0 placeholder.
+        
         *out_value = 0;
         return true;
     case ND_STRING:
-        // String literals in data initializers decay to pointers; encode as placeholder.
+        
         *out_value = 0;
         return true;
     default:

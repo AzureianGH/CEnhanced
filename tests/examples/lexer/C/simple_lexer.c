@@ -1,5 +1,5 @@
-// Minimal hand-written lexer demo used alongside the CHance version.
-// Build: gcc -std=c99 -Wall -Wextra -o simple_lexer simple_lexer.c
+
+
 
 #include <ctype.h>
 #include <stdio.h>

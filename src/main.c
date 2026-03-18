@@ -158,7 +158,7 @@ typedef struct
   Node *unit;
 } SymbolRefUnit;
 
-// sema
+
 int sema_eval_const_i32(Node *expr);
 SemaContext *sema_create(void);
 void sema_destroy(SemaContext *sc);
@@ -2067,7 +2067,7 @@ static void free_loaded_library_type(Type *ty)
   {
     free((void *)ty->import_module);
     free((void *)ty->import_type_name);
-    // import_resolved is not owned
+    
   }
   free(ty);
 }
@@ -3274,7 +3274,7 @@ static int maybe_track_output_obj(int no_link, const char *obj_override,
 
 static int is_relocatable_obj(const char *path)
 {
-  // Quick and permissive checks: ELF ET_REL, or COFF OBJ (not MZ/PE)
+  
   FILE *f = fopen(path, "rb");
   if (!f)
     return 0;
@@ -3283,20 +3283,20 @@ static int is_relocatable_obj(const char *path)
   fclose(f);
   if (n < 20)
     return 0;
-  // MZ -> not relocatable (PE executable/library)
+  
   if (hdr[0] == 'M' && hdr[1] == 'Z')
     return 0;
-  // ELF?
+  
   if (hdr[0] == 0x7F && hdr[1] == 'E' && hdr[2] == 'L' && hdr[3] == 'F')
   {
-    // e_type at bytes 16-17 little-endian
+    
     int et = hdr[16] | (hdr[17] << 8);
-    return et == 1; // ET_REL
+    return et == 1; 
   }
-  // Otherwise assume COFF OBJ if extension is .obj
+  
   if (ends_with_icase(path, ".obj"))
     return 1;
-  // Also accept .o when not ELF (some toolchains use different wrappers)
+  
   if (ends_with_icase(path, ".o"))
     return 1;
   return 0;
@@ -3319,7 +3319,7 @@ int main(int argc, char **argv)
   int output_overridden = 0;
   int stop_after_asm = 0;
   int stop_after_ccb = 0;
-  int no_link = 0; // -c / --no-link
+  int no_link = 0; 
   int emit_library = 0;
   int freestanding = 0;
   int freestanding_requested = 0;
@@ -3355,7 +3355,7 @@ int main(int argc, char **argv)
 #else
   TargetOS target_os = OS_LINUX;
 #endif
-  // Separate CHance and object inputs
+  
   const char **ce_inputs = NULL;
   int ce_count = 0, ce_cap = 0;
   char **ce_obj_outputs = NULL;
@@ -3381,10 +3381,10 @@ int main(int argc, char **argv)
   int owned_obj_count = 0, owned_obj_cap = 0;
   char **owned_asm_inputs = NULL;
   int owned_asm_count = 0, owned_asm_cap = 0;
-  // include paths
+  
   char **include_dirs = NULL;
   int include_dir_count = 0;
-  const char *obj_override = NULL; // optional object path after -c/--no-link
+  const char *obj_override = NULL; 
   char exe_dir[1024] = {0};
   get_executable_dir(exe_dir, sizeof(exe_dir), argv[0]);
   chance_add_default_include_dirs(&include_dirs, &include_dir_count);
@@ -3617,16 +3617,16 @@ int main(int argc, char **argv)
     };
     driver_verbose_print_inputs(&verbose_inputs);
   }
-  // Allow multiple inputs: if linking to an executable (no -c) with multiple
-  // .ce and/or .o, we will compile .ce to temporary objects and link them
-  // together with any provided .o files.
-  // Validate modes
+  
+  
+  
+  
   if (no_link)
   {
     if (!obj_override)
     {
-      // Per-input object emission: compile source inputs to individual object
-      // files and leave any externally provided .o inputs untouched.
+      
+      
       if (ce_count == 0 && ccb_count == 0 && asm_count == 0)
       {
         fprintf(stderr, "error: nothing to compile.\n");
@@ -3635,14 +3635,14 @@ int main(int argc, char **argv)
     }
     else
     {
-      // Combined object: must have at least one .ce or .o input
+      
       if ((ce_count + obj_count) == 0)
       {
         fprintf(stderr, "error: no inputs provided to combine into '%s'.\n",
                 obj_override);
         goto fail;
       }
-      // Validate external .o/.obj relocatable
+      
       for (int k = 0; k < obj_count; ++k)
       {
         if (!is_relocatable_obj(obj_inputs[k]))
@@ -3726,11 +3726,11 @@ int main(int argc, char **argv)
   int skip_backend_outputs = stop_after_ccb || stop_after_asm || emit_library;
   int total_codegen_units = ce_count + ccb_count + library_codegen_units;
   int link_input_units = obj_count + asm_count + total_codegen_units;
-  // Determine if we need a final link step combining multiple inputs
+  
   int multi_link = (!no_link && !skip_backend_outputs &&
                     (link_input_units > 1));
 
-  // Container for temporary objects when merging or linking
+  
   if (symbol_ref_ce_count > 0 && symbol_ref_units)
   {
     if (compiler_verbose_enabled())

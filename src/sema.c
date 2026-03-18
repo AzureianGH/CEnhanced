@@ -2949,7 +2949,7 @@ static int can_assign(Type *target, Node *rhs)
     }
     if (canon_target->kind == TY_REF)
     {
-        /* Assigning to a reference variable can rebind from ptr/ref and (if nullable) null. */
+        
         Type *pointee = canonicalize_type_deep(canon_target->pointee);
         Type *rhs_ty = canonicalize_type_deep(rhs->type);
         if (rhs->kind == ND_NULL)
@@ -2988,7 +2988,7 @@ static int can_assign(Type *target, Node *rhs)
                 rhs->type = canon_target;
                 return 1;
             }
-            // Fallback: accept assignment when both sides are pointers (practical/lenient)
+            
             if (canon_target->kind == TY_PTR && rhs_ty->kind == TY_PTR)
             {
                 rhs->type = canon_target;
@@ -4118,7 +4118,7 @@ static void check_expr(SemaContext *sc, Node *e)
 
         if (is_function)
         {
-            // Function names evaluate to function type; treat as non-addressable value.
+            
             e->type = canon ? canon : t;
         }
 
@@ -4236,7 +4236,7 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_TYPEOF)
     {
-        // Determine type either from explicit type or from expression
+        
         Type *target = NULL;
         if (e->var_type)
             target = e->var_type;
@@ -4246,7 +4246,7 @@ static void check_expr(SemaContext *sc, Node *e)
             target = e->lhs->type;
         }
         target = canonicalize_type_deep(target);
-        // Build a string literal node carrying the formatted type name
+        
         char buf[256];
         buf[0] = '\0';
         if (!target)
@@ -4321,7 +4321,7 @@ static void check_expr(SemaContext *sc, Node *e)
                 snprintf(buf, sizeof(buf), "<char*/alias>::%s", e->var_ref);
             }
         }
-        // Convert to string literal
+        
         Node *s = (Node *)xcalloc(1, sizeof(Node));
         s->kind = ND_STRING;
         s->src = e->src;
@@ -4331,7 +4331,7 @@ static void check_expr(SemaContext *sc, Node *e)
         char *heap = (char *)xmalloc((size_t)s->str_len + 1);
         memcpy(heap, buf, (size_t)s->str_len + 1);
         s->str_data = heap;
-        // Replace e with string node semantics: set type to char*
+        
         e->kind = ND_STRING;
         e->str_data = s->str_data;
         e->str_len = s->str_len;
@@ -4563,7 +4563,7 @@ static void check_expr(SemaContext *sc, Node *e)
 
             if (symtab_has_symbol_with_prefix(sc->syms, qualified))
             {
-                // Treat this segment as another module placeholder so chained lookups can continue.
+                
                 e->kind = ND_VAR;
                 e->lhs = NULL;
                 e->rhs = NULL;
@@ -4948,7 +4948,7 @@ static void check_expr(SemaContext *sc, Node *e)
                           "shift operands must be integers");
             exit(1);
         }
-        // Result type is the type of the left operand
+        
         e->type = e->lhs->type;
         return;
     }
@@ -5030,7 +5030,7 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        // Allow integer, floating-point, or pointer relational comparisons when categories match.
+        
         int lhs_is_int = type_is_int(e->lhs->type);
         int rhs_is_int = type_is_int(e->rhs->type);
         int lhs_is_float = type_is_float(e->lhs->type);
@@ -5062,7 +5062,7 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        // Allow integer, floating-point, or pointer equality when categories match.
+        
         int lhs_is_int = type_is_int(e->lhs->type);
         int rhs_is_int = type_is_int(e->rhs->type);
         int lhs_is_float = type_is_float(e->lhs->type);
@@ -5105,8 +5105,8 @@ static void check_expr(SemaContext *sc, Node *e)
     if (e->kind == ND_CAST)
     {
         check_expr(sc, e->lhs);
-        /* If parser provided a dynamic type expression (e.g. 'as typeof(x)'),
-           resolve it here without running the generic typeof->string lowering. */
+        
+
         if (!e->type && e->type_expr)
         {
             Node *te = e->type_expr;
@@ -5167,8 +5167,8 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_INDEX)
     {
-        // lhs must be a pointer; rhs must be integer; result is element type
-        // (promoted to int for now)
+        
+        
         if (!e->lhs || !e->rhs)
         {
             diag_error_at(e->src, e->line, e->col, "invalid index expression");
@@ -5204,14 +5204,14 @@ static void check_expr(SemaContext *sc, Node *e)
                           "subscripted value is not an array or pointer");
             exit(1);
         }
-        // If the pointer points to a struct, result type is the struct type
+        
         if (elem_type && elem_type->kind == TY_STRUCT)
         {
             e->type = elem_type;
         }
         else
         {
-            // Default: use pointee type
+            
             e->type = elem_type ? elem_type : &ty_i32;
         }
         return;
@@ -5303,7 +5303,7 @@ static void check_expr(SemaContext *sc, Node *e)
                           "cannot delete pointer to incomplete or void type");
             exit(1);
         }
-        e->type = &ty_i32; /* deletion as statement expression yields int-ish, but treated as void by stmt checker */
+        e->type = &ty_i32; 
         return;
     }
     if (e->kind == ND_ADD_ASSIGN || e->kind == ND_SUB_ASSIGN || e->kind == ND_MUL_ASSIGN ||
@@ -5791,26 +5791,26 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_VA_START)
     {
-        // va_start() -> returns a va_list
+        
         e->type = type_va_list();
         return;
     }
     if (e->kind == ND_VA_ARG)
     {
-        // va_arg(list, T) -> yields value of type T
+        
         if (!e->lhs)
         {
             diag_error_at(e->src, e->line, e->col, "va_arg requires a va_list expression");
             exit(1);
         }
         check_expr(sc, e->lhs);
-        // ensure lhs is a va_list (best-effort)
+        
         if (e->lhs->type && canonicalize_type_deep(e->lhs->type) && canonicalize_type_deep(e->lhs->type)->kind != TY_VA_LIST)
         {
             diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col, "first argument to va_arg must be a va_list");
             exit(1);
         }
-        // target type is recorded in parser as e->var_type
+        
         if (!e->var_type)
         {
             diag_error_at(e->src, e->line, e->col, "va_arg missing target type");
@@ -5821,7 +5821,7 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_VA_END)
     {
-        // va_end(list) -> void
+        
         if (!e->lhs)
         {
             diag_error_at(e->src, e->line, e->col, "va_end requires a va_list expression");
@@ -5833,7 +5833,7 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_COND)
     {
-        // lhs ? rhs : body
+        
         if (!e->lhs || !e->rhs || !e->body)
         {
             diag_error_at(e->src, e->line, e->col, "malformed ternary expression");
@@ -5842,7 +5842,7 @@ static void check_expr(SemaContext *sc, Node *e)
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
         check_expr(sc, e->body);
-        // Condition: allow integers or pointers (non-zero truthy)
+        
         int cond_ok = type_is_int(e->lhs->type) || (e->lhs->type && e->lhs->type->kind == TY_PTR);
         if (!cond_ok)
         {
@@ -6130,8 +6130,8 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
             stmt->rhs->type = stmt->var_type;
         }
         stmt->var_type = sema_resolve_import_type(canonicalize_type_deep(stmt->var_type));
-        // Support multi-element brace initializers on pointer targets by
-        // treating the storage as a fixed-size array of the pointee type.
+        
+        
         if (stmt->var_type && stmt->var_type->kind == TY_PTR && stmt->rhs && stmt->rhs->kind == ND_INIT_LIST && !stmt->rhs->init.is_zero)
         {
             int elem_count = stmt->rhs->init.count;
@@ -6599,9 +6599,9 @@ static int sema_check_global_decl(SemaContext *sc, Node *decl)
                       decl->var_name);
         return 1;
     }
-    // Allow brace initializers with multiple elements to target pointer types by
-    // materializing a fixed-size array of the pointee type. This supports
-    // patterns like `char** tok = {null, null};`.
+    
+    
+    
     if (ty->kind == TY_PTR && decl->rhs && decl->rhs->kind == ND_INIT_LIST && !decl->rhs->init.is_zero)
     {
         int elem_count = decl->rhs->init.count;
@@ -6774,8 +6774,8 @@ int sema_check_unit(SemaContext *sc, Node *unit)
     sc->unit = unit;
     if (unit->kind == ND_FUNC)
     {
-        // single function case
-        // add symbol so calls can resolve
+        
+        
         sema_register_function_local(sc, NULL, unit);
         if (check_exposed_function_signature(unit))
             return 1;
@@ -6789,7 +6789,7 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         fprintf(stderr, "sema: expected unit\n");
         return 1;
     }
-    // First pass: register functions and globals
+    
     for (int i = 0; i < unit->stmt_count; i++)
     {
         Node *decl = unit->stmts[i];
@@ -6813,7 +6813,7 @@ int sema_check_unit(SemaContext *sc, Node *unit)
         }
     }
 
-    // Second pass: validate globals and type-check function bodies
+    
     for (int i = 0; i < unit->stmt_count; i++)
     {
         Node *decl = unit->stmts[i];
@@ -7624,7 +7624,7 @@ void sema_register_foreign_unit_symbols(SemaContext *sc, Node *target_unit, Node
     }
 }
 
-// Simple constant evaluation for current subset
+
 int sema_eval_const_i32(Node *expr)
 {
     if (expr->kind == ND_INT)

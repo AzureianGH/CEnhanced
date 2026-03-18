@@ -262,7 +262,7 @@ void ast_free(Node *n)
     ast_free_rec(n);
 }
 
-// --- Simple type helpers (keep minimal for now) ---
+
 static Type TY_I32_SINGLETON = {.kind = TY_I32};
 static Type TY_I64_SINGLETON = {.kind = TY_I64};
 static Type TY_F32_SINGLETON = {.kind = TY_F32};
@@ -1010,7 +1010,7 @@ void ast_emit_json(FILE *out, const Node *unit, const char *input_path)
     fputc('}', out);
 }
 
-// ---------------- Diagnostics -----------------
+
 static int g_errs = 0;
 static int g_warns = 0;
 
@@ -1035,7 +1035,7 @@ static void vdiag_at(const SourceBuffer *src, int line, int col, const char *sev
     }
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
-    // Print source line and caret if possible
+    
     if (src && src->src && src->length > 0 && line > 0)
     {
         const char *p = src->src;
@@ -1055,7 +1055,7 @@ static void vdiag_at(const SourceBuffer *src, int line, int col, const char *sev
             }
             p++;
         }
-        // Find line end
+        
         const char *q = line_start;
         while (q < src->src + src->length && *q != '\n' && *q != '\r')
             q++;

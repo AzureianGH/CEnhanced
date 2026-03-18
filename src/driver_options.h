@@ -105,8 +105,8 @@ typedef struct
   char **project_after_cmd;
 } DriverOptionsState;
 
-// Returns 0 for successful parse, 1 when --help/--version was handled,
-// 2 for user-facing argument errors, and -1 for internal/oom failures.
+
+
 int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state);
 
 #endif

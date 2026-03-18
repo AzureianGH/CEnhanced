@@ -210,7 +210,7 @@ int get_executable_dir(char *dir, size_t dirsz, const char *argv0)
       {
         if (_NSGetExecutablePath(dyn, &size) == 0 && realpath(dyn, resolved))
         {
-          // resolved ok
+          
         }
         else
         {
@@ -235,7 +235,7 @@ int get_executable_dir(char *dir, size_t dirsz, const char *argv0)
     {
       if (!realpath(resolved, resolved))
       {
-        // Keep the unresolved path; it is still useful for locating siblings.
+        
       }
     }
 #else

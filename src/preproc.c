@@ -15,7 +15,7 @@
 typedef struct
 {
 	char *name;
-	int param_count; // -1 for object-like macros
+	int param_count; 
 	char **params;
 	char *body;
 } Macro;
@@ -1532,7 +1532,7 @@ static void define_macro(PreprocState *st, const char *line, size_t len, int lin
 	macro_remove(st, mac.name);
 	if (function_like)
 	{
-		pos++; // skip '('
+		pos++; 
 		char **params = NULL;
 		int param_count = 0;
 		int param_cap = 0;
@@ -1834,12 +1834,12 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 		if (active)
 		{
 			(void)directive_arg; (void)line_no; (void)active;
-			// parse tokens in directive_arg and emit start markers into output
+			
 			size_t pos = 0;
 			int emitted = 0;
 			while (pos < directive_arg_len)
 			{
-				// skip separators
+				
 				while (pos < directive_arg_len && (directive_arg[pos] == ' ' || directive_arg[pos] == '\t' || directive_arg[pos] == ','))
 					pos++;
 				if (pos >= directive_arg_len) break;
@@ -1873,7 +1873,7 @@ static int handle_directive(PreprocState *st, const char *src, int len, int *ind
 		if (active)
 		{
 			(void)directive_arg; (void)line_no; (void)active;
-			// Emit end markers for hints so parser can turn off region behavior.
+			
 			size_t pos = 0;
 			int emitted = 0;
 			while (pos < directive_arg_len)

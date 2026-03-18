@@ -57,12 +57,12 @@ struct ModuleImport
 struct Parser
 {
     Lexer *lx;
-    // collected externs
+    
     Symbol *externs;
     int ext_count;
     int ext_cap;
     const char *current_function_name;
-    // type aliases (simple + single-parameter generic)
+    
     struct Alias
     {
         char *name;
@@ -89,7 +89,7 @@ struct Parser
     } *generic_params;
     int generic_param_count;
     int generic_param_cap;
-    // named types: structs and typedef-like entries
+    
     struct NamedType
     {
         char *name;
@@ -99,7 +99,7 @@ struct Parser
     } *named_types;
     int nt_count;
     int nt_cap;
-    // enum constants: name->value
+    
     struct EnumConst
     {
         char *name;
@@ -116,7 +116,7 @@ struct Parser
     } *enum_types;
     int et_count;
     int et_cap;
-    // const integer values (for array sizes and other compile-time needs)
+    
     struct ConstInt
     {
         char *name;
@@ -128,7 +128,7 @@ struct Parser
     int *const_scope_marks;
     int const_scope_count;
     int const_scope_cap;
-    // module metadata
+    
     char **module_parts;
     int module_part_count;
     int module_part_cap;
@@ -984,13 +984,13 @@ static void apply_function_attributes(Parser *ps, Node *fn, struct PendingAttr *
         }
         else if (strcmp(attr->name, "Hint") == 0)
         {
-            /* Hints are handled by the preprocessor/parser for enabling region-scoped
-             * behaviors (e.g. implicit-void-function). Accept and ignore here. */
+            
+
             continue;
         }
         else if (strcmp(attr->name, "NoHint") == 0)
         {
-            /* NoHint is similarly ignored at this stage. */
+            
             continue;
         }
         else
@@ -1275,7 +1275,7 @@ static char *join_parts_with_dot(char **parts, int count)
         if (parts[i])
             total += strlen(parts[i]);
         if (i + 1 < count)
-            total += 1; // for '.'
+            total += 1; 
     }
     char *res = (char *)xmalloc(total + 1);
     size_t pos = 0;
@@ -1394,7 +1394,7 @@ static Token expect(Parser *ps, TokenKind k, const char *what)
     return t;
 }
 
-// forward decl
+
 static Node *parse_expr(Parser *ps);
 static Node *parse_stmt(Parser *ps);
 static Node *parse_block(Parser *ps);
@@ -2626,7 +2626,7 @@ static Type *parse_type_base(Parser *ps)
 {
     if (!ps)
         return NULL;
-    // allow leading qualifiers like 'constant' and optional 'stack'
+    
     int consumed_stack = 0;
     while (1)
     {
@@ -2649,7 +2649,7 @@ static Type *parse_type_base(Parser *ps)
     if (b.kind == TK_KW_REF)
     {
         parser_require_h27(ps, b, "ref type");
-        int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
+        int nullability = 0; 
         Token look = lexer_peek(ps->lx);
         if (look.kind == TK_QUESTION)
         {
@@ -2667,7 +2667,7 @@ static Type *parse_type_base(Parser *ps)
     if (b.kind == TK_KW_REF)
     {
         parser_require_h27(ps, b, "ref type");
-        int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
+        int nullability = 0; 
         Token look = lexer_peek(ps->lx);
         if (look.kind == TK_QUESTION)
         {
@@ -2715,8 +2715,8 @@ static Type *parse_type_base(Parser *ps)
         base = &tf32;
     else if (b.kind == TK_KW_DOUBLE)
     {
-        // could be 'double' or part of 'long double' handled when previous token
-        // was LONG; since we consumed, treat as f64 here
+        
+        
         base = &tf64;
     }
     else if (b.kind == TK_KW_F64)
@@ -2738,7 +2738,7 @@ static Type *parse_type_base(Parser *ps)
     }
     else if (b.kind == TK_KW_LONG)
     {
-        // check for 'long double'
+        
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_KW_DOUBLE)
         {
@@ -2757,7 +2757,7 @@ static Type *parse_type_base(Parser *ps)
                           "expected '*' after 'fun' in function pointer type");
             exit(1);
         }
-        lexer_next(ps->lx); // consume '*'
+        lexer_next(ps->lx); 
         Type *func_ty = type_func();
         Token after_star = lexer_peek(ps->lx);
         if (after_star.kind == TK_LPAREN)
@@ -3012,7 +3012,7 @@ static Type *parse_type_base(Parser *ps)
             base = parse_inline_union_type(ps);
             return base;
         }
-        // allow 'struct Name' / 'union Name' as a type use
+        
         Token nm = expect(ps, TK_IDENT, want_union ? "union name" : "struct name");
         Type *nt = named_type_get(ps, nm.lexeme, nm.length);
         if (!nt)
@@ -3045,7 +3045,7 @@ static Type *parse_type_spec(Parser *ps)
 {
     if (!ps)
         return NULL;
-    // allow leading qualifiers like 'constant' and optional 'stack'
+    
     int consumed_stack = 0;
     while (1)
     {
@@ -3068,7 +3068,7 @@ static Type *parse_type_spec(Parser *ps)
     if (b.kind == TK_KW_REF)
     {
         parser_require_h27(ps, b, "ref type");
-        int nullability = 0; // 0 = non-nullable, 1 = checked '?', 2 = unchecked '!'
+        int nullability = 0; 
         Token look = lexer_peek(ps->lx);
         if (look.kind == TK_QUESTION)
         {
@@ -3115,8 +3115,8 @@ static Type *parse_type_spec(Parser *ps)
         base = &tf32;
     else if (b.kind == TK_KW_DOUBLE)
     {
-        // could be 'double' or part of 'long double' handled when previous token
-        // was LONG; since we consumed, treat as f64 here
+        
+        
         base = &tf64;
     }
     else if (b.kind == TK_KW_F64)
@@ -3138,7 +3138,7 @@ static Type *parse_type_spec(Parser *ps)
     }
     else if (b.kind == TK_KW_LONG)
     {
-        // check for 'long double'
+        
         Token p = lexer_peek(ps->lx);
         if (p.kind == TK_KW_DOUBLE)
         {
@@ -3157,7 +3157,7 @@ static Type *parse_type_spec(Parser *ps)
                           "expected '*' after 'fun' in function pointer type");
             exit(1);
         }
-        lexer_next(ps->lx); // consume '*'
+        lexer_next(ps->lx); 
         Type *func_ty = type_func();
         Token after_star = lexer_peek(ps->lx);
         if (after_star.kind == TK_LPAREN)
@@ -3413,7 +3413,7 @@ static Type *parse_type_spec(Parser *ps)
         }
         else
         {
-            // allow 'struct Name' / 'union Name' as a type use
+            
             Token nm = expect(ps, TK_IDENT, want_union ? "union name" : "struct name");
             Type *nt = named_type_get(ps, nm.lexeme, nm.length);
             if (!nt)
@@ -3440,7 +3440,7 @@ static Type *parse_type_spec(Parser *ps)
                       "expected type specifier");
         exit(1);
     }
-    // array suffixes '[...]' before pointers
+    
     Token p = lexer_peek(ps->lx);
     while (p.kind == TK_LBRACKET)
     {
@@ -3502,7 +3502,7 @@ static Type *parse_type_spec(Parser *ps)
         base = type_array(base, length);
         p = lexer_peek(ps->lx);
     }
-    // pointer suffixes '*': allocate a fresh pointer chain per type
+    
     int depth = 0;
     while (p.kind == TK_STAR)
     {
@@ -3512,7 +3512,7 @@ static Type *parse_type_spec(Parser *ps)
     }
     Type *ty = (depth == 0) ? base : make_ptr_chain_dyn(base, depth);
 
-    // trailing array suffixes after pointer chains (e.g., T*[N])
+    
     while (p.kind == TK_LBRACKET)
     {
         lexer_next(ps->lx);
@@ -3834,7 +3834,7 @@ static Node *parse_primary(Parser *ps)
                           "conditional expression requires 'else' branch");
             exit(1);
         }
-        lexer_next(ps->lx); // consume else
+        lexer_next(ps->lx); 
         Node *else_expr = parse_expr(ps);
         Node *n = new_node(ND_COND);
         n->lhs = cond;
@@ -3866,7 +3866,7 @@ static Node *parse_primary(Parser *ps)
         expect(ps, TK_RPAREN, ")");
         Node *n = new_node(ND_SIZEOF);
         n->type = type_i32();
-        // sizeof never evaluates its operand; sema computes the constant size
+        
         n->lhs = operand_expr;
         n->rhs = NULL;
         n->line = t.line;
@@ -3917,7 +3917,7 @@ static Node *parse_primary(Parser *ps)
     if (t.kind == TK_KW_TYPEOF)
     {
         expect(ps, TK_LPAREN, "(");
-        // typeof can take a type name or an expression/identifier
+        
         Token p = lexer_peek(ps->lx);
         Node *arg_node = NULL;
         Type *arg_type = NULL;
@@ -3926,7 +3926,7 @@ static Node *parse_primary(Parser *ps)
         {
             if (p.kind == TK_IDENT)
             {
-                // check if it's an alias so we can preserve the alias name for formatting
+                
                 if (alias_find(ps, p.lexeme, p.length) >= 0)
                 {
                     alias_name = (char *)xmalloc((size_t)p.length + 1);
@@ -3943,9 +3943,9 @@ static Node *parse_primary(Parser *ps)
         expect(ps, TK_RPAREN, ")");
         Node *n = new_node(ND_TYPEOF);
         n->lhs = arg_node;
-        n->var_type = arg_type; // carry explicit type if provided
+        n->var_type = arg_type; 
         if (alias_name)
-            n->var_ref = alias_name; // stash alias text for sema formatting
+            n->var_ref = alias_name; 
         n->line = t.line;
         n->col = t.col;
         n->src = lexer_source(ps->lx);
@@ -4112,7 +4112,7 @@ static Node *parse_primary(Parser *ps)
             n->src = lexer_source(ps->lx);
             return n;
         }
-        // enum constant?
+        
         int ev = 0;
         if (enum_const_get(ps, t.lexeme, t.length, &ev))
         {
@@ -4125,7 +4125,7 @@ static Node *parse_primary(Parser *ps)
             n->src = lexer_source(ps->lx);
             return n;
         }
-        // Could be a call: ident '(' ... ')'
+        
         Token p = lexer_peek(ps->lx);
         Type **call_type_args = NULL;
         int call_type_arg_count = 0;
@@ -4140,8 +4140,8 @@ static Node *parse_primary(Parser *ps)
         }
         if (p.kind == TK_LPAREN)
         {
-            lexer_next(ps->lx); // consume '('
-            // args: expr[, expr]*
+            lexer_next(ps->lx); 
+            
             Node **args = NULL;
             int argc = 0, cap = 0;
             Token nxt = lexer_peek(ps->lx);
@@ -4167,7 +4167,7 @@ static Node *parse_primary(Parser *ps)
             }
             expect(ps, TK_RPAREN, ")");
             Node *call = new_node(ND_CALL);
-            // duplicate identifier lexeme into a null-terminated string
+            
             char *nm = (char *)xmalloc((size_t)t.length + 1);
             memcpy(nm, t.lexeme, (size_t)t.length);
             nm[t.length] = '\0';
@@ -4196,7 +4196,7 @@ static Node *parse_primary(Parser *ps)
                           "explicit type arguments must be followed by '(' in a call expression");
             exit(1);
         }
-        // variable reference
+        
         Node *v = new_node(ND_VAR);
         char *nm = (char *)xmalloc((size_t)t.length + 1);
         memcpy(nm, t.lexeme, (size_t)t.length);
@@ -4212,7 +4212,7 @@ static Node *parse_primary(Parser *ps)
     exit(1);
 }
 
-// Forward decls for new top-level decls
+
 static void parse_enum_decl(Parser *ps, int is_exposed);
 static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_packed);
 static int parser_call_type_args_ahead(Parser *ps)
@@ -4446,7 +4446,7 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
                 break;
             Token op = lexer_next(ps->lx);
             Token field = expect(ps, TK_IDENT, "member name");
-            // Check for enum scoped constant: EnumType=>Value
+            
             if (op.kind == TK_ACCESS && e->kind == ND_VAR)
             {
                 const char *base_name = e->var_ref;
@@ -4492,7 +4492,7 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
         }
         if (p.kind == TK_LPAREN)
         {
-            lexer_next(ps->lx); // consume '('
+            lexer_next(ps->lx); 
             Node **args = NULL;
             int argc = 0, cap = 0;
             Token nxt = lexer_peek(ps->lx);
@@ -4595,12 +4595,12 @@ static Node *parse_unary(Parser *ps)
         Token next = lexer_peek_n(ps->lx, 1);
         if (next.kind == TK_KW_MANAGED)
         {
-            lexer_next(ps->lx); // consume '('
+            lexer_next(ps->lx); 
             return parse_managed_array_adapter(ps, p);
         }
         if (is_type_start(ps, next))
         {
-            lexer_next(ps->lx); // consume '('
+            lexer_next(ps->lx); 
             Type *ty = parse_type_spec(ps);
             expect(ps, TK_RPAREN, ")");
             Node *operand = parse_unary(ps);
@@ -4615,13 +4615,13 @@ static Node *parse_unary(Parser *ps)
     }
     if (p.kind == TK_PLUS)
     {
-        // unary plus: no-op
+        
         lexer_next(ps->lx);
         return parse_unary(ps);
     }
     if (p.kind == TK_MINUS)
     {
-        // unary minus: lower to 0 - expr
+        
         lexer_next(ps->lx);
         Node *rv = parse_unary(ps);
         Node *n = new_node(ND_NEG);
@@ -4715,9 +4715,9 @@ static Node *parse_unary(Parser *ps)
         lexer_next(ps->lx);
         Type *ty = parse_type_base(ps);
         Node *n = new_node(ND_NEW);
-        // If the parsed type was an array type (e.g., 'int[5]'),
-        // treat that array length as the count for the 'new' expression
-        // and set the node type to pointer-to-element.
+        
+        
+        
         if (ty && ty->kind == TY_ARRAY && ty->array.elem && !ty->array.is_unsized)
         {
             n->type = type_ptr(ty->array.elem);
@@ -4725,22 +4725,22 @@ static Node *parse_unary(Parser *ps)
             count->int_val = ty->array.length;
             count->int_uval = (uint64_t)ty->array.length;
             count->int_width = 0;
-            count->type = type_i32(); // use default int type for integer literal
+            count->type = type_i32(); 
             n->lhs = count;
         }
         else
         {
-            // store the element type in node->type as pointer-to(elem)
+            
             n->type = type_ptr(ty);
         }
-        // optional array form: new T[expr]
+        
         Token nxt = lexer_peek(ps->lx);
         if (nxt.kind == TK_LBRACKET)
         {
-            lexer_next(ps->lx); // consume '['
+            lexer_next(ps->lx); 
             Node *count = parse_expr(ps);
             expect(ps, TK_RBRACKET, "]");
-            n->lhs = count; // use lhs to hold the count expression
+            n->lhs = count; 
         }
         n->line = p.line;
         n->col = p.col;
@@ -5077,21 +5077,21 @@ static Node *parse_or(Parser *ps)
     return lhs;
 }
 
-// conditional (ternary) has lower precedence than && and ==, higher than assignment
+
 static Node *parse_cond(Parser *ps)
 {
     Node *cond = parse_or(ps);
     Token q = lexer_peek(ps->lx);
     if (q.kind != TK_QUESTION)
         return cond;
-    lexer_next(ps->lx); // consume '?'
+    lexer_next(ps->lx); 
     Node *then_e = parse_expr(ps);
     expect(ps, TK_COLON, ":");
-    Node *else_e = parse_cond(ps); // right-associative
+    Node *else_e = parse_cond(ps); 
     Node *n = new_node(ND_COND);
-    n->lhs = cond;    // condition
-    n->rhs = then_e;  // then
-    n->body = else_e; // reuse body for else branch
+    n->lhs = cond;    
+    n->rhs = then_e;  
+    n->body = else_e; 
     n->line = q.line;
     n->col = q.col;
     n->src = lexer_source(ps->lx);
@@ -5160,7 +5160,7 @@ static Node *parse_initializer(Parser *ps)
     Token t = lexer_peek(ps->lx);
     if (t.kind != TK_LBRACE)
         return parse_expr(ps);
-    lexer_next(ps->lx); // consume '{'
+    lexer_next(ps->lx); 
     Node *init = new_node(ND_INIT_LIST);
     init->line = t.line;
     init->col = t.col;
@@ -5254,7 +5254,7 @@ static Node *parse_inferred_var_decl(Parser *ps, int expect_semicolon)
                       "'var' declarations require an initializer");
         exit(1);
     }
-    lexer_next(ps->lx); // consume '='
+    lexer_next(ps->lx); 
     decl->rhs = parse_initializer(ps);
 
     if (expect_semicolon)
@@ -5262,7 +5262,7 @@ static Node *parse_inferred_var_decl(Parser *ps, int expect_semicolon)
     return decl;
 }
 
-// (removed duplicate parse_unary definition)
+
 
 static Node *parse_stmt(Parser *ps)
 {
@@ -5309,7 +5309,7 @@ static Node *parse_stmt(Parser *ps)
         expect(ps, TK_LPAREN, "(");
         Node *cond = parse_expr(ps);
         expect(ps, TK_RPAREN, ")");
-        Node *thenb = parse_stmt(ps); // block or single stmt
+        Node *thenb = parse_stmt(ps); 
         Node *elseb = NULL;
         Token e = lexer_peek(ps->lx);
         if (e.kind == TK_KW_ELSE)
@@ -5399,8 +5399,8 @@ static Node *parse_stmt(Parser *ps)
     if (t.kind == TK_KW_RET)
     {
         lexer_next(ps->lx);
-        // allow optional expression in return; if next token is ';', it's a bare
-        // return
+        
+        
         Token nxt = lexer_peek(ps->lx);
         Node *expr = NULL;
         if (nxt.kind != TK_SEMI)
@@ -5410,7 +5410,7 @@ static Node *parse_stmt(Parser *ps)
         }
         else
         {
-            // consume ';'
+            
             lexer_next(ps->lx);
         }
         Node *r = new_node(ND_RET);
@@ -5487,7 +5487,7 @@ static Node *parse_stmt(Parser *ps)
                           "expected a type after storage qualifiers");
             exit(1);
         }
-        // var decl: [stack] type ident [= expr] ;
+        
         Type *ty = parse_type_spec(ps);
         Token name = expect(ps, TK_IDENT, "identifier");
         Node *decl = new_node(ND_VAR_DECL);
@@ -5514,7 +5514,7 @@ static Node *parse_stmt(Parser *ps)
         expect(ps, TK_SEMI, ";");
         return decl;
     }
-    // expression statement
+    
     Node *e2 = parse_expr(ps);
     expect(ps, TK_SEMI, ";");
     Node *es = new_node(ND_EXPR_STMT);
@@ -5535,7 +5535,7 @@ static Node *parse_block(Parser *ps)
     {
         Token t = lexer_peek(ps->lx);
 
-        // Handle preprocessor-inserted hint markers emitted by chance_preprocess_source
+        
         if (t.kind == TK_IDENT && t.lexeme && t.length > 0)
         {
             if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__", t.length) == 0)
@@ -5594,14 +5594,14 @@ static Node *parse_block(Parser *ps)
             }
         }
 
-        // Handle preprocessor-inserted hint markers emitted by chance_preprocess_source
+        
         if (t.kind == TK_IDENT && t.lexeme && t.length > 0)
         {
-            // compare known marker names
+            
             if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__", t.length) == 0)
             {
                 lexer_next(ps->lx);
-                // consume trailing semicolon if present
+                
                 Token semi = lexer_peek(ps->lx);
                 if (semi.kind == TK_SEMI)
                     lexer_next(ps->lx);
@@ -5705,7 +5705,7 @@ static Node *parse_switch(Parser *ps)
             exit(1);
         }
 
-        lexer_next(ps->lx); // consume 'case' or 'default'
+        lexer_next(ps->lx); 
         int is_default = (label.kind == TK_KW_DEFAULT);
         Node *case_value = NULL;
         if (is_default)
@@ -5871,7 +5871,7 @@ static Node *parse_match_expr(Parser *ps, Token match_tok)
 
 static Node *parse_while(Parser *ps)
 {
-    // while (expr) stmt
+    
     expect(ps, TK_KW_WHILE, "while");
     expect(ps, TK_LPAREN, "(");
     Node *cond = parse_expr(ps);
@@ -5888,19 +5888,19 @@ static Node *parse_while(Parser *ps)
 
 static Node *parse_for(Parser *ps)
 {
-    // for (init; cond; post) stmt
+    
     expect(ps, TK_KW_FOR, "for");
     expect(ps, TK_LPAREN, "(");
-    // init: either empty ';' or a full statement (decl or expr;)
+    
     Token next = lexer_peek(ps->lx);
     Node *init = NULL;
     if (next.kind != TK_SEMI)
     {
-        // Reuse parse_stmt for a single statement ending with ';'
-        // But we must allow only a simple statement here; parse a declaration or expression-statement
+        
+        
         if (next.kind == TK_KW_STATIC || next.kind == TK_KW_CONSTANT || is_type_start(ps, next))
         {
-            // var decl statement
+            
             int is_const = 0;
             int is_static = 0;
             while (1)
@@ -5973,10 +5973,10 @@ static Node *parse_for(Parser *ps)
     }
     else
     {
-        // consume ';' for empty init
+        
         lexer_next(ps->lx);
     }
-    // condition (optional)
+    
     Node *cond = NULL;
     next = lexer_peek(ps->lx);
     if (next.kind != TK_SEMI)
@@ -5984,7 +5984,7 @@ static Node *parse_for(Parser *ps)
         cond = parse_expr(ps);
     }
     expect(ps, TK_SEMI, ";");
-    // post (optional)
+    
     Node *post = NULL;
     next = lexer_peek(ps->lx);
     if (next.kind != TK_RPAREN)
@@ -5999,7 +5999,7 @@ static Node *parse_for(Parser *ps)
     }
     expect(ps, TK_RPAREN, ")");
     Node *body = parse_stmt(ps);
-    // if no condition, use integer literal 1
+    
     if (!cond)
     {
         Node *one = new_node(ND_INT);
@@ -6012,7 +6012,7 @@ static Node *parse_for(Parser *ps)
     wh->rhs = body;
     wh->body = post;
     wh->src = lexer_source(ps->lx);
-    // If there was an init, create an outer block { init; while(...) }
+    
     if (init)
     {
         Node **stmts = (Node **)xcalloc(2, sizeof(Node *));
@@ -6081,7 +6081,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
         }
     }
     expect(ps, TK_LPAREN, "(");
-    // parameters: [type ident] *(, type ident) [,...]
+    
     Type **param_types = NULL;
     const char **param_names = NULL;
     unsigned char *param_const_flags = NULL;
@@ -6178,7 +6178,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     if (arrow_peek.kind == TK_ARROW)
     {
         lexer_next(ps->lx);
-        // return type
+        
         rtype = parse_type_spec(ps);
     }
     else if (allow_implicit_for_this || sema_get_allow_implicit_void_function())
@@ -6188,7 +6188,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     else
     {
         expect(ps, TK_ARROW, "->");
-        // unreachable: expect will exit
+        
     }
     if (is_noreturn && rtype && rtype->kind != TY_VOID)
     {
@@ -6197,7 +6197,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
         exit(1);
     }
     Node *fn = new_node(ND_FUNC);
-    // duplicate function name to a stable C string
+    
     char *nm = (char *)xmalloc((size_t)name.length + 1);
     memcpy(nm, name.lexeme, (size_t)name.length);
     nm[name.length] = '\0';
@@ -6253,10 +6253,10 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
 
 static int parse_extend_decl(Parser *ps, int leading_noreturn)
 {
-    // Three forms:
-    // 1) extend from "C" i32 printf(char*, _vaargs_);
-    // 2) extend from "C" Config g_config_blob;
-    // 3) extend fun name(params) -> ret;   // default ABI "C"
+    
+    
+    
+    
     Token extend_tok = expect(ps, TK_KW_EXTEND, "extend");
     int is_noreturn = leading_noreturn;
     int is_jump_target = 0;
@@ -6285,8 +6285,8 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
     }
     if (next.kind == TK_KW_FUN)
     {
-        // Parse: fun name(params) -> ret;
-        lexer_next(ps->lx); // consume 'fun'
+        
+        lexer_next(ps->lx); 
         Token name = expect(ps, TK_IDENT, "identifier");
         expect(ps, TK_LPAREN, "(");
         Type **param_types = NULL;
@@ -6373,7 +6373,7 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
         expect(ps, TK_ARROW, "->");
         Type *ret_ty = parse_type_spec(ps);
         expect(ps, TK_SEMI, ";");
-        // Record extern symbol with default ABI "C"
+        
         Symbol s = (Symbol){0};
         s.kind = SYM_FUNC;
         char *nm = (char *)xmalloc((size_t)name.length + 1);
@@ -6383,8 +6383,8 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
         s.backend_name = s.name;
         s.is_extern = 1;
         s.abi = xstrdup("C");
-        // Default to i32 if return type omitted (should not happen here),
-        // using a stable static object instead of a temporary.
+        
+        
         static Type ti32_ext = {.kind = TY_I32};
         s.sig.ret = ret_ty ? ret_ty : &ti32_ext;
         s.sig.params = param_types;
@@ -6432,9 +6432,9 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
                       "expected ABI after 'from'");
         exit(1);
     }
-    // return type (allow pointers)
-    // Reuse type-spec parser without allowing leading 'stack'
-    // Simple approach: call parse_type_spec and ignore its optional 'stack'
+    
+    
+    
     Type *ret_ty = parse_type_spec(ps);
     Token name = expect(ps, TK_IDENT, "identifier");
     Token after_name = lexer_peek(ps->lx);
@@ -6447,7 +6447,7 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
             exit(1);
         }
 
-        lexer_next(ps->lx); // consume ';'
+        lexer_next(ps->lx); 
 
         Symbol s = {0};
         s.kind = SYM_GLOBAL;
@@ -6573,7 +6573,7 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
     }
     expect(ps, TK_RPAREN, ")");
     expect(ps, TK_SEMI, ";");
-    // Save extern
+    
     Symbol s = {0};
     s.kind = SYM_FUNC;
     char *nm = (char *)xmalloc((size_t)name.length + 1);
@@ -6657,7 +6657,7 @@ Node *parse_unit(Parser *ps)
     {
         Token t = lexer_peek(ps->lx);
 
-        // Handle preprocessor-inserted hint markers emitted by chance_preprocess_source
+        
         if (t.kind == TK_IDENT && t.lexeme && t.length > 0)
         {
             if (t.length == (int)strlen("__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__") && strncmp(t.lexeme, "__CHANCE_HINT_START_IMPLICIT_VOID_FUNCTION__", t.length) == 0)
@@ -7257,7 +7257,7 @@ static void parse_alias_decl(Parser *ps, int is_exposed)
     Token maybe_lt = lexer_peek(ps->lx);
     if (maybe_lt.kind == TK_LT)
     {
-        // alias Name<T> = T*...;
+        
         is_generic = 1;
         lexer_next(ps->lx);
         Token param = expect(ps, TK_IDENT, "type parameter name");
@@ -7314,7 +7314,7 @@ static void parse_alias_decl(Parser *ps, int is_exposed)
         ps->alias_count++;
         return;
     }
-    // non-generic: alias Name = <type> ;
+    
     expect(ps, TK_ASSIGN, "=");
     Type *alias_type = parse_type_spec(ps);
     expect(ps, TK_SEMI, ";");
@@ -7343,7 +7343,7 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
 {
     expect(ps, TK_KW_ENUM, "enum");
     Token name = expect(ps, TK_IDENT, "enum name");
-    // For now, enums are i32-typed constants; register named type alias as i32
+    
     static Type ti32 = {.kind = TY_I32};
     if (named_type_find(ps, name.lexeme, name.length) < 0)
         named_type_add(ps, name.lexeme, name.length, &ti32, is_exposed);
@@ -7367,15 +7367,15 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
         {
             lexer_next(ps->lx);
             Node *e = parse_expr(ps);
-            // evaluate simple integer constant; fallback 0 if not INT
+            
             if (e->kind == ND_INT)
                 cur = (int)e->int_val;
             else
                 cur = 0;
         }
-        // add constant (global scope)
+        
         enum_const_add(ps, id.lexeme, id.length, cur);
-        // Also register scoped name Enum=>Member
+        
         int scoped_len = name.length + 2 + id.length;
         char *scoped = (char *)xmalloc((size_t)scoped_len + 1);
         memcpy(scoped, name.lexeme, (size_t)name.length);
@@ -7391,7 +7391,7 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
             module_registry_register_enum_value(ps->module_full_name, enum_name_heap, value_name, cur);
             free(value_name);
         }
-        // next
+        
         Token sep = lexer_peek(ps->lx);
         if (sep.kind == TK_COMMA)
         {
@@ -7399,8 +7399,8 @@ static void parse_enum_decl(Parser *ps, int is_exposed)
             cur++;
             continue;
         }
-        // maybe end
-        // if next is '}', we'll loop and close; otherwise, error
+        
+        
         cur++;
     }
     expect(ps, TK_SEMI, ";");
@@ -7644,7 +7644,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     }
     Token name = expect(ps, TK_IDENT, is_union ? "union name" : "struct name");
     Token after_name = lexer_peek(ps->lx);
-    // Forward declaration: 'struct Name;' / 'union Name;'
+    
     if (after_name.kind == TK_SEMI)
     {
         lexer_next(ps->lx);
@@ -7688,7 +7688,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     }
 
     expect(ps, TK_LBRACE, "{");
-    // Reuse forward declaration if present; otherwise create a new struct Type
+    
     Type *st = named_type_get(ps, name.lexeme, name.length);
     int is_new_struct = 0;
     if (st)
@@ -7729,11 +7729,11 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     st->is_union = !!is_union;
     st->is_exposed = st->is_exposed || is_exposed;
     st->strct.is_packed = (!is_union && (st->strct.is_packed || is_packed)) ? 1 : 0;
-    // Ensure name is registered before parsing fields so self-references work.
+    
     if (is_new_struct)
         named_type_add(ps, name.lexeme, name.length, st, is_exposed);
 
-    // Reset any forward-declaration field info before populating.
+    
     st->strct.field_names = NULL;
     st->strct.field_types = NULL;
     st->strct.field_default_values = NULL;
@@ -7741,7 +7741,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     st->strct.field_count = 0;
     st->strct.size_bytes = 0;
 
-    // Parse fields: list of type ident ';'
+    
     const char **fnames = NULL;
     Type **ftypes = NULL;
     const char **fdefs = NULL;
@@ -7770,7 +7770,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
             lexer_next(ps->lx);
             is_const = 1;
         }
-        (void)is_const; // fields ignore const for now
+        (void)is_const; 
         Type *fty = parse_type_spec(ps);
         Token fname = expect(ps, TK_IDENT, "field name");
         char *field_default = NULL;
@@ -7786,7 +7786,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
             lexer_next(ps->lx);
             field_default = parser_serialize_struct_field_default(ps, fty, parse_expr(ps));
         }
-        // optional multiple declarators not supported; one per line
+        
         if (is_exposed)
         {
             if (fty && fty->kind == TY_STRUCT && !fty->is_exposed)
@@ -7857,7 +7857,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
             offset = align_up(offset, struct_align);
         st->strct.size_bytes = offset;
     }
-    // named type already registered above
+    
     if (is_exposed && ps->module_full_name)
         module_registry_register_struct(ps->module_full_name, st);
     expect(ps, TK_SEMI, ";");

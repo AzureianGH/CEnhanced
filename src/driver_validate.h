@@ -32,7 +32,7 @@ typedef struct
   int *asm_count;
 } DriverValidationState;
 
-// Returns 0 when the parsed CLI state is valid, or 2 for user-facing errors.
+
 int validate_driver_options(const DriverValidationState *state);
 
 #endif

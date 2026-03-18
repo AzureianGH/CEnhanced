@@ -11,10 +11,10 @@ extern "C"
 
     typedef struct CclibFunction
     {
-        char *name;         /* logical function name */
-        char *backend_name; /* backend-mangled name */
-        char *return_type;  /* type spec string */
-        char **param_types; /* array of type spec strings */
+        char *name;         
+        char *backend_name; 
+        char *return_type;  
+        char **param_types; 
         uint32_t param_count;
         uint8_t is_varargs;
         uint8_t is_noreturn;
@@ -23,11 +23,11 @@ extern "C"
 
     typedef struct CclibStruct
     {
-        char *name;              /* struct name */
-        char **field_names;      /* array of field names */
-        char **field_types;      /* parallel array of type specs */
-        char **field_defaults;   /* parallel array of serialized default literals */
-        uint32_t *field_offsets; /* byte offsets */
+        char *name;              
+        char **field_names;      
+        char **field_types;      
+        char **field_defaults;   
+        uint32_t *field_offsets; 
         uint32_t field_count;
         uint32_t size_bytes;
         uint8_t is_exposed;
@@ -84,4 +84,4 @@ extern "C"
 }
 #endif
 
-#endif /* CHANCE_CCLIB_H */
+#endif 

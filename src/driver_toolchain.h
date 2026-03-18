@@ -47,7 +47,7 @@ typedef struct
   char cld_exec_buf[1024];
 } DriverToolchainSelection;
 
-// Returns 0 on success and 2 for user-facing argument errors.
+
 int resolve_driver_toolchain(const DriverToolchainInputs *inputs,
                              DriverToolchainSelection *selection);
 

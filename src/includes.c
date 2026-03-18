@@ -39,7 +39,7 @@ void chance_add_include_dir(char ***dirs, int *count, const char *dir)
 
 void chance_add_default_include_dirs(char ***dirs, int *count)
 {
-    // Honor CHANCE_INCLUDE_PATH if set (semicolon or colon separated)
+    
     const char *env = getenv("CHANCE_INCLUDE_PATH");
     if (env)
     {
@@ -83,15 +83,15 @@ static int try_form_path(char *dst, size_t dstsz, const char *base_dir,
     return 0;
 }
 
-// Very naive C prototype scanner: handles lines like 'extern int puts(const
-// char*);' or 'int printf(const char*, ...);'
+
+
 static void scan_header_for_prototypes(const char *buf, int len,
                                        SymTable *syms)
 {
     const char *p = buf, *end = buf + len;
     while (p < end)
     {
-        // skip whitespace and preprocessor lines
+        
         while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n'))
             p++;
         if (p >= end)
@@ -102,30 +102,30 @@ static void scan_header_for_prototypes(const char *buf, int len,
                 p++;
             continue;
         }
-        // look for identifier (return type ignored) then function name ident '('
-        // ... ');' Skip potential storage/class specifiers
+        
+        
         const char *line = p;
         while (p < end && *p != '\n' && *p != ';')
-            p++; // crude: one decl per line
+            p++; 
         size_t L = (size_t)(p - line);
         if (L > 0)
         {
-            // find '(' and previous word as function name
+            
             const char *lp = memchr(line, '(', L);
             const char *sc = memchr(line, ';', L);
             if (lp && (!sc || lp < sc))
             {
-                // backtrack to get name
+                
                 const char *q = lp;
                 while (q > line && (isalnum((unsigned char)q[-1]) || q[-1] == '_'))
-                    q--; // start of name
+                    q--; 
                 const char *qn = q;
                 while (qn < lp && (isalnum((unsigned char)*qn) || *qn == '_'))
                     qn++;
                 if (qn > q)
                 {
                     size_t nlen = (size_t)(qn - q);
-                    // Build symbol
+                    
                     char *nm = (char *)xmalloc(nlen + 1);
                     memcpy(nm, q, nlen);
                     nm[nlen] = '\0';
@@ -155,14 +155,14 @@ static void scan_header_for_prototypes(const char *buf, int len,
             }
         }
         if (p < end)
-            p++; // consume delimiter
+            p++; 
     }
 }
 
 static int resolve_include_path(const char *name, char **include_dirs,
                                 int dir_count, char *out, size_t outsz)
 {
-    // If name is absolute or relative with slash, use as-is
+    
     if (strchr(name, '/') || strchr(name, '\\'))
     {
         snprintf(out, outsz, "%s", name);
@@ -186,20 +186,20 @@ int chance_process_includes_and_scan(const char *source_path,
                                      char **include_dirs, int dir_count,
                                      SymTable *syms)
 {
-    // Walk lines, find #include <...> or #include "..." and scan those headers
-    // for prototypes
+    
+    
     const char *p = source_buf, *end = source_buf + source_len;
     char path[1024];
     (void)source_path;
     while (p < end)
     {
-        // consume spaces
+        
         const char *line = p;
         while (p < end && *p != '\n')
             p++;
         size_t L = (size_t)(p - line);
         const char *nl = p < end ? p + 1 : p;
-        // match pattern ^\s*#\s*include\s*[<"]name[>"]
+        
         const char *s = line;
         while (s < line + L && (*s == ' ' || *s == '\t'))
             s++;
