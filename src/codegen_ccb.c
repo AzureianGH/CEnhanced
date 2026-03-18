@@ -8874,13 +8874,18 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
     }
 
     int total_arg_count = expr->arg_count + hidden_arg_count;
+    const bool stack_safe_args = stack_safe_try || total_arg_count > 1;
     CCValueType *arg_types = NULL;
-    CcbLocal **arg_locals = NULL;
+    ptrdiff_t *arg_local_slots = NULL;
     if (total_arg_count > 0)
     {
         arg_types = (CCValueType *)xcalloc((size_t)total_arg_count, sizeof(CCValueType));
-        if (stack_safe_try)
-            arg_locals = (CcbLocal **)xcalloc((size_t)total_arg_count, sizeof(CcbLocal *));
+        if (stack_safe_args)
+        {
+            arg_local_slots = (ptrdiff_t *)xmalloc((size_t)total_arg_count * sizeof(ptrdiff_t));
+            for (int i = 0; i < total_arg_count; ++i)
+                arg_local_slots[i] = -1;
+        }
     }
 
     const int fixed_param_count = expr->call_target ? expr->call_target->param_count : -1;
@@ -8933,7 +8938,7 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
         if (arg_types)
             arg_types[arg_slot] = arg_ty;
 
-        if (stack_safe_try)
+        if (stack_safe_args)
         {
             bool address_only = type_is_address_only(arg ? arg->type : NULL);
             CcbLocal *arg_local = ccb_local_add(fb, NULL, arg ? arg->type : NULL, address_only, false);
@@ -8949,7 +8954,7 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
                 rc = 1;
                 break;
             }
-            arg_locals[arg_slot] = arg_local;
+            arg_local_slots[arg_slot] = (ptrdiff_t)(arg_local - fb->locals);
         }
 
         arg_slot++;
@@ -8966,7 +8971,7 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
             if (arg_types)
                 arg_types[arg_slot] = CC_TYPE_U64;
 
-            if (stack_safe_try)
+            if (stack_safe_args)
             {
                 CcbLocal *length_local = ccb_local_add_u64(fb, NULL, false);
                 if (!length_local)
@@ -8981,7 +8986,7 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
                     rc = 1;
                     break;
                 }
-                arg_locals[arg_slot] = length_local;
+                arg_local_slots[arg_slot] = (ptrdiff_t)(length_local - fb->locals);
             }
 
             arg_slot++;
@@ -9013,14 +9018,18 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
 
     if (!rc)
     {
-        if (stack_safe_try)
+        if (stack_safe_args)
         {
             for (int i = 0; i < total_arg_count; ++i)
             {
-                if (arg_locals && arg_locals[i] && !ccb_emit_load_local(fb, arg_locals[i]))
+                if (arg_local_slots && arg_local_slots[i] >= 0)
                 {
-                    rc = 1;
-                    break;
+                    CcbLocal *local = ccb_local_from_slot(fb, arg_local_slots[i]);
+                    if (!local || !ccb_emit_load_local(fb, local))
+                    {
+                        rc = 1;
+                        break;
+                    }
                 }
             }
         }
@@ -9093,7 +9102,7 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
             rc = 1;
     }
 
-    free(arg_locals);
+    free(arg_local_slots);
     free(arg_types);
     return rc;
 }
