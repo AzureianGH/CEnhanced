@@ -21,6 +21,7 @@ typedef struct
   int toolchain_debug_deep;
   int debug_symbols;
   TargetOS target_os;
+  const char *entry_symbol;
 
   const char *out;
   const char **obj_inputs;

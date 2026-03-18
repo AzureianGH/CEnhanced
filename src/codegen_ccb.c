@@ -14,6 +14,14 @@
 
 static bool g_ccb_pointer_32bit = false;
 
+/*
+ * local slots are refereced through raw CcbLocal* in many code paths and
+ * growing the locals array with realloc can move it and invalidate those
+ * pointers, producing weird local indices in emitted bytecode.
+ * prealloc some...
+*/
+#define CCB_LOCAL_PREALLOC_CAPACITY 65536u
+
 static CCValueType ccb_pointer_int_type(void)
 {
     return g_ccb_pointer_32bit ? CC_TYPE_I32 : CC_TYPE_I64;
@@ -402,6 +410,7 @@ typedef struct
 typedef struct
 {
     CcbModule *module;
+    const CodegenOptions *opts;
     const Node *fn;
     StringList prologue;
     StringList body;
@@ -593,6 +602,57 @@ static const char *ccb_label_with_varargs_suffix(const char *base, bool is_varar
     if (written <= 0 || (size_t)written >= bufsz)
         return base;
     return buffer;
+}
+
+static bool ccb_symbol_is_c_abi_varargs_extern(const Symbol *sym)
+{
+    return sym && sym->kind == SYM_FUNC && sym->is_extern && sym->sig.is_varargs &&
+           sym->abi && strcmp(sym->abi, "C") == 0;
+}
+
+static bool ccb_symbol_needs_varargs_suffix(const Symbol *sym)
+{
+    return sym && sym->sig.is_varargs && !ccb_symbol_is_c_abi_varargs_extern(sym);
+}
+
+static bool ccb_name_matches_symbol(const Symbol *sym, const char *name)
+{
+    if (!sym || !name || !*name)
+        return false;
+    if (sym->name && strcmp(sym->name, name) == 0)
+        return true;
+    if (sym->backend_name && *sym->backend_name && strcmp(sym->backend_name, name) == 0)
+        return true;
+    return false;
+}
+
+static bool ccb_name_is_c_abi_varargs_extern(const Symbol *symbols, int count, const char *name)
+{
+    if (!symbols || count <= 0 || !name || !*name)
+        return false;
+    for (int i = 0; i < count; ++i)
+    {
+        const Symbol *sym = &symbols[i];
+        if (!ccb_symbol_is_c_abi_varargs_extern(sym))
+            continue;
+        if (ccb_name_matches_symbol(sym, name))
+            return true;
+    }
+    return false;
+}
+
+static bool ccb_should_suffix_varargs_call_name(const CcbFunctionBuilder *fb, const char *name)
+{
+    if (!name || !*name)
+        return false;
+    if (!fb || !fb->opts)
+        return true;
+
+    if (ccb_name_is_c_abi_varargs_extern(fb->opts->externs, fb->opts->extern_count, name))
+        return false;
+    if (ccb_name_is_c_abi_varargs_extern(fb->opts->imported_externs, fb->opts->imported_extern_count, name))
+        return false;
+    return true;
 }
 
 static const char *ccb_effective_function_name(const Node *fn)
@@ -864,7 +924,8 @@ static bool ccb_module_append_extern(CcbModule *mod, const Symbol *sym)
 
     const char *symbol_name_base = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
     char symbol_name_buf[1024];
-    const char *symbol_name = ccb_label_with_varargs_suffix(symbol_name_base, sym->sig.is_varargs,
+    const char *symbol_name = ccb_label_with_varargs_suffix(symbol_name_base,
+                                                             ccb_symbol_needs_varargs_suffix(sym),
                                                              symbol_name_buf, sizeof(symbol_name_buf));
     if (!symbol_name || !*symbol_name)
         return true;
@@ -976,7 +1037,8 @@ static int ccb_emit_symbol_list(CcbModule *mod, const Symbol *syms, int count, S
             continue;
         const char *symbol_name_base = (sym->backend_name && *sym->backend_name) ? sym->backend_name : sym->name;
         char symbol_name_buf[1024];
-        const char *symbol_name = ccb_label_with_varargs_suffix(symbol_name_base, sym->sig.is_varargs,
+        const char *symbol_name = ccb_label_with_varargs_suffix(symbol_name_base,
+                                     ccb_symbol_needs_varargs_suffix(sym),
                                                                  symbol_name_buf, sizeof(symbol_name_buf));
         if (!symbol_name || !*symbol_name)
             continue;
@@ -1310,11 +1372,13 @@ static bool ccb_node_uses_tracked_alloc(const Node *node)
     return false;
 }
 
-static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, const Node *fn, bool enable_debug)
+static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, const Node *fn,
+                                      const CodegenOptions *opts, bool enable_debug)
 {
     if (!fb)
         return;
     fb->module = mod;
+    fb->opts = opts;
     fb->fn = fn;
     fb->ret_type = map_type_to_cc(fn && fn->ret_type ? fn->ret_type : NULL);
     string_list_init(&fb->prologue);
@@ -1324,6 +1388,9 @@ static void ccb_function_builder_init(CcbFunctionBuilder *fb, CcbModule *mod, co
     fb->locals = NULL;
     fb->locals_count = 0;
     fb->locals_capacity = 0;
+    fb->locals = (CcbLocal *)calloc(CCB_LOCAL_PREALLOC_CAPACITY, sizeof(CcbLocal));
+    if (fb->locals)
+        fb->locals_capacity = CCB_LOCAL_PREALLOC_CAPACITY;
     fb->param_count = 0;
     fb->local_count = 0;
     fb->next_label_id = 0;
@@ -1348,6 +1415,7 @@ static void ccb_function_builder_free(CcbFunctionBuilder *fb)
     fb->param_count = 0;
     fb->local_count = 0;
     fb->module = NULL;
+    fb->opts = NULL;
     fb->fn = NULL;
     fb->next_label_id = 0;
     fb->needs_gc_prep = false;
@@ -8668,12 +8736,27 @@ static bool ccb_emit_load_local(CcbFunctionBuilder *fb, const CcbLocal *local)
 {
     if (!fb)
         return false;
+    if (!local || local->index < 0)
+        return false;
+    if (local->is_param)
+    {
+        if ((size_t)local->index >= fb->param_count)
+            return false;
+    }
+    else if ((size_t)local->index >= fb->local_count)
+    {
+        return false;
+    }
     return ccb_append_load_local(&fb->body, local);
 }
 
 static bool ccb_emit_store_local(CcbFunctionBuilder *fb, const CcbLocal *local)
 {
     if (!fb)
+        return false;
+    if (!local || local->is_param || local->index < 0)
+        return false;
+    if ((size_t)local->index >= fb->local_count)
         return false;
     return ccb_append_store_local(&fb->body, local);
 }
@@ -9065,7 +9148,8 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
             else
             {
                 char direct_name_buf[1024];
-                if (call_is_varargs && !ccb_name_has_varargs_suffix(direct_name))
+                if (call_is_varargs && !ccb_name_has_varargs_suffix(direct_name) &&
+                    ccb_should_suffix_varargs_call_name(fb, direct_name))
                     direct_name = ccb_label_with_varargs_suffix(direct_name, true,
                                                                 direct_name_buf, sizeof(direct_name_buf));
                 const char *suffix = call_is_varargs ? " varargs" : "";
@@ -13065,7 +13149,7 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
 
     CcbFunctionBuilder fb;
     bool enable_debug = mod && mod->emit_debug;
-    ccb_function_builder_init(&fb, mod, fn, enable_debug);
+    ccb_function_builder_init(&fb, mod, fn, opts, enable_debug);
     ccb_function_builder_register_params(&fb);
     fb.needs_gc_prep = ccb_node_uses_tracked_alloc(fn->body);
     int rc = 0;

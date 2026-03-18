@@ -102,6 +102,7 @@ static void verbose_print_config(
     const char *output_path, int opt_level, TargetArch target_arch,
     TargetOS target_os, int stop_after_ccb, int stop_after_asm, int no_link,
     int emit_library, int freestanding, AsmSyntax asm_syntax,
+  const char *entry_symbol,
     int include_dir_count, int ce_count, int ccb_count, int cclib_count,
     int obj_count, int symbol_ref_ce_count, int symbol_ref_cclib_count,
     const char *host_cc_cmd, int host_cc_has_override,
@@ -119,6 +120,7 @@ static void verbose_print_config(
       .no_link = no_link,
       .emit_library = emit_library,
       .freestanding = freestanding,
+      .entry_symbol = entry_symbol,
       .asm_syntax = asm_syntax,
       .include_dir_count = include_dir_count,
       .ce_count = ce_count,
@@ -3348,6 +3350,7 @@ int main(int argc, char **argv)
   const char *chancecodec_cmd_override = NULL;
   const char *chs_cmd_override = NULL;
   const char *host_cc_cmd_override = NULL;
+  const char *entry_symbol = NULL;
 #ifdef _WIN32
   TargetOS target_os = OS_WINDOWS;
 #elif defined(__APPLE__)
@@ -3446,6 +3449,7 @@ int main(int argc, char **argv)
       .chancecodec_cmd_override = &chancecodec_cmd_override,
       .chs_cmd_override = &chs_cmd_override,
       .host_cc_cmd_override = &host_cc_cmd_override,
+      .entry_symbol = &entry_symbol,
       .ce_inputs = &ce_inputs,
       .ce_count = &ce_count,
       .ce_cap = &ce_cap,
@@ -3589,7 +3593,7 @@ int main(int argc, char **argv)
   {
     verbose_print_config(out, opt_level, target_arch, target_os, stop_after_ccb,
                          stop_after_asm, no_link, emit_library, freestanding,
-                         asm_syntax, include_dir_count, ce_count, ccb_count,
+                         asm_syntax, entry_symbol, include_dir_count, ce_count, ccb_count,
                          cclib_count, obj_count, symbol_ref_ce_count,
                          symbol_ref_cclib_count, host_cc_cmd_to_use,
                          host_cc_has_override, chancecodec_cmd_to_use,
@@ -4704,6 +4708,7 @@ int main(int argc, char **argv)
         .toolchain_debug_deep = toolchain_debug_deep,
         .debug_symbols = debug_symbols,
         .target_os = target_os,
+        .entry_symbol = entry_symbol,
         .out = out,
         .obj_inputs = obj_inputs,
         .obj_count = obj_count,

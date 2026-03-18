@@ -44,6 +44,7 @@ void usage(const char *prog)
   fprintf(stderr, "  --chs <path>      Override CHS assembler executable path "
                   "(default: auto-detect or PATH)\n");
   fprintf(stderr, "  --cc <path>       Override host C compiler used for link and x86 assembly fallback (default cc)\n");
+        fprintf(stderr, "  --entry <symbol>  Set entry symbol passed to linker (e.g., _start)\n");
   fprintf(stderr,
           "  -sr:<path>       Load .ce/.cclib for symbols only (no codegen)\n");
   fprintf(stderr,

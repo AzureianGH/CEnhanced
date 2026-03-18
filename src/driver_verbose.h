@@ -15,6 +15,7 @@ typedef struct
   int no_link;
   int emit_library;
   int freestanding;
+  const char *entry_symbol;
   AsmSyntax asm_syntax;
   int include_dir_count;
   int ce_count;

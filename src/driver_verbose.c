@@ -148,6 +148,10 @@ void driver_verbose_print_config(const DriverVerboseConfigState *state)
   driver_verbose_table_row("No link", bool_str(state->no_link));
   driver_verbose_table_row("Emit library", bool_str(state->emit_library));
   driver_verbose_table_row("Freestanding", bool_str(state->freestanding));
+  driver_verbose_table_row("Entry symbol",
+                           (state->entry_symbol && *state->entry_symbol)
+                               ? state->entry_symbol
+                               : "(default)");
   driver_verbose_table_row("Asm syntax", asm_syntax_to_option(state->asm_syntax));
   driver_verbose_table_row("Verbose mode", bool_str(state->verbose_active));
   driver_verbose_table_row("Verbose deep", bool_str(state->verbose_deep));

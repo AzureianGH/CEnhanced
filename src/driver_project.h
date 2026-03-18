@@ -30,6 +30,7 @@ int parse_ceproj_file(
     int *strip_metadata, int *strip_hard, int *obfuscate,
     AsmSyntax *asm_syntax, const char **chancecodec_cmd_override,
     const char **chs_cmd_override, const char **host_cc_cmd_override,
+    const char **entry_symbol,
     const char **obj_override, int *implicit_voidp, int *implicit_void_function,
     int *implicit_sizeof, int *request_ast, int *language_standard,
     int *diagnostics_only, int *toolchain_debug_mode,

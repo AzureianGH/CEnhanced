@@ -222,6 +222,27 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
       *state->host_cc_cmd_override = argv[++i];
       continue;
     }
+    if (strcmp(argv[i], "--entry") == 0 || strcmp(argv[i], "-e") == 0)
+    {
+      if (i + 1 >= argc)
+      {
+        fprintf(stderr, "error: %s expects an entry symbol\n", argv[i]);
+        return 2;
+      }
+      *state->entry_symbol = argv[++i];
+      continue;
+    }
+    if (strncmp(argv[i], "--entry=", 8) == 0)
+    {
+      const char *sym = argv[i] + 8;
+      if (!sym || !*sym)
+      {
+        fprintf(stderr, "error: --entry expects an entry symbol\n");
+        return 2;
+      }
+      *state->entry_symbol = sym;
+      continue;
+    }
     if (strcmp(argv[i], "--library") == 0)
     {
       *state->emit_library = 1;
@@ -474,7 +495,7 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
           state->opt_level, state->debug_symbols, state->strip_metadata,
           state->strip_hard, state->obfuscate, state->asm_syntax,
           state->chancecodec_cmd_override, state->chs_cmd_override,
-          state->host_cc_cmd_override, state->obj_override, state->implicit_voidp,
+          state->host_cc_cmd_override, state->entry_symbol, state->obj_override, state->implicit_voidp,
           state->implicit_void_function, state->implicit_sizeof,
           state->request_ast, state->language_standard, state->diagnostics_only,
           state->toolchain_debug_mode, state->toolchain_debug_deep,

@@ -41,6 +41,7 @@ static int run_cld_link_process(const char *cmd, const char *target_name,
                                 const char *output_kind,
                                 const char *output_path, int no_stdlib,
                                 const char **inputs, int input_count,
+                                const char *entry_symbol,
                                 int toolchain_debug_mode,
                                 int toolchain_debug_deep,
                                 int *spawn_errno_out)
@@ -57,7 +58,8 @@ static int run_cld_link_process(const char *cmd, const char *target_name,
 
   size_t arg_cap =
       (size_t)input_count + 12u + (target_name && *target_name ? 2u : 0u) +
-      (no_stdlib ? 1u : 0u);
+      (no_stdlib ? 1u : 0u) +
+      ((entry_symbol && *entry_symbol && strcmp(output_kind, "executable") == 0) ? 2u : 0u);
 #ifdef _WIN32
   const char **args = (const char **)calloc(arg_cap, sizeof(*args));
 #else
@@ -122,6 +124,21 @@ static int run_cld_link_process(const char *cmd, const char *target_name,
 #else
       (char *)output_kind;
 #endif
+    if (entry_symbol && *entry_symbol && strcmp(output_kind, "executable") == 0)
+    {
+      args[idx++] =
+  #ifdef _WIN32
+    "--entry";
+  #else
+    (char *)"--entry";
+  #endif
+      args[idx++] =
+  #ifdef _WIN32
+    entry_symbol;
+  #else
+    (char *)entry_symbol;
+  #endif
+    }
   if (no_stdlib)
     args[idx++] =
 #ifdef _WIN32
@@ -233,12 +250,14 @@ int run_driver_link_phase(DriverLinkPhaseState *state)
         driver_verbose_section("Linking executable");
         driver_verbose_table_row("Linker", state->cld_cmd_to_use);
         driver_verbose_table_row("Target", state->cld_target_to_use);
+        driver_verbose_table_row("Entry", state->entry_symbol ? state->entry_symbol : "(default)");
       }
 
       int spawn_errno = 0;
       int lrc = run_cld_link_process(
           state->cld_cmd_to_use, state->cld_target_to_use, "executable",
           state->out, state->freestanding, link_inputs, input_count,
+          state->entry_symbol,
           state->toolchain_debug_mode, state->toolchain_debug_deep,
           &spawn_errno);
       free(link_inputs);
@@ -284,11 +303,13 @@ int run_driver_link_phase(DriverLinkPhaseState *state)
         driver_verbose_section("Linking single object");
         driver_verbose_table_row("Linker", state->cld_cmd_to_use);
         driver_verbose_table_row("Target", state->cld_target_to_use);
+        driver_verbose_table_row("Entry", state->entry_symbol ? state->entry_symbol : "(default)");
       }
       int spawn_errno = 0;
       int lrc = run_cld_link_process(
           state->cld_cmd_to_use, state->cld_target_to_use, "executable",
           state->out, state->freestanding, link_inputs, 1,
+          state->entry_symbol,
           state->toolchain_debug_mode, state->toolchain_debug_deep,
           &spawn_errno);
       if (lrc != 0)
@@ -357,6 +378,7 @@ int run_driver_link_phase(DriverLinkPhaseState *state)
       int lrc = run_cld_link_process(
           state->cld_cmd_to_use, state->cld_target_to_use, "relocatable",
           state->obj_override, state->freestanding, link_inputs, input_count,
+          NULL,
           state->toolchain_debug_mode, state->toolchain_debug_deep,
           &spawn_errno);
       free(link_inputs);
