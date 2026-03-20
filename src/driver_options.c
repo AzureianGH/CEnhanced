@@ -248,6 +248,19 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
       *state->emit_library = 1;
       continue;
     }
+    if (strcmp(argv[i], "--export-exe") == 0)
+    {
+      if (state->export_executable)
+        *state->export_executable = 1;
+      if (state->emit_library)
+        *state->emit_library = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--static") == 0)
+    {
+      *state->static_link = 1;
+      continue;
+    }
     if (strcmp(argv[i], "--freestanding") == 0)
     {
       *state->freestanding = 1;
@@ -491,7 +504,7 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
           state->out, state->project_output_alloc, state->target_arch,
           state->chancecode_backend, state->stop_after_ccb, state->stop_after_asm,
           state->emit_library, state->no_link, state->freestanding,
-          state->target_os, state->freestanding_requested, state->m32,
+          state->target_os, state->export_executable, state->freestanding_requested, state->m32,
           state->opt_level, state->debug_symbols, state->strip_metadata,
           state->strip_hard, state->obfuscate, state->asm_syntax,
           state->chancecodec_cmd_override, state->chs_cmd_override,

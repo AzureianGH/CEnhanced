@@ -8,7 +8,7 @@ int validate_driver_options(const DriverValidationState *state)
 {
   if (!state || !state->out || !state->output_overridden ||
       !state->stop_after_asm || !state->stop_after_ccb || !state->no_link ||
-      !state->emit_library || !state->freestanding || !state->m32 ||
+      !state->emit_library || !state->export_executable || !state->freestanding || !state->m32 ||
       !state->debug_symbols || !state->strip_metadata ||
       !state->implicit_void_function || !state->language_standard ||
       !state->request_ast || !state->diagnostics_only || !state->target_arch ||
@@ -94,14 +94,39 @@ int validate_driver_options(const DriverValidationState *state)
       fprintf(stderr, "error: --library requires at least one .ce input\n");
       return 2;
     }
+    if (!*state->export_executable)
+    {
+      if (!*state->output_overridden)
+      {
+        *state->out = "a.cclib";
+      }
+      if (!ends_with_icase(*state->out, ".cclib"))
+      {
+        fprintf(stderr, "error: --library output must end with .cclib\n");
+        return 2;
+      }
+    }
+  }
+
+  if (*state->export_executable)
+  {
+    if (*state->stop_after_asm || *state->stop_after_ccb)
+    {
+      fprintf(stderr, "error: --export-exe cannot be combined with -S/-Sccb\n");
+      return 2;
+    }
+    if (*state->no_link)
+    {
+      fprintf(stderr, "error: --export-exe is incompatible with -c/--no-link\n");
+      return 2;
+    }
     if (!*state->output_overridden)
     {
-      *state->out = "a.cclib";
-    }
-    if (!ends_with_icase(*state->out, ".cclib"))
-    {
-      fprintf(stderr, "error: --library output must end with .cclib\n");
-      return 2;
+#ifdef _WIN32
+      *state->out = "a.exe";
+#else
+      *state->out = "a";
+#endif
     }
   }
   if (*state->m32)

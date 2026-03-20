@@ -1,0 +1,9 @@
+module CVMTest;
+
+bring Std.IO as IO;
+
+entrypoint expose fun main() -> int {
+    IO.printnl("Hello, world!");
+    IO.printnl("Test %d", 33);
+    ret 123;
+}

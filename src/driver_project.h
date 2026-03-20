@@ -26,6 +26,7 @@ int parse_ceproj_file(
     const char **out, char **project_output_alloc, TargetArch *target_arch,
     const char **chancecode_backend, int *stop_after_ccb, int *stop_after_asm,
     int *emit_library, int *no_link, int *freestanding, TargetOS *target_os,
+    int *export_executable,
     int *freestanding_requested, int *m32, int *opt_level, int *debug_symbols,
     int *strip_metadata, int *strip_hard, int *obfuscate,
     AsmSyntax *asm_syntax, const char **chancecodec_cmd_override,

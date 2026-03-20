@@ -20,6 +20,7 @@ typedef struct
   int *stop_after_asm;
   int *no_link;
   int *emit_library;
+  int *export_executable;
   int *freestanding;
   int *freestanding_requested;
   int *m32;
@@ -617,6 +618,14 @@ static int project_args_apply(const char *proj_path, int lineno,
         *state->emit_library = 1;
       continue;
     }
+    if (strcmp(arg, "--export-exe") == 0)
+    {
+      if (state->export_executable)
+        *state->export_executable = 1;
+      if (state->emit_library)
+        *state->emit_library = 1;
+      continue;
+    }
     if (strcmp(arg, "--freestanding") == 0)
     {
       if (state->freestanding)
@@ -906,6 +915,7 @@ int parse_ceproj_file(
     const char **out, char **project_output_alloc, TargetArch *target_arch,
     const char **chancecode_backend, int *stop_after_ccb, int *stop_after_asm,
     int *emit_library, int *no_link, int *freestanding, TargetOS *target_os,
+    int *export_executable,
     int *freestanding_requested, int *m32, int *opt_level, int *debug_symbols,
     int *strip_metadata, int *strip_hard, int *obfuscate,
     AsmSyntax *asm_syntax, const char **chancecodec_cmd_override,
@@ -1138,6 +1148,7 @@ int parse_ceproj_file(
           .stop_after_asm = stop_after_asm,
           .no_link = no_link,
           .emit_library = emit_library,
+          .export_executable = export_executable,
           .freestanding = freestanding,
           .freestanding_requested = freestanding_requested,
           .m32 = m32,

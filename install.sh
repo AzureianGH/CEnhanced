@@ -57,6 +57,27 @@ section() {
   printf "\n%s%s== %s ==%s\n" "$C_BOLD" "$C_MAGENTA" "$1" "$C_RESET"
 }
 
+persist_export() {
+  profile="$1"
+  var_name="$2"
+  var_value="$3"
+
+  if [ -z "$profile" ] || [ -z "$var_name" ] || [ -z "$var_value" ]; then
+    return
+  fi
+
+  if [ ! -f "$profile" ]; then
+    touch "$profile"
+  fi
+
+  tmp_file="$profile.chance.$$"
+  if ! grep -v "^export ${var_name}=" "$profile" > "$tmp_file" 2>/dev/null; then
+    : > "$tmp_file"
+  fi
+  printf "export %s=\"%s\"\n" "$var_name" "$var_value" >> "$tmp_file"
+  mv "$tmp_file" "$profile"
+}
+
 PREFIX=${PREFIX:-/usr/local}
 BIN_DIR="$PREFIX/bin"
 SHARE_DIR="$PREFIX/share/chance"
@@ -67,6 +88,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CHANCECODE_DIR="${1:-$SCRIPT_DIR/../ChanceCode}"
 CLD_DIR="${2:-$SCRIPT_DIR/../CLD}"
 CHS_DIR="${3:-$SCRIPT_DIR/../CHS}"
+CVM_DIR="${4:-$SCRIPT_DIR/../CVM}"
 if [ -n "$CHANCECODE_DIR" ]; then
   if cd "$CHANCECODE_DIR" >/dev/null 2>&1; then
     CHANCECODE_DIR=$(pwd)
@@ -82,6 +104,12 @@ fi
 if [ -n "$CHS_DIR" ]; then
   if cd "$CHS_DIR" >/dev/null 2>&1; then
     CHS_DIR=$(pwd)
+    cd "$SCRIPT_DIR"
+  fi
+fi
+if [ -n "$CVM_DIR" ]; then
+  if cd "$CVM_DIR" >/dev/null 2>&1; then
+    CVM_DIR=$(pwd)
     cd "$SCRIPT_DIR"
   fi
 fi
@@ -111,6 +139,16 @@ if [ -n "$CHS_DIR" ] && [ -f "$CHS_DIR/Makefile" ]; then
   log "Building CHS"
   (cd "$CHS_DIR" && "$MAKE_BIN")
   ok "CHS build complete"
+fi
+
+if [ -n "$CVM_DIR" ] && [ -f "$CVM_DIR/CMakeLists.txt" ]; then
+  if ! command -v cmake >/dev/null 2>&1; then
+    err "error: cmake is required to build CVM"
+    exit 1
+  fi
+  log "Building CVM"
+  (cd "$CVM_DIR" && cmake -S . -B build && cmake --build build)
+  ok "CVM build complete"
 fi
 
 CHANCEC_BIN="$SCRIPT_DIR/build/chancec"
@@ -184,6 +222,35 @@ elif [ -x "$CHANCECODE_DIR/build/chancecodec" ]; then
   install -m 755 "$CHANCECODE_DIR/build/chancecodec" "$BIN_DIR/chancecodec"
 fi
 
+if [ -n "$CVM_DIR" ] && [ -x "$CVM_DIR/build/cvm" ]; then
+  log "Installing CVM"
+  install -m 755 "$CVM_DIR/build/cvm" "$BIN_DIR/cvm"
+
+  if [ -f "$SCRIPT_DIR/src/stdlib/stdlib.cclib" ]; then
+    install -m 644 "$SCRIPT_DIR/src/stdlib/stdlib.cclib" "$BIN_DIR/stdlib.cclib"
+  else
+    warn "warning: stdlib.cclib not found at $SCRIPT_DIR/src/stdlib/stdlib.cclib"
+  fi
+
+  if [ -f "$SCRIPT_DIR/runtime/runtime.cclib" ]; then
+    install -m 644 "$SCRIPT_DIR/runtime/runtime.cclib" "$BIN_DIR/runtime.cclib"
+  else
+    warn "warning: runtime.cclib not found at $SCRIPT_DIR/runtime/runtime.cclib"
+  fi
+
+  if [ -f "$SCRIPT_DIR/src/stdlib/stdlib.ccb" ]; then
+    install -m 644 "$SCRIPT_DIR/src/stdlib/stdlib.ccb" "$BIN_DIR/stdlib.ccb"
+  else
+    warn "warning: stdlib.ccb not found at $SCRIPT_DIR/src/stdlib/stdlib.ccb"
+  fi
+
+  if [ -f "$SCRIPT_DIR/runtime/runtime.ccb" ]; then
+    install -m 644 "$SCRIPT_DIR/runtime/runtime.ccb" "$BIN_DIR/runtime.ccb"
+  else
+    warn "warning: runtime.ccb not found at $SCRIPT_DIR/runtime/runtime.ccb"
+  fi
+fi
+
 if [ -n "$CLD_DIR" ] && [ -f "$CLD_DIR/Makefile" ]; then
   MAKE_BIN=$(find_make)
   if [ -z "$MAKE_BIN" ]; then
@@ -203,5 +270,38 @@ if [ -n "$CHS_DIR" ] && [ -f "$CHS_DIR/Makefile" ]; then
   log "Installing CHS"
   (cd "$CHS_DIR" && "$MAKE_BIN" install PREFIX="$PREFIX")
 fi
+
+section "Environment"
+log "Persisting CHance tool homes"
+
+CHANCEC_HOME_PATH="$BIN_DIR/chancec"
+CHANCECODEC_HOME_PATH="$BIN_DIR/chancecodec"
+CLD_HOME_PATH="$BIN_DIR/cld"
+CHS_HOME_PATH="$BIN_DIR/chs"
+CVM_HOME_PATH="$BIN_DIR/cvm"
+
+HOME_ZSHRC="${HOME}/.zshrc"
+HOME_BASHRC="${HOME}/.bashrc"
+HOME_PROFILE="${HOME}/.profile"
+
+persist_export "$HOME_ZSHRC" "CHANCEC_HOME" "$CHANCEC_HOME_PATH"
+persist_export "$HOME_ZSHRC" "CHANCECODEC_HOME" "$CHANCECODEC_HOME_PATH"
+persist_export "$HOME_ZSHRC" "CLD_HOME" "$CLD_HOME_PATH"
+persist_export "$HOME_ZSHRC" "CHS_HOME" "$CHS_HOME_PATH"
+persist_export "$HOME_ZSHRC" "CVM_HOME" "$CVM_HOME_PATH"
+
+persist_export "$HOME_BASHRC" "CHANCEC_HOME" "$CHANCEC_HOME_PATH"
+persist_export "$HOME_BASHRC" "CHANCECODEC_HOME" "$CHANCECODEC_HOME_PATH"
+persist_export "$HOME_BASHRC" "CLD_HOME" "$CLD_HOME_PATH"
+persist_export "$HOME_BASHRC" "CHS_HOME" "$CHS_HOME_PATH"
+persist_export "$HOME_BASHRC" "CVM_HOME" "$CVM_HOME_PATH"
+
+persist_export "$HOME_PROFILE" "CHANCEC_HOME" "$CHANCEC_HOME_PATH"
+persist_export "$HOME_PROFILE" "CHANCECODEC_HOME" "$CHANCECODEC_HOME_PATH"
+persist_export "$HOME_PROFILE" "CLD_HOME" "$CLD_HOME_PATH"
+persist_export "$HOME_PROFILE" "CHS_HOME" "$CHS_HOME_PATH"
+persist_export "$HOME_PROFILE" "CVM_HOME" "$CVM_HOME_PATH"
+
+note "Wrote exports to: $HOME_ZSHRC, $HOME_BASHRC, $HOME_PROFILE"
 
 ok "Done"

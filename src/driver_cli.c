@@ -76,6 +76,8 @@ void usage(const char *prog)
           "  -H27             Compile in H27 language mode (default)\n");
   fprintf(stderr, "  --library         Emit a .cclib library instead of "
                   "compiling/linking\n");
+        fprintf(stderr, "  --export-exe      Emit native launcher executable with embedded .cclib payload\n");
+        fprintf(stderr, "  --static          Embed input/default .cclib modules into --library output\n");
 }
 
 int ends_with_icase(const char *s, const char *suf)

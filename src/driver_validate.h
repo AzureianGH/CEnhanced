@@ -14,6 +14,7 @@ typedef struct
   int *stop_after_ccb;
   int *no_link;
   int *emit_library;
+  int *export_executable;
   int *freestanding;
   int *m32;
   int *debug_symbols;

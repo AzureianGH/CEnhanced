@@ -18,6 +18,8 @@ typedef struct
   int *stop_after_ccb;
   int *no_link;
   int *emit_library;
+  int *export_executable;
+  int *static_link;
   int *freestanding;
   int *freestanding_requested;
   int *m32;
