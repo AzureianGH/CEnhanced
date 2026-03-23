@@ -5,6 +5,7 @@ typedef struct
 {
   const char *exe_dir;
   int no_link;
+  int emit_library;
 
   int *freestanding_requested;
   int *freestanding;

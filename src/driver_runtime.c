@@ -95,6 +95,9 @@ int maybe_inject_default_runtime_libs(const DriverRuntimeLibState *state)
       !state->owned_cclib_cap)
     return -1;
 
+  if (state->emit_library)
+    return 0;
+
   if (state->no_link)
     return 0;
 

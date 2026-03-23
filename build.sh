@@ -41,10 +41,14 @@ if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! comm
   exit 1
 fi
 
-cmake -S . -B build -G "$GENERATOR" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_C_FLAGS_RELEASE="-O2" \
-  ${CHANCE_DEFAULT_RUNTIME:+-DCHANCE_DEFAULT_RUNTIME="$CHANCE_DEFAULT_RUNTIME"} \
-  ${CHANCE_DEFAULT_STDLIB:+-DCHANCE_DEFAULT_STDLIB="$CHANCE_DEFAULT_STDLIB"}
+if [[ ! -f build/CMakeCache.txt ]]; then
+  cmake -S . -B build -G "$GENERATOR" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_C_FLAGS_RELEASE="-O2" \
+    ${CHANCE_DEFAULT_RUNTIME:+-DCHANCE_DEFAULT_RUNTIME="$CHANCE_DEFAULT_RUNTIME"} \
+    ${CHANCE_DEFAULT_STDLIB:+-DCHANCE_DEFAULT_STDLIB="$CHANCE_DEFAULT_STDLIB"}
+else
+  echo "Using existing CMake cache in ./build (skipping configure)"
+fi
 
 cmake --build build --config Release

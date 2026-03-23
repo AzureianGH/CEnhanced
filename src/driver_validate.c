@@ -8,7 +8,7 @@ int validate_driver_options(const DriverValidationState *state)
 {
   if (!state || !state->out || !state->output_overridden ||
       !state->stop_after_asm || !state->stop_after_ccb || !state->no_link ||
-      !state->emit_library || !state->export_executable || !state->freestanding || !state->m32 ||
+      !state->emit_library || !state->export_executable || !state->static_link || !state->freestanding || !state->m32 ||
       !state->debug_symbols || !state->strip_metadata ||
       !state->implicit_void_function || !state->language_standard ||
       !state->request_ast || !state->diagnostics_only || !state->target_arch ||
@@ -83,15 +83,14 @@ int validate_driver_options(const DriverValidationState *state)
                       "selection (e.g., -x86 or -arm64)\n");
       return 2;
     }
-    if (*state->ccb_count > 0 || *state->obj_count > 0 || *state->asm_count > 0 ||
-        *state->cclib_count > 0)
+    if (*state->ccb_count > 0 || *state->obj_count > 0 || *state->asm_count > 0)
     {
-      fprintf(stderr, "error: --library currently only accepts .ce inputs\n");
+      fprintf(stderr, "error: --library currently accepts only .ce and .cclib inputs\n");
       return 2;
     }
-    if (*state->ce_count == 0)
+    if (*state->ce_count == 0 && *state->cclib_count == 0)
     {
-      fprintf(stderr, "error: --library requires at least one .ce input\n");
+      fprintf(stderr, "error: --library requires at least one .ce or .cclib input\n");
       return 2;
     }
     if (!*state->export_executable)

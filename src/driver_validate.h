@@ -15,6 +15,7 @@ typedef struct
   int *no_link;
   int *emit_library;
   int *export_executable;
+  int *static_link;
   int *freestanding;
   int *m32;
   int *debug_symbols;

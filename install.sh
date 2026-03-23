@@ -147,7 +147,11 @@ if [ -n "$CVM_DIR" ] && [ -f "$CVM_DIR/CMakeLists.txt" ]; then
     exit 1
   fi
   log "Building CVM"
-  (cd "$CVM_DIR" && cmake -S . -B build && cmake --build build)
+  if [ -f "$CVM_DIR/build/CMakeCache.txt" ]; then
+    (cd "$CVM_DIR" && cmake --build build)
+  else
+    (cd "$CVM_DIR" && cmake -S . -B build && cmake --build build)
+  fi
   ok "CVM build complete"
 fi
 

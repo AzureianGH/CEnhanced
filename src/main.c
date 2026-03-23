@@ -66,6 +66,25 @@ static int verbose_use_ansi = 1;
 static const char *target_os_to_option(TargetOS os);
 static char *make_backend_name_from_module(const char *module_full,
                                            const char *fn_name);
+static int run_chs_assemble_process(const char *cmd, TargetArch arch,
+                                    TargetOS target_os,
+                                    const char *asm_path,
+                                    const char *obj_path,
+                                    int toolchain_debug_mode,
+                                    int toolchain_debug_deep,
+                                    int *spawn_errno_out);
+
+static void emit_asm_cstr_bytes(FILE *f, const char *text)
+{
+  size_t n = text ? strlen(text) : 0;
+  fprintf(f, "  .byte ");
+  for (size_t i = 0; i < n; ++i)
+  {
+    fprintf(f, "0x%02x", (unsigned char)text[i]);
+    fprintf(f, ", ");
+  }
+  fprintf(f, "0x00\n");
+}
 
 static void verbose_section(const char *title)
 {
@@ -190,13 +209,344 @@ static char *read_all(const char *path, int *out_len)
 }
 
 static int emit_export_launcher_executable(const char *output_exe,
-                                           const char *bundle_cclib)
+                                           const char *bundle_cclib,
+                                           const char *exe_dir,
+                                           const char *chs_cmd_to_use,
+                                           const char *cld_cmd_to_use,
+                                           const char *cld_target_to_use,
+                                           int cld_supported_link_target,
+                                           TargetArch target_arch,
+                                           TargetOS target_os,
+                                           int toolchain_debug_mode,
+                                           int toolchain_debug_deep,
+                                           int debug_symbols)
 {
-  (void)output_exe;
-  (void)bundle_cclib;
-  fprintf(stderr,
-          "error: --export-exe requires host C compilation and is disabled in CHS/CLD-only mode\n");
-  return -1;
+  TargetArch launcher_arch = target_arch;
+  if (!output_exe || !*output_exe || !bundle_cclib || !*bundle_cclib)
+  {
+    fprintf(stderr, "error: export launcher missing required inputs\n");
+    return -1;
+  }
+
+  char chs_cmd_buf[1024] = {0};
+  char cld_cmd_buf[1024] = {0};
+  const char *launcher_chs_cmd = chs_cmd_to_use;
+  const char *launcher_cld_cmd = cld_cmd_to_use;
+  if (!launcher_chs_cmd || !*launcher_chs_cmd)
+  {
+    const char *env_chs = getenv("CHS_CMD");
+    if (env_chs && *env_chs)
+    {
+      launcher_chs_cmd = env_chs;
+    }
+    else if (locate_chs(chs_cmd_buf, sizeof(chs_cmd_buf), exe_dir) == 0 &&
+             chs_cmd_buf[0])
+    {
+      launcher_chs_cmd = chs_cmd_buf;
+    }
+    else
+    {
+      launcher_chs_cmd = "chs";
+    }
+
+    if (!launcher_chs_cmd || !*launcher_chs_cmd)
+    {
+      fprintf(stderr, "error: failed to resolve CHS for --export-exe\n");
+      return -1;
+    }
+  }
+  if (!launcher_cld_cmd || !*launcher_cld_cmd)
+  {
+    const char *env_cld = getenv("CLD_CMD");
+    if (env_cld && *env_cld)
+    {
+      launcher_cld_cmd = env_cld;
+    }
+    else if (locate_cld(cld_cmd_buf, sizeof(cld_cmd_buf), exe_dir) == 0 &&
+             cld_cmd_buf[0])
+    {
+      launcher_cld_cmd = cld_cmd_buf;
+    }
+    else
+    {
+      launcher_cld_cmd = "cld";
+    }
+
+    if (!launcher_cld_cmd || !*launcher_cld_cmd)
+    {
+      fprintf(stderr, "error: failed to resolve CLD for --export-exe\n");
+      return -1;
+    }
+  }
+
+  if (launcher_arch == ARCH_NONE)
+  {
+#if defined(__aarch64__) || defined(__arm64__)
+    launcher_arch = ARCH_ARM64;
+#elif defined(__x86_64__) || defined(_M_X64)
+    launcher_arch = ARCH_X86;
+#endif
+  }
+
+  if (target_os != OS_MACOS || launcher_arch != ARCH_ARM64)
+  {
+    fprintf(stderr,
+            "error: --export-exe native launcher currently supports only macOS arm64 in CHS/CLD mode (arch=%d, os=%d)\n",
+            (int)launcher_arch, (int)target_os);
+    return -1;
+  }
+  const char *launcher_cld_target = cld_target_to_use;
+  if (!launcher_cld_target || !*launcher_cld_target)
+    launcher_cld_target = "macos-arm64";
+  if ((!cld_supported_link_target && cld_target_to_use && *cld_target_to_use) ||
+      !launcher_cld_target || !*launcher_cld_target)
+  {
+    fprintf(stderr,
+            "error: --export-exe requires CLD target support in CHS/CLD mode\n");
+    return -1;
+  }
+
+  int blob_len = 0;
+  char *blob = read_all(bundle_cclib, &blob_len);
+  if (!blob || blob_len <= 0)
+  {
+    fprintf(stderr, "error: failed to read bundled cclib '%s'\n", bundle_cclib);
+    free(blob);
+    return -1;
+  }
+
+  char asm_template[] = "/tmp/chance_export_launcher_XXXXXX";
+  int asm_fd = mkstemp(asm_template);
+  if (asm_fd < 0)
+  {
+    fprintf(stderr, "error: failed to create temporary launcher asm path\n");
+    free(blob);
+    return -1;
+  }
+  FILE *asmf = fdopen(asm_fd, "w");
+  if (!asmf)
+  {
+    fprintf(stderr, "error: failed to open temporary launcher asm file\n");
+    close(asm_fd);
+    remove(asm_template);
+    free(blob);
+    return -1;
+  }
+
+  fprintf(asmf, ".build_version macos, 15, 0\n");
+  fprintf(asmf, ".extern _getenv\n");
+  fprintf(asmf, ".extern _access\n");
+  fprintf(asmf, ".extern _mkstemp\n");
+  fprintf(asmf, ".extern _write\n");
+  fprintf(asmf, ".extern _close\n");
+  fprintf(asmf, ".extern _snprintf\n");
+  fprintf(asmf, ".extern _system\n");
+  fprintf(asmf, ".extern _remove\n");
+  fprintf(asmf, ".extern _strlen\n");
+  fprintf(asmf, "\n.section __DATA,__data\n");
+  fprintf(asmf, ".p2align 3\n");
+  fprintf(asmf, "_launcher_tmp_template:\n");
+  emit_asm_cstr_bytes(asmf, "/tmp/chance_bundle_XXXXXX");
+  fprintf(asmf, "_launcher_cvm_home:\n");
+  emit_asm_cstr_bytes(asmf, "CVM_HOME");
+  fprintf(asmf, "_launcher_cvm_suffix_fmt:\n");
+  emit_asm_cstr_bytes(asmf, "%s/cvm");
+  fprintf(asmf, "_launcher_cvm_fallback:\n");
+  emit_asm_cstr_bytes(asmf, "cvm");
+  fprintf(asmf, "_launcher_cmd_fmt:\n");
+  emit_asm_cstr_bytes(asmf, "\"%s\" \"%s\"");
+  fprintf(asmf, "_launcher_err_invalid:\n");
+  emit_asm_cstr_bytes(asmf, "error: CVM_HOME is invalid");
+  fprintf(asmf, "_launcher_err_nf:\n");
+  emit_asm_cstr_bytes(asmf, "framework not found");
+  fprintf(asmf, "_launcher_cvm_buf:\n");
+  fprintf(asmf, "  .space 1024\n");
+  fprintf(asmf, "_launcher_cmd_buf:\n");
+  fprintf(asmf, "  .space 2048\n");
+  fprintf(asmf, "\n.section __DATA,__const\n");
+  fprintf(asmf, ".p2align 3\n");
+  fprintf(asmf, "_launcher_payload_start:\n");
+  for (int i = 0; i < blob_len; ++i)
+  {
+    if (i % 16 == 0)
+      fprintf(asmf, "  .byte ");
+    fprintf(asmf, "0x%02x", (unsigned char)blob[i]);
+    if (i + 1 < blob_len && (i % 16) != 15)
+      fprintf(asmf, ", ");
+    if ((i % 16) == 15 || i + 1 == blob_len)
+      fprintf(asmf, "\n");
+  }
+  fprintf(asmf, "_launcher_payload_end:\n");
+  fprintf(asmf, "\n.section __TEXT,__text,regular,pure_instructions\n");
+  fprintf(asmf, ".p2align 2\n");
+  fprintf(asmf, "_launcher_write_err:\n");
+  fprintf(asmf, "  stp x29, x30, [sp, #-16]!\n");
+  fprintf(asmf, "  mov x29, sp\n");
+  fprintf(asmf, "  stp x19, x20, [sp, #-16]!\n");
+  fprintf(asmf, "  mov x19, x0\n");
+  fprintf(asmf, "  bl _strlen\n");
+  fprintf(asmf, "  mov x2, x0\n");
+  fprintf(asmf, "  movz w0, #2\n");
+  fprintf(asmf, "  mov x1, x19\n");
+  fprintf(asmf, "  bl _write\n");
+  fprintf(asmf, "  movz w0, #1\n");
+  fprintf(asmf, "  ldp x19, x20, [sp], #16\n");
+  fprintf(asmf, "  ldp x29, x30, [sp], #16\n");
+  fprintf(asmf, "  ret\n\n");
+  fprintf(asmf, ".globl _main\n");
+  fprintf(asmf, "_main:\n");
+  fprintf(asmf, "  stp x29, x30, [sp, #-16]!\n");
+  fprintf(asmf, "  mov x29, sp\n");
+  fprintf(asmf, "  stp x19, x20, [sp, #-16]!\n");
+  fprintf(asmf, "  stp x21, x22, [sp, #-16]!\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "  adrp x0, _launcher_cvm_home@PAGE\n");
+  fprintf(asmf, "  add x0, x0, _launcher_cvm_home@PAGEOFF\n");
+  fprintf(asmf, "  bl _getenv\n");
+  fprintf(asmf, "  cbz x0, Lno_home\n");
+  fprintf(asmf, "  mov x19, x0\n");
+  fprintf(asmf, "  mov x0, x19\n");
+  fprintf(asmf, "  movz w1, #1\n");
+  fprintf(asmf, "  bl _access\n");
+  fprintf(asmf, "  cmp w0, wzr\n");
+  fprintf(asmf, "  b.eq Lhave_cvm\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "  adrp x0, _launcher_cvm_buf@PAGE\n");
+  fprintf(asmf, "  add x0, x0, _launcher_cvm_buf@PAGEOFF\n");
+  fprintf(asmf, "  movz x1, #1024\n");
+  fprintf(asmf, "  adrp x2, _launcher_cvm_suffix_fmt@PAGE\n");
+  fprintf(asmf, "  add x2, x2, _launcher_cvm_suffix_fmt@PAGEOFF\n");
+  fprintf(asmf, "  mov x3, x19\n");
+  fprintf(asmf, "  bl _snprintf\n");
+  fprintf(asmf, "  adrp x0, _launcher_cvm_buf@PAGE\n");
+  fprintf(asmf, "  add x0, x0, _launcher_cvm_buf@PAGEOFF\n");
+  fprintf(asmf, "  movz w1, #1\n");
+  fprintf(asmf, "  bl _access\n");
+  fprintf(asmf, "  cmp w0, wzr\n");
+  fprintf(asmf, "  b.ne Linvalid_home\n");
+  fprintf(asmf, "  adrp x19, _launcher_cvm_buf@PAGE\n");
+  fprintf(asmf, "  add x19, x19, _launcher_cvm_buf@PAGEOFF\n");
+  fprintf(asmf, "  b Lhave_cvm\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "Lno_home:\n");
+  fprintf(asmf, "  adrp x19, _launcher_cvm_fallback@PAGE\n");
+  fprintf(asmf, "  add x19, x19, _launcher_cvm_fallback@PAGEOFF\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "Lhave_cvm:\n");
+  fprintf(asmf, "  adrp x0, _launcher_tmp_template@PAGE\n");
+  fprintf(asmf, "  add x0, x0, _launcher_tmp_template@PAGEOFF\n");
+  fprintf(asmf, "  bl _mkstemp\n");
+  fprintf(asmf, "  cmp w0, wzr\n");
+  fprintf(asmf, "  b.lt Lnot_found\n");
+  fprintf(asmf, "  mov w20, w0\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "  sxtw x0, w20\n");
+  fprintf(asmf, "  adrp x1, _launcher_payload_start@PAGE\n");
+  fprintf(asmf, "  add x1, x1, _launcher_payload_start@PAGEOFF\n");
+  fprintf(asmf, "  adrp x2, _launcher_payload_end@PAGE\n");
+  fprintf(asmf, "  add x2, x2, _launcher_payload_end@PAGEOFF\n");
+  fprintf(asmf, "  sub x2, x2, x1\n");
+  fprintf(asmf, "  bl _write\n");
+  fprintf(asmf, "  sxtw x0, w20\n");
+  fprintf(asmf, "  bl _close\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "  adrp x0, _launcher_cmd_buf@PAGE\n");
+  fprintf(asmf, "  add x0, x0, _launcher_cmd_buf@PAGEOFF\n");
+  fprintf(asmf, "  movz x1, #2048\n");
+  fprintf(asmf, "  adrp x2, _launcher_cmd_fmt@PAGE\n");
+  fprintf(asmf, "  add x2, x2, _launcher_cmd_fmt@PAGEOFF\n");
+  fprintf(asmf, "  mov x3, x19\n");
+  fprintf(asmf, "  adrp x4, _launcher_tmp_template@PAGE\n");
+  fprintf(asmf, "  add x4, x4, _launcher_tmp_template@PAGEOFF\n");
+  fprintf(asmf, "  bl _snprintf\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "  adrp x0, _launcher_cmd_buf@PAGE\n");
+  fprintf(asmf, "  add x0, x0, _launcher_cmd_buf@PAGEOFF\n");
+  fprintf(asmf, "  bl _system\n");
+  fprintf(asmf, "  mov w21, w0\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "  adrp x0, _launcher_tmp_template@PAGE\n");
+  fprintf(asmf, "  add x0, x0, _launcher_tmp_template@PAGEOFF\n");
+  fprintf(asmf, "  bl _remove\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "  mov w0, w21\n");
+  fprintf(asmf, "  b Ldone\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "Linvalid_home:\n");
+  fprintf(asmf, "  adrp x0, _launcher_err_invalid@PAGE\n");
+  fprintf(asmf, "  add x0, x0, _launcher_err_invalid@PAGEOFF\n");
+  fprintf(asmf, "  bl _launcher_write_err\n");
+  fprintf(asmf, "  b Ldone\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "Lnot_found:\n");
+  fprintf(asmf, "  adrp x0, _launcher_err_nf@PAGE\n");
+  fprintf(asmf, "  add x0, x0, _launcher_err_nf@PAGEOFF\n");
+  fprintf(asmf, "  bl _launcher_write_err\n");
+  fprintf(asmf, "\n");
+  fprintf(asmf, "Ldone:\n");
+  fprintf(asmf, "  ldp x21, x22, [sp], #16\n");
+  fprintf(asmf, "  ldp x19, x20, [sp], #16\n");
+  fprintf(asmf, "  ldp x29, x30, [sp], #16\n");
+  fprintf(asmf, "  ret\n");
+
+  fclose(asmf);
+  free(blob);
+
+  char obj_template[] = "/tmp/chance_export_launcher_obj_XXXXXX";
+  int obj_fd = mkstemp(obj_template);
+  if (obj_fd < 0)
+  {
+    fprintf(stderr, "error: failed to create temporary launcher object path\n");
+    remove(asm_template);
+    return -1;
+  }
+  close(obj_fd);
+
+  int spawn_errno = 0;
+  int chs_rc = run_chs_assemble_process(launcher_chs_cmd, launcher_arch, target_os,
+                                        asm_template, obj_template,
+                                        toolchain_debug_mode,
+                                        toolchain_debug_deep, &spawn_errno);
+  remove(asm_template);
+  if (chs_rc != 0)
+  {
+    fprintf(stderr, "error: export launcher CHS stage failed (rc=%d)\n", chs_rc);
+    if (chs_rc < 0)
+      fprintf(stderr, "error: failed to run CHS for export launcher (%s)\n",
+              strerror(spawn_errno ? spawn_errno : errno));
+    remove(obj_template);
+    return -1;
+  }
+
+  DriverLinkPhaseState launcher_link_state = {
+      .multi_link = 0,
+      .have_single_obj = 1,
+      .single_obj_is_temp = 1,
+      .no_link = 0,
+      .obj_override = NULL,
+      .cld_supported_link_target = 1,
+      .cld_cmd_to_use = launcher_cld_cmd,
+      .cld_target_to_use = launcher_cld_target,
+      .cld_uses_fallback = 0,
+      .freestanding = 0,
+      .toolchain_debug_mode = toolchain_debug_mode,
+      .toolchain_debug_deep = toolchain_debug_deep,
+      .debug_symbols = debug_symbols,
+      .target_os = target_os,
+      .entry_symbol = "main",
+      .out = output_exe,
+      .obj_inputs = NULL,
+      .obj_count = 0,
+      .single_obj_path = obj_template,
+      .temp_objs = NULL,
+      .to_cnt = NULL,
+      .to_cap = NULL,
+  };
+  int link_rc = run_driver_link_phase(&launcher_link_state);
+  if (link_rc != 0)
+    fprintf(stderr, "error: export launcher CLD stage failed\n");
+  remove(obj_template);
+  return link_rc;
 }
 
 static int unit_is_embedded_force_inline_literal_only(const Node *unit)
@@ -3734,6 +4084,7 @@ int main(int argc, char **argv)
       .no_link = &no_link,
       .emit_library = &emit_library,
       .export_executable = &export_executable,
+      .static_link = &static_link,
       .freestanding = &freestanding,
       .m32 = &m32,
       .debug_symbols = &debug_symbols,
@@ -3792,6 +4143,7 @@ int main(int argc, char **argv)
   DriverRuntimeLibState runtime_libs = {
       .exe_dir = exe_dir,
       .no_link = no_link,
+      .emit_library = emit_library,
       .freestanding_requested = &freestanding_requested,
       .freestanding = &freestanding,
       .default_stdlib_path = DEFAULT_STDLIB,
@@ -3905,7 +4257,7 @@ int main(int argc, char **argv)
       }
     }
   }
-  if ((!emit_library || static_link) && cclib_count > 0)
+  if (cclib_count > 0)
   {
     for (int i = 0; i < cclib_count; ++i)
     {
@@ -4898,7 +5250,7 @@ int main(int argc, char **argv)
       library_out_path = export_cclib_path;
     }
 
-    if (static_link)
+    if (loaded_library_count > 0)
     {
       if (merge_loaded_libraries_into_library_modules(
               loaded_libraries, loaded_library_count,
@@ -4906,7 +5258,7 @@ int main(int argc, char **argv)
               &library_module_cap) != 0)
       {
         fprintf(stderr,
-                "error: failed to merge static cclib modules into library output\n");
+                "error: failed to merge cclib modules into library output\n");
         rc = 1;
         goto cleanup;
       }
@@ -4937,7 +5289,17 @@ int main(int argc, char **argv)
       else if (export_executable)
       {
         int export_rc = emit_export_launcher_executable(out,
-                                                        library_out_path);
+                                                        library_out_path,
+                                                        exe_dir,
+                                                        chs_cmd_to_use,
+                                                        cld_cmd_to_use,
+                                                        cld_target_to_use,
+                                                        cld_supported_link_target,
+                                                        target_arch,
+                                                        target_os,
+                                                        toolchain_debug_mode,
+                                                        toolchain_debug_deep,
+                                                        debug_symbols);
         if (export_rc != 0)
         {
           fprintf(stderr,
