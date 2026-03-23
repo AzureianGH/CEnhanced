@@ -47,10 +47,10 @@ int validate_driver_options(const DriverValidationState *state)
                       "object emission when stopping at bytecode)\n");
       return 2;
     }
-    if (*state->obj_count > 0 || *state->ccb_count > 0 || *state->asm_count > 0)
+      if (*state->ce_count == 0)
     {
-      fprintf(stderr, "error: providing .ccb/.o/.obj inputs requires selecting "
-                      "a backend (e.g., -x86 or -arm64)\n");
+        fprintf(stderr,
+                "error: -Sccb without backend requires at least one .ce input\n");
       return 2;
     }
   }

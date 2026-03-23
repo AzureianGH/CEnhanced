@@ -34,9 +34,19 @@ static const char *cld_target_name_for_link(TargetArch arch, TargetOS os)
   switch (arch)
   {
   case ARCH_ARM64:
-    return os == OS_MACOS ? "macos-arm64" : NULL;
+    if (os == OS_MACOS)
+      return "macos-arm64";
+    if (os == OS_LINUX)
+      return "arm64-elf";
+    if (os == OS_WINDOWS)
+      return "arm64-windows";
+    return NULL;
   case ARCH_X86:
-    return os == OS_LINUX ? "x86_64-elf" : NULL;
+    if (os == OS_LINUX)
+      return "x86_64-elf";
+    if (os == OS_MACOS)
+      return "macos-x86_64";
+    return NULL;
   case ARCH_BSLASH:
     return "bslash";
   default:
@@ -50,22 +60,6 @@ int resolve_driver_toolchain(const DriverToolchainInputs *inputs,
   if (!inputs || !selection)
     return 2;
   memset(selection, 0, sizeof(*selection));
-
-  selection->host_cc_cmd_to_use = "cc";
-  if (inputs->host_cc_cmd_override && *inputs->host_cc_cmd_override)
-  {
-    strip_wrapping_quotes(inputs->host_cc_cmd_override,
-                          selection->host_cc_override_buf,
-                          sizeof(selection->host_cc_override_buf));
-    if (!selection->host_cc_override_buf[0])
-    {
-      fprintf(stderr,
-              "error: --cc path is empty after trimming quotes/whitespace\n");
-      return 2;
-    }
-    selection->host_cc_cmd_to_use = selection->host_cc_override_buf;
-    selection->host_cc_has_override = 1;
-  }
 
   selection->needs_chancecodec =
       (inputs->target_arch != ARCH_NONE) || inputs->emit_library;
@@ -101,7 +95,8 @@ int resolve_driver_toolchain(const DriverToolchainInputs *inputs,
 
   selection->needs_chs = !inputs->emit_library && !inputs->stop_after_ccb &&
                          !inputs->stop_after_asm &&
-                         (inputs->target_arch == ARCH_ARM64 ||
+                         (inputs->target_arch == ARCH_X86 ||
+                          inputs->target_arch == ARCH_ARM64 ||
                           inputs->target_arch == ARCH_BSLASH);
   if (selection->needs_chs)
   {

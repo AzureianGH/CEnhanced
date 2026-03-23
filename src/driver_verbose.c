@@ -176,12 +176,6 @@ void driver_verbose_print_config(const DriverVerboseConfigState *state)
                            state->chancecode_backend
                                ? state->chancecode_backend
                                : "(auto)");
-  driver_verbose_table_row("Host CC",
-                           (state->host_cc_cmd && *state->host_cc_cmd)
-                               ? state->host_cc_cmd
-                               : "cc");
-  driver_verbose_table_row("Host CC override",
-                           bool_str(state->host_cc_has_override));
 
   if (state->needs_chancecodec)
   {

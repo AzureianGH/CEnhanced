@@ -7,7 +7,6 @@
 typedef struct
 {
   const char *exe_dir;
-  const char *host_cc_cmd_override;
   const char *chancecodec_cmd_override;
   const char *chs_cmd_override;
 
@@ -21,9 +20,6 @@ typedef struct
 
 typedef struct
 {
-  const char *host_cc_cmd_to_use;
-  int host_cc_has_override;
-
   const char *chancecodec_cmd_to_use;
   int chancecodec_uses_fallback;
   int chancecodec_has_override;
@@ -39,7 +35,6 @@ typedef struct
   const char *cld_target_to_use;
   int cld_supported_link_target;
 
-  char host_cc_override_buf[1024];
   char chancecodec_exec_buf[1024];
   char chancecodec_override_buf[1024];
   char chs_exec_buf[1024];

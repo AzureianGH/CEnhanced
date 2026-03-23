@@ -22,7 +22,7 @@ static void maybe_generate_dsym(const char *binary_path, int debug_symbols,
   if (!binary_path || !debug_symbols || target_os != OS_MACOS)
     return;
   char ds_cmd[4096];
-  snprintf(ds_cmd, sizeof(ds_cmd), "dsymutil \"%s\"", binary_path);
+  snprintf(ds_cmd, sizeof(ds_cmd), "dsymutil -q \"%s\"", binary_path);
   int ds_rc = system(ds_cmd);
   if (ds_rc != 0)
   {

@@ -2,6 +2,7 @@
 #define CHANCE_DRIVER_LINK_H
 
 #include "ast.h"
+#include "driver_types.h"
 
 typedef struct
 {

@@ -34,7 +34,6 @@ typedef struct
   const char **chancecode_backend;
   const char **chancecodec_cmd_override;
   const char **chs_cmd_override;
-  const char **host_cc_cmd_override;
   const char **entry_symbol;
   TargetOS *target_os;
   char ***include_dirs;
@@ -557,20 +556,6 @@ static int project_args_apply(const char *proj_path, int lineno,
         i++;
       continue;
     }
-    if (strcmp(arg, "--cc") == 0)
-    {
-      if (i + 1 >= count)
-      {
-        fprintf(stderr, "error: --cc expects a path in '%s' (line %d)\n",
-                proj_path, lineno);
-        return -1;
-      }
-      if (state->host_cc_cmd_override)
-        *state->host_cc_cmd_override = xstrdup(args[++i]);
-      else
-        i++;
-      continue;
-    }
     if (strcmp(arg, "--entry") == 0 || strcmp(arg, "-e") == 0)
     {
       if (i + 1 >= count)
@@ -919,7 +904,7 @@ int parse_ceproj_file(
     int *freestanding_requested, int *m32, int *opt_level, int *debug_symbols,
     int *strip_metadata, int *strip_hard, int *obfuscate,
     AsmSyntax *asm_syntax, const char **chancecodec_cmd_override,
-    const char **chs_cmd_override, const char **host_cc_cmd_override,
+    const char **chs_cmd_override,
     const char **entry_symbol,
     const char **obj_override, int *implicit_voidp, int *implicit_void_function,
     int *implicit_sizeof, int *request_ast, int *language_standard,
@@ -1079,6 +1064,16 @@ int parse_ceproj_file(
         if (target_os)
           *target_os = OS_LINUX;
       }
+      else if (equals_icase(value_buf, "arm64-windows") ||
+               equals_icase(value_buf, "arm64-coff"))
+      {
+        if (target_arch)
+          *target_arch = ARCH_ARM64;
+        if (chancecode_backend)
+          *chancecode_backend = "arm64-windows";
+        if (target_os)
+          *target_os = OS_WINDOWS;
+      }
       else if (equals_icase(value_buf, "bslash") ||
                equals_icase(value_buf, "bslash"))
       {
@@ -1162,7 +1157,6 @@ int parse_ceproj_file(
           .chancecode_backend = chancecode_backend,
           .chancecodec_cmd_override = chancecodec_cmd_override,
           .chs_cmd_override = chs_cmd_override,
-          .host_cc_cmd_override = host_cc_cmd_override,
           .entry_symbol = entry_symbol,
           .target_os = target_os,
           .include_dirs = include_dirs,

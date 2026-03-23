@@ -559,6 +559,8 @@ static void ccb_opt_remove_nops(CcbFunctionBuilder *fb);
 static const char *ccb_trim_leading_ws(const char *line);
 static const char *ccb_binop_symbol(const char *op);
 static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, const Node *target_fn);
+static bool ccb_should_suffix_varargs_call_name(const CcbFunctionBuilder *fb, const char *name);
+static bool ccb_name_has_varargs_suffix(const char *name);
 
 static void ccb_module_init(CcbModule *mod)
 {
@@ -639,6 +641,56 @@ static bool ccb_name_is_c_abi_varargs_extern(const Symbol *symbols, int count, c
             return true;
     }
     return false;
+}
+
+static bool ccb_name_exists_in_symbols(const Symbol *symbols, int count, const char *name)
+{
+    if (!symbols || count <= 0 || !name || !*name)
+        return false;
+    for (int i = 0; i < count; ++i)
+    {
+        const Symbol *sym = &symbols[i];
+        if (ccb_name_matches_symbol(sym, name))
+            return true;
+    }
+    return false;
+}
+
+static bool ccb_name_exists_in_call_tables(const CcbFunctionBuilder *fb, const char *name)
+{
+    if (!fb || !fb->opts || !name || !*name)
+        return false;
+    if (ccb_name_exists_in_symbols(fb->opts->externs, fb->opts->extern_count, name))
+        return true;
+    if (ccb_name_exists_in_symbols(fb->opts->imported_externs, fb->opts->imported_extern_count, name))
+        return true;
+    return false;
+}
+
+static const char *ccb_resolve_available_varargs_call_name(const CcbFunctionBuilder *fb,
+                                                            const char *name,
+                                                            char *buffer,
+                                                            size_t bufsz)
+{
+    const char *varargs_name;
+    bool has_plain;
+    bool has_varargs;
+
+    if (!name || !*name || ccb_name_has_varargs_suffix(name))
+        return name;
+    if (!fb || !fb->opts)
+        return name;
+
+    varargs_name = ccb_label_with_varargs_suffix(name, true, buffer, bufsz);
+    if (!varargs_name || !*varargs_name || strcmp(varargs_name, name) == 0)
+        return name;
+
+    has_plain = ccb_name_exists_in_call_tables(fb, name);
+    has_varargs = ccb_name_exists_in_call_tables(fb, varargs_name);
+
+    if (!has_plain && has_varargs && ccb_should_suffix_varargs_call_name(fb, name))
+        return varargs_name;
+    return name;
 }
 
 static bool ccb_should_suffix_varargs_call_name(const CcbFunctionBuilder *fb, const char *name)
@@ -9076,29 +9128,6 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
         }
     }
 
-    if (!rc && is_indirect)
-    {
-        if (!expr->lhs)
-        {
-            diag_error_at(expr->src, expr->line, expr->col,
-                          "indirect call missing target expression");
-            rc = 1;
-        }
-        else if (ccb_emit_expr_basic(fb, expr->lhs))
-        {
-            rc = 1;
-        }
-        else
-        {
-            CCValueType target_ty = ccb_type_for_expr(expr->lhs);
-            if (target_ty != CC_TYPE_PTR)
-            {
-                if (ccb_emit_convert_between(fb, target_ty, CC_TYPE_PTR, expr->lhs))
-                    rc = 1;
-            }
-        }
-    }
-
     if (!rc)
     {
         if (stack_safe_args)
@@ -9115,6 +9144,36 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
                     }
                 }
             }
+        }
+
+        if (!rc && is_indirect)
+        {
+            if (!expr->lhs)
+            {
+                diag_error_at(expr->src, expr->line, expr->col,
+                              "indirect call missing target expression");
+                rc = 1;
+            }
+            else if (ccb_emit_expr_basic(fb, expr->lhs))
+            {
+                rc = 1;
+            }
+            else
+            {
+                CCValueType target_ty = ccb_type_for_expr(expr->lhs);
+                if (target_ty != CC_TYPE_PTR)
+                {
+                    if (ccb_emit_convert_between(fb, target_ty, CC_TYPE_PTR, expr->lhs))
+                        rc = 1;
+                }
+            }
+        }
+
+        if (rc)
+        {
+            free(arg_local_slots);
+            free(arg_types);
+            return rc;
         }
 
         CCValueType ret_ty = ccb_type_for_expr(expr);
@@ -9148,6 +9207,8 @@ static int ccb_emit_call_like(CcbFunctionBuilder *fb, const Node *expr, bool for
             else
             {
                 char direct_name_buf[1024];
+                direct_name = ccb_resolve_available_varargs_call_name(fb, direct_name,
+                                                                      direct_name_buf, sizeof(direct_name_buf));
                 if (call_is_varargs && !ccb_name_has_varargs_suffix(direct_name) &&
                     ccb_should_suffix_varargs_call_name(fb, direct_name))
                     direct_name = ccb_label_with_varargs_suffix(direct_name, true,
@@ -9604,7 +9665,7 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
 
         
         
-        const size_t slot_size = 4;
+        const size_t slot_size = ccb_pointer_size_bytes();
         const size_t align_bytes = slot_size;
         if (val_ty == CC_TYPE_PTR)
             size_bytes = slot_size;
@@ -11088,6 +11149,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 if (!dst_ptr)
                     return 1;
                 ptrdiff_t dst_slot = dst_ptr ? (ptrdiff_t)(dst_ptr - fb->locals) : -1;
+                if (!ccb_emit_load_local(fb, addr_local))
+                    return 1;
                 if (!ccb_emit_store_local(fb, dst_ptr))
                     return 1;
 
@@ -11208,6 +11271,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 if (!dst_ptr)
                     return 1;
                 ptrdiff_t dst_slot = dst_ptr ? (ptrdiff_t)(dst_ptr - fb->locals) : -1;
+                if (!ccb_emit_load_local(fb, addr_local))
+                    return 1;
                 if (!ccb_emit_store_local(fb, dst_ptr))
                     return 1;
 
@@ -11328,6 +11393,8 @@ static int ccb_emit_expr_basic_impl(CcbFunctionBuilder *fb, const Node *expr)
                 if (!dst_ptr)
                     return 1;
                 ptrdiff_t dst_slot = dst_ptr ? (ptrdiff_t)(dst_ptr - fb->locals) : -1;
+                if (!ccb_emit_load_local(fb, addr_local))
+                    return 1;
                 if (!ccb_emit_store_local(fb, dst_ptr))
                     return 1;
 

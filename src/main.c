@@ -105,7 +105,6 @@ static void verbose_print_config(
   const char *entry_symbol,
     int include_dir_count, int ce_count, int ccb_count, int cclib_count,
     int obj_count, int symbol_ref_ce_count, int symbol_ref_cclib_count,
-    const char *host_cc_cmd, int host_cc_has_override,
     const char *chancecodec_cmd, int chancecodec_has_override,
     int needs_chancecodec, const char *chancecode_backend,
     int chancecodec_uses_fallback, int verbose_active, int verbose_deep)
@@ -129,8 +128,6 @@ static void verbose_print_config(
       .obj_count = obj_count,
       .symbol_ref_ce_count = symbol_ref_ce_count,
       .symbol_ref_cclib_count = symbol_ref_cclib_count,
-      .host_cc_cmd = host_cc_cmd,
-      .host_cc_has_override = host_cc_has_override,
       .chancecodec_cmd = chancecodec_cmd,
       .chancecodec_has_override = chancecodec_has_override,
       .needs_chancecodec = needs_chancecodec,
@@ -192,150 +189,14 @@ static char *read_all(const char *path, int *out_len)
   return buf;
 }
 
-static int emit_export_launcher_executable(const char *host_cc_cmd,
-                                           const char *output_exe,
+static int emit_export_launcher_executable(const char *output_exe,
                                            const char *bundle_cclib)
 {
-  if (!host_cc_cmd || !*host_cc_cmd || !output_exe || !*output_exe ||
-      !bundle_cclib || !*bundle_cclib)
-    return -1;
-
-  int blob_len = 0;
-  char *blob = read_all(bundle_cclib, &blob_len);
-  if (!blob || blob_len <= 0)
-  {
-    free(blob);
-    return -1;
-  }
-
-  char src_template[] = "/tmp/chance_export_launcher_XXXXXX";
-  int src_fd = mkstemp(src_template);
-  if (src_fd < 0)
-  {
-    free(blob);
-    return -1;
-  }
-  FILE *src = fdopen(src_fd, "w");
-  if (!src)
-  {
-    close(src_fd);
-    unlink(src_template);
-    free(blob);
-    return -1;
-  }
-
-  fprintf(src, "#include <errno.h>\n");
-  fprintf(src, "#include <stdint.h>\n");
-  fprintf(src, "#include <stdio.h>\n");
-  fprintf(src, "#include <stdlib.h>\n");
-  fprintf(src, "#include <string.h>\n");
-  fprintf(src, "#ifdef _WIN32\n");
-  fprintf(src, "#include <io.h>\n");
-  fprintf(src, "#include <process.h>\n");
-  fprintf(src, "#include <fcntl.h>\n");
-  fprintf(src, "#define ACCESS _access\n");
-  fprintf(src, "#define X_OK 0\n");
-  fprintf(src, "#else\n");
-  fprintf(src, "#include <fcntl.h>\n");
-  fprintf(src, "#include <sys/wait.h>\n");
-  fprintf(src, "#include <unistd.h>\n");
-  fprintf(src, "#define ACCESS access\n");
-  fprintf(src, "#endif\n\n");
-
-  fprintf(src, "static const unsigned char kBundledCclib[] = {");
-  for (int i = 0; i < blob_len; ++i)
-  {
-    if (i % 12 == 0)
-      fprintf(src, "\n  ");
-    fprintf(src, "0x%02x", (unsigned char)blob[i]);
-    if (i + 1 < blob_len)
-      fprintf(src, ", ");
-  }
-  fprintf(src, "\n};\n");
-  fprintf(src, "static const size_t kBundledCclibSize = sizeof(kBundledCclib);\n\n");
-
-  fprintf(src, "static int is_exec(const char* p) { return p && *p && ACCESS(p, X_OK) == 0; }\n");
-  fprintf(src, "static const char* resolve_cvm(char* buf, size_t bufsz, int* invalid_home) {\n");
-  fprintf(src, "  if (invalid_home) *invalid_home = 0;\n");
-  fprintf(src, "  const char* home = getenv(\"CVM_HOME\");\n");
-  fprintf(src, "  if (home && *home) {\n");
-  fprintf(src, "    if (is_exec(home)) return home;\n");
-  fprintf(src, "#ifdef _WIN32\n");
-  fprintf(src, "    _snprintf(buf, bufsz, \"%%s\\\\cvm.exe\", home);\n");
-  fprintf(src, "#else\n");
-  fprintf(src, "    snprintf(buf, bufsz, \"%%s/cvm\", home);\n");
-  fprintf(src, "#endif\n");
-  fprintf(src, "    if (is_exec(buf)) return buf;\n");
-  fprintf(src, "    if (invalid_home) *invalid_home = 1;\n");
-  fprintf(src, "    return NULL;\n");
-  fprintf(src, "  }\n");
-  fprintf(src, "  return \"cvm\";\n");
-  fprintf(src, "}\n\n");
-
-  fprintf(src, "static int write_bundle(char* out_path, size_t out_sz) {\n");
-  fprintf(src, "#ifdef _WIN32\n");
-  fprintf(src, "  char tmp[MAX_PATH];\n");
-  fprintf(src, "  if (!GetTempPathA((DWORD)sizeof(tmp), tmp)) return -1;\n");
-  fprintf(src, "  if (!GetTempFileNameA(tmp, \"cvm\", 0, out_path)) return -1;\n");
-  fprintf(src, "  FILE* f = fopen(out_path, \"wb\"); if (!f) return -1;\n");
-  fprintf(src, "  if (fwrite(kBundledCclib, 1, kBundledCclibSize, f) != kBundledCclibSize) { fclose(f); return -1; }\n");
-  fprintf(src, "  fclose(f);\n");
-  fprintf(src, "  return 0;\n");
-  fprintf(src, "#else\n");
-  fprintf(src, "  char t[] = \"/tmp/chance_bundle_XXXXXX\";\n");
-  fprintf(src, "  int fd = mkstemp(t); if (fd < 0) return -1;\n");
-  fprintf(src, "  size_t off = 0;\n");
-  fprintf(src, "  while (off < kBundledCclibSize) {\n");
-  fprintf(src, "    ssize_t n = write(fd, kBundledCclib + off, kBundledCclibSize - off);\n");
-  fprintf(src, "    if (n <= 0) { close(fd); return -1; }\n");
-  fprintf(src, "    off += (size_t)n;\n");
-  fprintf(src, "  }\n");
-  fprintf(src, "  close(fd);\n");
-  fprintf(src, "  snprintf(out_path, out_sz, \"%%s\", t);\n");
-  fprintf(src, "  return 0;\n");
-  fprintf(src, "#endif\n");
-  fprintf(src, "}\n\n");
-
-  fprintf(src, "int main(int argc, char** argv) {\n");
-  fprintf(src, "  char cvm_buf[1024];\n");
-  fprintf(src, "  int invalid_home = 0;\n");
-  fprintf(src, "  const char* cvm = resolve_cvm(cvm_buf, sizeof(cvm_buf), &invalid_home);\n");
-  fprintf(src, "  if (invalid_home) { fprintf(stderr, \"error: CVM_HOME is invalid\\n\"); return 1; }\n");
-  fprintf(src, "  if (!cvm || !*cvm) { fprintf(stderr, \"framework not found\\n\"); return 1; }\n");
-  fprintf(src, "  char bundle[1024] = {0};\n");
-  fprintf(src, "  if (write_bundle(bundle, sizeof(bundle)) != 0) { fprintf(stderr, \"framework not found\\n\"); return 1; }\n");
-  fprintf(src, "  char** args = (char**)calloc((size_t)argc + 2, sizeof(char*));\n");
-  fprintf(src, "  if (!args) { fprintf(stderr, \"framework not found\\n\"); return 1; }\n");
-  fprintf(src, "  args[0] = (char*)cvm;\n");
-  fprintf(src, "  args[1] = bundle;\n");
-  fprintf(src, "  for (int i = 1; i < argc; ++i) args[i + 1] = argv[i];\n");
-  fprintf(src, "  args[argc + 1] = NULL;\n");
-  fprintf(src, "#ifdef _WIN32\n");
-  fprintf(src, "  intptr_t rc = _spawnvp(_P_WAIT, cvm, (const char* const*)args);\n");
-  fprintf(src, "  remove(bundle);\n");
-  fprintf(src, "  if (rc == -1) { fprintf(stderr, \"framework not found\\n\"); return 1; }\n");
-  fprintf(src, "  return (int)rc;\n");
-  fprintf(src, "#else\n");
-  fprintf(src, "  pid_t pid = fork();\n");
-  fprintf(src, "  if (pid == 0) { execvp(cvm, args); if (errno == ENOENT) fprintf(stderr, \"framework not found\\n\"); _exit(127); }\n");
-  fprintf(src, "  if (pid < 0) { unlink(bundle); fprintf(stderr, \"framework not found\\n\"); return 1; }\n");
-  fprintf(src, "  int st = 0;\n");
-  fprintf(src, "  waitpid(pid, &st, 0);\n");
-  fprintf(src, "  unlink(bundle);\n");
-  fprintf(src, "  if (WIFEXITED(st)) return WEXITSTATUS(st);\n");
-  fprintf(src, "  return 1;\n");
-  fprintf(src, "#endif\n");
-  fprintf(src, "}\n");
-
-  fclose(src);
-
-  char cc_cmd[4096];
-  snprintf(cc_cmd, sizeof(cc_cmd), "%s -O2 -x c -o \"%s\" \"%s\"",
-           host_cc_cmd, output_exe, src_template);
-  int rc = system(cc_cmd);
-  unlink(src_template);
-  free(blob);
-  return rc;
+  (void)output_exe;
+  (void)bundle_cclib;
+  fprintf(stderr,
+          "error: --export-exe requires host C compilation and is disabled in CHS/CLD-only mode\n");
+  return -1;
 }
 
 static int unit_is_embedded_force_inline_literal_only(const Node *unit)
@@ -392,26 +253,6 @@ static const char *arm64_backend_name_for_os(TargetOS os)
   default:
     return NULL;
   }
-}
-
-static int host_cc_is_aarch64_elf_gcc(const char *cc_cmd)
-{
-  if (!cc_cmd)
-    return 0;
-  return strstr(cc_cmd, "aarch64-elf-gcc") != NULL;
-}
-
-static void append_arm64_arch_flag(char *cmd, size_t cmd_cap, TargetOS target_os,
-                                   const char *host_cc_cmd)
-{
-  if (!cmd || cmd_cap == 0)
-    return;
-  const char *flag = NULL;
-  if (host_cc_is_aarch64_elf_gcc(host_cc_cmd) || target_os == OS_LINUX)
-    flag = " -march=armv8-a";
-  else
-    flag = " -arch arm64";
-  strncat(cmd, flag, cmd_cap - strlen(cmd) - 1);
 }
 
 static int path_has_separator(const char *name)
@@ -570,6 +411,19 @@ static void strip_symbol_list_sort(StripSymbolList *list)
   qsort(list->items, list->count, sizeof(char *), strip_symbol_name_cmp);
 }
 
+static int strip_symbol_list_contains(const StripSymbolList *list,
+                                      const char *name)
+{
+  if (!list || !name || !*name)
+    return 0;
+  for (size_t i = 0; i < list->count; ++i)
+  {
+    if (list->items[i] && strcmp(list->items[i], name) == 0)
+      return 1;
+  }
+  return 0;
+}
+
 static const char *node_backend_name(const Node *n)
 {
   if (!n)
@@ -613,6 +467,8 @@ static int collect_strip_symbols_from_unit(const Node *unit,
     if (stmt->kind == ND_FUNC)
     {
       const Node *fn = stmt;
+      if (fn->is_entrypoint)
+        continue;
       const char *name = node_backend_name(fn);
       char *generated = NULL;
       if ((!fn->metadata.backend_name || !fn->metadata.backend_name[0]) &&
@@ -667,6 +523,8 @@ static int collect_strip_symbols_from_ccb(const char *path,
 {
   if (!path || !symbols)
     return 0;
+  StripSymbolList ccb_symbols = {0};
+  StripSymbolList preserved_symbols = {0};
   FILE *f = fopen(path, "rb");
   if (!f)
   {
@@ -682,6 +540,29 @@ static int collect_strip_symbols_from_ccb(const char *path,
       ++p;
     if (*p == '\0' || *p == ';' || *p == '#')
       continue;
+
+    if (strncmp(p, ".preserve", 9) == 0 && isspace((unsigned char)p[9]))
+    {
+      p += 9;
+      while (*p && isspace((unsigned char)*p))
+        ++p;
+      if (*p == '\0')
+        continue;
+      char name_buf[512];
+      size_t ni = 0;
+      while (*p && !isspace((unsigned char)*p) && ni + 1 < sizeof(name_buf))
+        name_buf[ni++] = *p++;
+      name_buf[ni] = '\0';
+      if (name_buf[0] && strip_symbol_list_add(&preserved_symbols, name_buf) != 0)
+      {
+        fclose(f);
+        strip_symbol_list_destroy(&ccb_symbols);
+        strip_symbol_list_destroy(&preserved_symbols);
+        return 1;
+      }
+      continue;
+    }
+
     int is_func = 0;
     int is_global = 0;
     if (strncmp(p, ".func", 5) == 0 && isspace((unsigned char)p[5]))
@@ -711,13 +592,40 @@ static int collect_strip_symbols_from_ccb(const char *path,
     name_buf[ni] = '\0';
     if (!name_buf[0])
       continue;
-    if (strip_symbol_list_add(symbols, name_buf) != 0)
+    if (strip_symbol_list_add(&ccb_symbols, name_buf) != 0)
     {
       fclose(f);
+      strip_symbol_list_destroy(&ccb_symbols);
+      strip_symbol_list_destroy(&preserved_symbols);
       return 1;
     }
   }
   fclose(f);
+
+  if (strip_symbol_list_add(&preserved_symbols, "main") != 0)
+  {
+    strip_symbol_list_destroy(&ccb_symbols);
+    strip_symbol_list_destroy(&preserved_symbols);
+    return 1;
+  }
+
+  for (size_t i = 0; i < ccb_symbols.count; ++i)
+  {
+    const char *name = ccb_symbols.items[i];
+    if (!name || !*name)
+      continue;
+    if (strip_symbol_list_contains(&preserved_symbols, name))
+      continue;
+    if (strip_symbol_list_add(symbols, name) != 0)
+    {
+      strip_symbol_list_destroy(&ccb_symbols);
+      strip_symbol_list_destroy(&preserved_symbols);
+      return 1;
+    }
+  }
+
+  strip_symbol_list_destroy(&ccb_symbols);
+  strip_symbol_list_destroy(&preserved_symbols);
   return 0;
 }
 
@@ -3261,6 +3169,8 @@ static const char *chs_format_name_for_target(TargetOS os)
     return "macho";
   case OS_LINUX:
     return "elf64";
+  case OS_WINDOWS:
+    return "elf64";
   default:
     return NULL;
   }
@@ -3349,51 +3259,7 @@ static int run_chs_assemble_process(const char *cmd, TargetArch arch,
 #endif
 }
 
-static int assemble_with_host_cc(const char *host_cc_cmd_to_use,
-                                 TargetArch target_arch, TargetOS target_os,
-                                 const char *asm_path, const char *objOut,
-                                 int debug_symbols, int freestanding,
-                                 int opt_level)
-{
-  char cc_cmd[4096];
-  size_t pos = (size_t)snprintf(
-      cc_cmd, sizeof(cc_cmd), "\"%s\" -c \"%s\" -o \"%s\"",
-      host_cc_cmd_to_use, asm_path, objOut);
-  if (pos >= sizeof(cc_cmd))
-  {
-    fprintf(stderr, "command buffer exhausted for cc invocation\n");
-    return 1;
-  }
-  if (debug_symbols)
-    strncat(cc_cmd, " -g -gdwarf-4", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
-  if (freestanding)
-    strncat(cc_cmd, " -ffreestanding -nostdlib",
-            sizeof(cc_cmd) - strlen(cc_cmd) - 1);
-#ifdef _WIN32
-  if (target_arch == ARCH_X86)
-    strncat(cc_cmd, " -m64", sizeof(cc_cmd) - strlen(cc_cmd) - 1);
-#endif
-  if (target_arch == ARCH_ARM64)
-    append_arm64_arch_flag(cc_cmd, sizeof(cc_cmd), target_os,
-                           host_cc_cmd_to_use);
-  if (opt_level > 0)
-  {
-    char optbuf[8];
-    snprintf(optbuf, sizeof(optbuf), " -O%d", opt_level);
-    strncat(cc_cmd, optbuf, sizeof(cc_cmd) - strlen(cc_cmd) - 1);
-  }
-
-  int cc_rc = system(cc_cmd);
-  if (cc_rc != 0)
-  {
-    fprintf(stderr, "assembler failed (rc=%d): %s\n", cc_rc, cc_cmd);
-    return 1;
-  }
-  return 0;
-}
-
-static int assemble_to_object(const char *host_cc_cmd_to_use,
-                              const char *chs_cmd_to_use,
+static int assemble_to_object(const char *chs_cmd_to_use,
                               int chs_has_override,
                               int chs_uses_fallback,
                               TargetArch target_arch, TargetOS target_os,
@@ -3403,58 +3269,56 @@ static int assemble_to_object(const char *host_cc_cmd_to_use,
                               int debug_symbols, int freestanding,
                               int opt_level)
 {
-  if (target_arch == ARCH_ARM64 || target_arch == ARCH_BSLASH)
+  (void)debug_symbols;
+  (void)freestanding;
+  (void)opt_level;
+
+  if (!chs_cmd_to_use || !*chs_cmd_to_use)
   {
-    if (!chs_cmd_to_use || !*chs_cmd_to_use)
+    fprintf(stderr, "internal error: CHS command unresolved\n");
+    return 1;
+  }
+  const char *arch_name = chs_arch_name_for_target(target_arch);
+  const char *format_name = chs_format_name_for_target(target_os);
+  if (!arch_name || !format_name)
+  {
+    fprintf(stderr,
+            "CHS does not support target-os '%s' for %s assembly\n",
+            target_os_to_option(target_os)
+                ? target_os_to_option(target_os)
+                : "<unset>",
+            target_arch == ARCH_BSLASH ? "bslash" :
+            (target_arch == ARCH_ARM64 ? "arm64" : "x86"));
+    return 1;
+  }
+  int spawn_errno = 0;
+  int chs_rc = run_chs_assemble_process(chs_cmd_to_use, target_arch,
+                                        target_os, asm_path, objOut,
+                                        toolchain_debug_mode,
+                                        toolchain_debug_deep,
+                                        &spawn_errno);
+  if (chs_rc != 0)
+  {
+    if (chs_rc < 0)
     {
-      fprintf(stderr, "internal error: CHS command unresolved\n");
-      return 1;
+      fprintf(stderr, "failed to launch chs '%s': %s\n", chs_cmd_to_use,
+              strerror(spawn_errno));
     }
-    const char *arch_name = chs_arch_name_for_target(target_arch);
-    const char *format_name = chs_format_name_for_target(target_os);
-    if (!arch_name || !format_name)
+    else
     {
       fprintf(stderr,
-              "CHS does not support target-os '%s' for %s assembly\n",
-              target_os_to_option(target_os)
-                  ? target_os_to_option(target_os)
-                  : "<unset>",
-              target_arch == ARCH_BSLASH ? "bslash" : "arm64");
-      return 1;
+              "CHS assembler failed (rc=%d): \"%s\" --arch %s --format %s --output \"%s\" \"%s\"\n",
+              chs_rc, chs_cmd_to_use, arch_name, format_name, objOut,
+              asm_path);
     }
-    int spawn_errno = 0;
-    int chs_rc = run_chs_assemble_process(chs_cmd_to_use, target_arch,
-                                          target_os, asm_path, objOut,
-                                          toolchain_debug_mode,
-                                          toolchain_debug_deep,
-                                          &spawn_errno);
-    if (chs_rc != 0)
+    if (!chs_has_override && chs_uses_fallback)
     {
-      if (chs_rc < 0)
-      {
-        fprintf(stderr, "failed to launch chs '%s': %s\n", chs_cmd_to_use,
-                strerror(spawn_errno));
-      }
-      else
-      {
-        fprintf(stderr,
-                "CHS assembler failed (rc=%d): \"%s\" --arch %s --format %s --output \"%s\" \"%s\"\n",
-                chs_rc, chs_cmd_to_use, arch_name, format_name, objOut,
-                asm_path);
-      }
-      if (!chs_has_override && chs_uses_fallback)
-      {
-        fprintf(stderr,
-                "hint: use --chs <path> or set CHS_CMD to point at the CHS executable\n");
-      }
-      return 1;
+      fprintf(stderr,
+              "hint: use --chs <path> or set CHS_CMD to point at the CHS executable\n");
     }
-    return 0;
+    return 1;
   }
-
-  return assemble_with_host_cc(host_cc_cmd_to_use, target_arch, target_os,
-                               asm_path, objOut, debug_symbols,
-                               freestanding, opt_level);
+  return 0;
 }
 
 static int is_codegen_target(TargetArch target_arch)
@@ -3563,7 +3427,7 @@ static int run_codegen_backend_step(
 }
 
 static int run_codegen_assembly_step(
-    const char *host_cc_cmd_to_use, const char *chs_cmd_to_use,
+  const char *chs_cmd_to_use,
     int chs_has_override, int chs_uses_fallback,
     TargetArch target_arch, TargetOS target_os,
     const char *asm_path, const char *objOut,
@@ -3578,7 +3442,7 @@ static int run_codegen_assembly_step(
     return 1;
   }
 
-  return assemble_to_object(host_cc_cmd_to_use, chs_cmd_to_use,
+  return assemble_to_object(chs_cmd_to_use,
                             chs_has_override, chs_uses_fallback,
                             target_arch, target_os, asm_path, objOut,
                             toolchain_debug_mode,
@@ -3705,7 +3569,6 @@ int main(int argc, char **argv)
   const char *chancecode_backend = NULL;
   const char *chancecodec_cmd_override = NULL;
   const char *chs_cmd_override = NULL;
-  const char *host_cc_cmd_override = NULL;
   const char *entry_symbol = NULL;
 #ifdef _WIN32
   TargetOS target_os = OS_WINDOWS;
@@ -3806,7 +3669,6 @@ int main(int argc, char **argv)
       .chancecode_backend = &chancecode_backend,
       .chancecodec_cmd_override = &chancecodec_cmd_override,
       .chs_cmd_override = &chs_cmd_override,
-      .host_cc_cmd_override = &host_cc_cmd_override,
       .entry_symbol = &entry_symbol,
       .ce_inputs = &ce_inputs,
       .ce_count = &ce_count,
@@ -3892,7 +3754,6 @@ int main(int argc, char **argv)
 
   DriverToolchainInputs toolchain_inputs = {
       .exe_dir = exe_dir,
-      .host_cc_cmd_override = host_cc_cmd_override,
       .chancecodec_cmd_override = chancecodec_cmd_override,
       .chs_cmd_override = chs_cmd_override,
       .target_arch = target_arch,
@@ -3905,9 +3766,6 @@ int main(int argc, char **argv)
   int toolchain_rc = resolve_driver_toolchain(&toolchain_inputs, &toolchain);
   if (toolchain_rc != 0)
     return toolchain_rc;
-
-  const char *host_cc_cmd_to_use = toolchain.host_cc_cmd_to_use;
-  int host_cc_has_override = toolchain.host_cc_has_override;
 
   const char *chancecodec_cmd_to_use = toolchain.chancecodec_cmd_to_use;
   int chancecodec_uses_fallback = toolchain.chancecodec_uses_fallback;
@@ -3954,8 +3812,7 @@ int main(int argc, char **argv)
                          stop_after_asm, no_link, emit_library, freestanding,
                          asm_syntax, entry_symbol, include_dir_count, ce_count, ccb_count,
                          cclib_count, obj_count, symbol_ref_ce_count,
-                         symbol_ref_cclib_count, host_cc_cmd_to_use,
-                         host_cc_has_override, chancecodec_cmd_to_use,
+                         symbol_ref_cclib_count, chancecodec_cmd_to_use,
                          chancecodec_has_override, needs_chancecodec,
                          chancecode_backend, chancecodec_uses_fallback,
                          compiler_verbose_enabled(),
@@ -4566,7 +4423,7 @@ int main(int argc, char **argv)
           !stop_after_ccb && !stop_after_asm)
       {
         rc = run_codegen_assembly_step(
-            host_cc_cmd_to_use, chs_cmd_to_use,
+          chs_cmd_to_use,
             chs_has_override, chs_uses_fallback,
             target_arch, target_os, asm_path, objOut, need_obj,
             toolchain_debug_mode, toolchain_debug_deep,
@@ -4731,7 +4588,7 @@ int main(int argc, char **argv)
           !stop_after_ccb && !stop_after_asm)
       {
         rc = run_codegen_assembly_step(
-            host_cc_cmd_to_use, chs_cmd_to_use,
+          chs_cmd_to_use,
             chs_has_override, chs_uses_fallback,
             target_arch, target_os, asm_path, objOut, need_obj,
             toolchain_debug_mode, toolchain_debug_deep,
@@ -4830,7 +4687,7 @@ int main(int argc, char **argv)
       }
 
       rc = run_codegen_assembly_step(
-          host_cc_cmd_to_use, chs_cmd_to_use,
+          chs_cmd_to_use,
           chs_has_override, chs_uses_fallback,
           target_arch, target_os, asm_input, objOut, 1,
           toolchain_debug_mode, toolchain_debug_deep,
@@ -4984,7 +4841,7 @@ int main(int argc, char **argv)
         if (!stop_after_ccb && !stop_after_asm)
         {
           rc = run_codegen_assembly_step(
-              host_cc_cmd_to_use, chs_cmd_to_use,
+              chs_cmd_to_use,
               chs_has_override, chs_uses_fallback,
               target_arch, target_os, asm_path, objOut, need_obj,
               toolchain_debug_mode, toolchain_debug_deep,
@@ -5079,7 +4936,7 @@ int main(int argc, char **argv)
       }
       else if (export_executable)
       {
-        int export_rc = emit_export_launcher_executable(host_cc_cmd_to_use, out,
+        int export_rc = emit_export_launcher_executable(out,
                                                         library_out_path);
         if (export_rc != 0)
         {

@@ -24,8 +24,6 @@ typedef struct
   int obj_count;
   int symbol_ref_ce_count;
   int symbol_ref_cclib_count;
-  const char *host_cc_cmd;
-  int host_cc_has_override;
   const char *chancecodec_cmd;
   int chancecodec_has_override;
   int needs_chancecodec;

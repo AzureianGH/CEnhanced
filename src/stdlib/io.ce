@@ -5,6 +5,7 @@ bring Std.Exception as Exception;
 
 extend from "C" i32 write(i32, char*, int);
 extend from "C" i32 printf(char*, ...);
+extend from "C" i32 vprintf(char*, va_list);
 extend from "C" i32 read(i32, char*, int);
 extend from "C" i32 getchar();
 extend from "C" i32 ungetc(i32, void*);
@@ -423,7 +424,7 @@ expose fun format(char* fmt, ...) -> i32
 expose fun print(char* fmt, ...) -> i32
 {
     va_list list = va_start();
-    i32 written = vformat_out(fmt, &list, 0);
+    i32 written = vprintf(fmt, list);
     va_end(list);
     ret written;
 }
@@ -431,8 +432,12 @@ expose fun print(char* fmt, ...) -> i32
 expose fun printnl(char* fmt, ...) -> i32
 {
     va_list list = va_start();
-    i32 written = vformat_out(fmt, &list, 1);
+    i32 written = vprintf(fmt, list);
     va_end(list);
+    printf("\n");
+    if (written < 0)
+        ret written;
+    written = written + 1;
     ret written;
 }
 

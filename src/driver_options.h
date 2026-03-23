@@ -45,7 +45,6 @@ typedef struct
   const char **chancecode_backend;
   const char **chancecodec_cmd_override;
   const char **chs_cmd_override;
-  const char **host_cc_cmd_override;
   const char **entry_symbol;
 
   const char ***ce_inputs;

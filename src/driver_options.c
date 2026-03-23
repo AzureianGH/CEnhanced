@@ -212,16 +212,6 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
       *state->chs_cmd_override = argv[++i];
       continue;
     }
-    if (strcmp(argv[i], "--cc") == 0)
-    {
-      if (i + 1 >= argc)
-      {
-        fprintf(stderr, "error: --cc expects a compiler path\n");
-        return 2;
-      }
-      *state->host_cc_cmd_override = argv[++i];
-      continue;
-    }
     if (strcmp(argv[i], "--entry") == 0 || strcmp(argv[i], "-e") == 0)
     {
       if (i + 1 >= argc)
@@ -508,7 +498,7 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
           state->opt_level, state->debug_symbols, state->strip_metadata,
           state->strip_hard, state->obfuscate, state->asm_syntax,
           state->chancecodec_cmd_override, state->chs_cmd_override,
-          state->host_cc_cmd_override, state->entry_symbol, state->obj_override, state->implicit_voidp,
+          state->entry_symbol, state->obj_override, state->implicit_voidp,
           state->implicit_void_function, state->implicit_sizeof,
           state->request_ast, state->language_standard, state->diagnostics_only,
           state->toolchain_debug_mode, state->toolchain_debug_deep,
