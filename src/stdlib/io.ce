@@ -6,6 +6,7 @@ bring Std.Exception as Exception;
 extend from "C" i32 write(i32, char*, int);
 extend from "C" i32 printf(char*, ...);
 extend from "C" i32 vprintf(char*, va_list);
+extend from "C" i32 vsnprintf(char* out, i32 cap, char* fmt, va_list);
 extend from "C" i32 read(i32, char*, int);
 extend from "C" i32 getchar();
 extend from "C" i32 ungetc(i32, void*);
@@ -157,7 +158,6 @@ hide fun u64_to_str(u64 val, char* out, i32 cap) -> i32
 
 hide fun f64_to_str(f64 val, char* out, i32 cap) -> i32
 {
-    printf("DEBUG: f64_to_str called with val=%lf, cap=%d\n", val, cap);
     if (cap < 8)
         ret 0;
 
@@ -424,7 +424,7 @@ expose fun format(char* fmt, ...) -> i32
 expose fun print(char* fmt, ...) -> i32
 {
     va_list list = va_start();
-    i32 written = vprintf(fmt, list);
+    i32 written = vformat_out(fmt, &list, 0);
     va_end(list);
     ret written;
 }
@@ -432,12 +432,8 @@ expose fun print(char* fmt, ...) -> i32
 expose fun printnl(char* fmt, ...) -> i32
 {
     va_list list = va_start();
-    i32 written = vprintf(fmt, list);
+    i32 written = vformat_out(fmt, &list, 1);
     va_end(list);
-    printf("\n");
-    if (written < 0)
-        ret written;
-    written = written + 1;
     ret written;
 }
 
@@ -445,158 +441,14 @@ expose fun sprintf(char* buf, i32 cap, char* fmt, ...) -> i32
 {
     if (buf == 0 as char* || cap <= 0)
         ret -1;
-    char[1024] out = {};
-    i32 out_idx = 0;
-    i32 written = 0;
+
     va_list list = va_start();
-    i32 total_written = 0;
-    i32 i = 0;
-    while (fmt[i] != 0)
-    {
-        char c = fmt[i];
-        if (c != '%')
-        {
-            append_char(out, 1024, &out_idx, c, &total_written);
-            i++;
-            continue;
-        }
-        i++;
-        char spec = fmt[i];
-        if (spec == 0)
-            break;
-        if (spec == '%')
-        {
-            append_char(out, 1024, &out_idx, '%', &total_written);
-            i++;
-            continue;
-        }
-        if (spec == 's')
-        {
-            char* s = va_arg(list, char*);
-            if (s == 0 as char*)
-                s = "(null)";
-            append_cstr(out, 1024, &out_idx, s, &total_written);
-            i++;
-            continue;
-        }
-        if (spec == 'c')
-        {
-            i32 v = va_arg(list, i32);
-            append_char(out, 1024, &out_idx, v as char, &total_written);
-            i++;
-            continue;
-        }
-        if (spec == 'd' || spec == 'i')
-        {
-            char[32] numbuf = {};
-            i32 v = va_arg(list, i32);
-            i32 nlen = i32_to_str(v, numbuf, 32);
-            append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
-            i++;
-            continue;
-        }
-        if (spec == 'u')
-        {
-            char[32] numbuf = {};
-            u32 v = va_arg(list, u32);
-            i32 nlen = u32_to_str(v, numbuf, 32);
-            append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
-            i++;
-            continue;
-        }
-        if (spec == 'x')
-        {
-            char[32] numbuf = {};
-            u32 v = va_arg(list, u32);
-            i32 nlen = u32_to_hex(v, numbuf, 32);
-            append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
-            i++;
-            continue;
-        }
-        if (spec == 'f')
-        {
-            char[64] fbuf = {};
-            f64 v = va_arg(list, f64);
-            i32 flen = f64_to_str(v, fbuf, 64);
-            append_bytes(out, 1024, &out_idx, fbuf, flen, &total_written);
-            i++;
-            continue;
-        }
-        if (spec == 'l')
-        {
-            char next = fmt[i + 1];
-            if (next == 'x')
-            {
-                char[32] numbuf = {};
-                u64 v = va_arg(list, u64);
-                i32 nlen = u64_to_hex(v, numbuf, 32);
-                append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
-                i = i + 2;
-                continue;
-            }
-            if (next == 'u')
-            {
-                char[32] numbuf = {};
-                u64 v = va_arg(list, u64);
-                i32 nlen = u64_to_str(v, numbuf, 32);
-                append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
-                i = i + 2;
-                continue;
-            }
-            if (next == 'l' && fmt[i + 2] == 'x')
-            {
-                char[32] numbuf = {};
-                u64 v = va_arg(list, u64);
-                i32 nlen = u64_to_hex(v, numbuf, 32);
-                append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
-                i = i + 3;
-                continue;
-            }
-            if (next == 'l' && fmt[i + 2] == 'u')
-            {
-                char[32] numbuf = {};
-                u64 v = va_arg(list, u64);
-                i32 nlen = u64_to_str(v, numbuf, 32);
-                append_bytes(out, 1024, &out_idx, numbuf, nlen, &total_written);
-                i = i + 3;
-                continue;
-            }
-            if (next == 'f')
-            {
-                char[64] fbuf = {};
-                f64 v = va_arg(list, f64);
-                i32 flen = f64_to_str(v, fbuf, 64);
-                append_bytes(out, 1024, &out_idx, fbuf, flen, &total_written);
-                i = i + 2;
-                continue;
-            }
-        }
-        // Unknown specifier: emit it literally
-        append_char(out, 1024, &out_idx, '%', &total_written);
-        append_char(out, 1024, &out_idx, spec, &total_written);
-        i++;
-    }
-    // Final flush to buf
-    if (out_idx > 0)
-    {
-        i32 to_copy = out_idx;
-        if (to_copy > cap - 1)
-            to_copy = cap - 1;
-        i32 j = 0;
-        while (j < to_copy)
-        {
-            buf[j] = out[j];
-            j++;
-        }
-        buf[to_copy] = 0;
-        written = total_written < cap - 1 ? total_written : cap - 1;
-    }
-    else
-    {
-        buf[0] = 0;
-        written = 0;
-    }
+    i32 written = vsnprintf(buf, cap, fmt, list);
     va_end(list);
+
+    if (written < 0)
+        ret -1;
+
     ret written;
 }
 

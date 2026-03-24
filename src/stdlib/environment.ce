@@ -3,4 +3,12 @@ module Std.Environment;
 
 extend from "C" void exit(int);
 
-expose fun exit(i32 code) { exit(code); }
+expose fun exit(i32 code)
+{
+	exit(code as int);
+}
+
+expose fun abort() -> void
+{
+	exit(1 as int);
+}

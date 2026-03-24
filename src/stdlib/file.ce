@@ -2,6 +2,7 @@ module Std.File;
 
 bring Std.Memory as Mem;
 bring Std.String as Str;
+bring Std.Exception as Exception;
 
 extend from "C" void* fopen(char* path, char* mode);
 extend from "C" i32 fclose(void* handle);
@@ -19,6 +20,8 @@ expose constant i32 SEEK_END = 2;
 
 expose fun open(char* path, char* mode) -> void*
 {
+    if (path == 0 as char* || mode == 0 as char*)
+        ret 0 as void*;
     ret fopen(path, mode);
 }
 
@@ -66,7 +69,7 @@ expose fun tell(void* handle) -> i64
 
 expose fun read_all(char* path, void** out_buf, i32* out_len) -> i32
 {
-    if (out_buf == 0 as void** || out_len == 0 as i32*)
+    if (path == 0 as char* || out_buf == 0 as void** || out_len == 0 as i32*)
         ret -1;
     *out_buf = 0 as void*;
     *out_len = 0;
@@ -118,7 +121,7 @@ expose fun read_all(char* path, void** out_buf, i32* out_len) -> i32
 
 expose fun write_all(char* path, void* data, i32 len) -> i32
 {
-    if (data == 0 as void* || len < 0)
+    if (path == 0 as char* || data == 0 as void* || len < 0)
         ret -1;
     void* handle = open(path, "wb");
     if (handle == 0 as void*)
@@ -131,6 +134,8 @@ expose fun write_all(char* path, void* data, i32 len) -> i32
 
 expose fun exists(char* path) -> i32
 {
+    if (path == 0 as char*)
+        ret 0;
     void* handle = open(path, "rb");
     if (handle == 0 as void*)
         ret 0;
@@ -140,6 +145,8 @@ expose fun exists(char* path) -> i32
 
 expose fun remove(char* path) -> i32
 {
+    if (path == 0 as char*)
+        ret -1;
     ret remove(path);
 }
 
@@ -150,4 +157,36 @@ expose fun getcwd() -> char*
     if (res == 0 as char*)
         ret 0 as char*;
     ret Str.strdup(buf as char*);
+}
+
+managed expose fun cwd() -> string
+{
+    char[1024] buf = {};
+    char* res = getcwd(buf as char*, 1024);
+    char* path = 0 as char*;
+    if (res != 0 as char*)
+        path = Str.strdup(buf as char*);
+    if (path == 0 as char*)
+        throw Exception.IOError -> "Failed to get current working directory";
+    ret path as string;
+}
+
+managed expose fun read_text(char* path) -> string
+{
+    void* buf = 0 as void*;
+    i32 len = 0;
+    if (read_all(path, &buf, &len) < 0 || buf == 0 as void*)
+        throw Exception.IOError -> "Failed to read text file";
+    ret buf as string;
+}
+
+managed expose fun write_text(char* path, string text) -> i32
+{
+    if (path == 0 as char* || text == null)
+        throw Exception.InvalidCast -> "Invalid arguments to write_text";
+    i32 len = Str.strlen(text as char*);
+    i32 written = write_all(path, text as void*, len);
+    if (written != len)
+        throw Exception.IOError -> "Failed to write text file";
+    ret written;
 }

@@ -1,0 +1,18 @@
+module Std.Profiling;
+
+// Returns true if the JIT optimized the code to be hot
+expose fun IsHotPath(void* ptr) -> bool {
+    ret true; // In AOT, all paths are already HOT
+}
+
+// Forces the JIT to compile this function
+// Returns true when successful
+expose fun ForceHot(void* ptr) -> bool {
+    ret false;
+}
+
+// Discards current compiled context
+// Returns true when successful
+expose fun ForceCold(void* ptr) -> bool {
+    ret false;
+}

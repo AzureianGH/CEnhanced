@@ -7,6 +7,8 @@ extend from "C" void free(void* ptr);
 
 expose fun memcpy(void* dest, void* src, i32 n) -> void*
 {
+    if (dest == 0 as void* || src == 0 as void* || n <= 0)
+        ret dest;
     i32 idx = 0;
     u8* d = dest as u8*;
     u8* s = src as u8*;
@@ -20,6 +22,8 @@ expose fun memcpy(void* dest, void* src, i32 n) -> void*
 
 expose fun memset(void* ptr, u8 value, i32 n) -> void*
 {
+    if (ptr == 0 as void* || n <= 0)
+        ret ptr;
     i32 idx = 0;
     u8* p = ptr as u8*;
     while (idx < n)
@@ -32,6 +36,10 @@ expose fun memset(void* ptr, u8 value, i32 n) -> void*
 
 expose fun memcmp(void* ptr1, void* ptr2, i32 n) -> i32
 {
+    if (n <= 0)
+        ret 0;
+    if (ptr1 == 0 as void* || ptr2 == 0 as void*)
+        ret ptr1 == ptr2 ? 0 : (ptr1 == 0 as void* ? -1 : 1);
     i32 idx = 0;
     u8* p1 = ptr1 as u8*;
     u8* p2 = ptr2 as u8*;
@@ -48,6 +56,8 @@ expose fun memcmp(void* ptr1, void* ptr2, i32 n) -> i32
 
 expose fun memmove(void* dest, void* src, i32 n) -> void*
 {
+    if (dest == 0 as void* || src == 0 as void* || n <= 0 || dest == src)
+        ret dest;
     u8* d = dest as u8*;
     u8* s = src as u8*;
     if (d < s)
@@ -73,6 +83,8 @@ expose fun memmove(void* dest, void* src, i32 n) -> void*
 
 expose fun memchr(void* ptr, u8 value, i32 n) -> void*
 {
+    if (ptr == 0 as void* || n <= 0)
+        ret 0 as void*;
     i32 idx = 0;
     u8* p = ptr as u8*;
     while (idx < n)
@@ -88,6 +100,8 @@ expose fun memchr(void* ptr, u8 value, i32 n) -> void*
 
 expose fun memrchr(void* ptr, u8 value, i32 n) -> void*
 {
+    if (ptr == 0 as void* || n <= 0)
+        ret 0 as void*;
     i32 idx = n - 1;
     u8* p = ptr as u8*;
     while (idx >= 0)
@@ -114,29 +128,49 @@ expose fun bcopy(void* src, void* dest, i32 n) -> void*
 #ifndef __NOEXTEND
 expose fun alloc(i32 size) -> void*
 {
+    if (size <= 0)
+        ret 0 as void*;
     ret malloc(size);
 }
 
 expose fun dealloc(void* ptr) -> void
 {
-    free(ptr);
+    if (ptr != 0 as void*)
+        free(ptr);
 }
 
 expose fun realloc(void* ptr, i32 new_size) -> void*
 {
-    void* new_ptr = malloc(new_size);
-    if (new_ptr == 0 as void*)
+    if (new_size <= 0)
     {
+        if (ptr != 0 as void*)
+            free(ptr);
         ret 0 as void*;
     }
-    memmove(new_ptr, ptr, new_size); // Assume caller knows what they're doing (rare chance)
-    free(ptr);
+
+    void* new_ptr = malloc(new_size);
+    if (new_ptr == 0 as void*)
+        ret 0 as void*;
+
+    if (ptr != 0 as void*)
+    {
+        // Caller controls intended copy size for this low-level API.
+        memmove(new_ptr, ptr, new_size);
+        free(ptr);
+    }
+
     ret new_ptr;
 }
 
 expose fun cleanalloc(i32 num, i32 size) -> void*
 {
+    if (num <= 0 || size <= 0)
+        ret 0 as void*;
+
     i32 total_size = num * size;
+    if (num != 0 && (total_size / num) != size)
+        ret 0 as void*;
+
     void* ptr = malloc(total_size);
     if (ptr == 0 as void*)
     {

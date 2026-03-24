@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef _WIN32
 #define CHANCE_PATH_SEP '\\'
@@ -96,9 +97,17 @@ int maybe_inject_default_runtime_libs(const DriverRuntimeLibState *state)
     return -1;
 
   if (state->emit_library)
-    return 0;
+  {
+    const char *out_name = state->out_path ? state->out_path : "";
+    const char *slash = strrchr(out_name, '/');
+    if (slash && slash[1])
+      out_name = slash + 1;
+    if (strcmp(out_name, "stdlib.cclib") == 0 ||
+        strcmp(out_name, "runtime.cclib") == 0)
+      return 0;
+  }
 
-  if (state->no_link)
+  if (state->no_link && !state->emit_library)
     return 0;
 
   ProjectInputList cclib_list = {

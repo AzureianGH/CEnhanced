@@ -194,6 +194,9 @@ expose fun tcp_connect(char* ip, i32 port) -> i32
     if (init() != 0)
         ret -1;
 
+    if (ip == 0 as char*)
+        ret -1;
+
     i32 s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s < 0)
         ret -1;
@@ -212,8 +215,9 @@ expose fun tcp_connect(char* ip, i32 port) -> i32
 
     if (connect(s, (&sa) as void*, sizeof(SockAddrIn)) != 0)
     {
+        i32 err = net_errno();
         net_close(s);
-        ret -1;
+        ret -err;
     }
 
     ret s;
@@ -256,12 +260,21 @@ expose fun tcp_recv(i32 sock, void* buf, i32 cap) -> i32
     if (sock < 0 || buf == 0 as void* || cap <= 0)
         ret -1;
 
-    i64 rc = recv(sock, buf, cap as i64, 0);
-    if (rc < 0)
-        ret -1;
-    if (rc > 0x7FFFFFFF)
-        ret -1;
-    ret rc as i32;
+    while (1)
+    {
+        i64 rc = recv(sock, buf, cap as i64, 0);
+        if (rc >= 0)
+        {
+            if (rc > 0x7FFFFFFF)
+                ret -1;
+            ret rc as i32;
+        }
+
+        i32 err = net_errno();
+        if (err == ERR_EINTR || err == ERR_EAGAIN)
+            continue;
+        ret -err;
+    }
 }
 
 expose fun tcp_shutdown(i32 sock, i32 how) -> i32

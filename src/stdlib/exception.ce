@@ -1,5 +1,14 @@
 module Std.Exception;
 
+expose constant i32 E_RUNTIME = 1;
+expose constant i32 E_PANIC = 2;
+expose constant i32 E_OOM = 3;
+expose constant i32 E_NULL = 4;
+expose constant i32 E_INVALID_CAST = 5;
+expose constant i32 E_INDEX = 6;
+expose constant i32 E_IO = 7;
+expose constant i32 E_ASSERT = 8;
+
 expose struct RuntimeError {
     i32 code;
     string category = "RuntimeError";
@@ -71,4 +80,28 @@ expose struct AssertionFailed {
     u64 line;
     string symbol;
 };
+
+expose fun runtime_error(string message) -> RuntimeError
+{
+    RuntimeError ex = {};
+    ex.code = E_RUNTIME;
+    ex.message = message;
+    ret ex;
+}
+
+expose fun io_error(string message) -> IOError
+{
+    IOError ex = {};
+    ex.code = E_IO;
+    ex.message = message;
+    ret ex;
+}
+
+expose fun out_of_memory(string message) -> OutOfMemory
+{
+    OutOfMemory ex = {};
+    ex.code = E_OOM;
+    ex.message = message;
+    ret ex;
+}
 

@@ -4142,6 +4142,7 @@ int main(int argc, char **argv)
 
   DriverRuntimeLibState runtime_libs = {
       .exe_dir = exe_dir,
+      .out_path = out,
       .no_link = no_link,
       .emit_library = emit_library,
       .freestanding_requested = &freestanding_requested,

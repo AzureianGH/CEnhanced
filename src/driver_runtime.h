@@ -4,6 +4,7 @@
 typedef struct
 {
   const char *exe_dir;
+  const char *out_path;
   int no_link;
   int emit_library;
 
