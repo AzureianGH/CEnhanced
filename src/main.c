@@ -12,6 +12,7 @@
 #include "driver_types.h"
 #include "driver_validate.h"
 #include "driver_verbose.h"
+#include "frontend.h"
 #include "includes.h"
 #include "mangle.h"
 #include "module_registry.h"
@@ -164,8 +165,8 @@ typedef struct
   char *src;
   char *stripped;
   Node *unit;
-  SemaContext *sc;
-  Parser *parser;
+  FrontendUnit *frontend_unit;
+  const ChanceFrontend *frontend;
 } UnitCompile;
 
 typedef struct
@@ -174,13 +175,12 @@ typedef struct
   char *src;
   char *stripped;
   Node *unit;
+  FrontendUnit *frontend_unit;
+  const ChanceFrontend *frontend;
 } SymbolRefUnit;
 
 
 int sema_eval_const_i32(Node *expr);
-SemaContext *sema_create(void);
-void sema_destroy(SemaContext *sc);
-int sema_check_unit(SemaContext *sc, Node *unit);
 
 static char *read_all(const char *path, int *out_len)
 {
@@ -2919,13 +2919,15 @@ static int unit_has_auto_import(const Node *unit, const char *module_full)
   return 0;
 }
 
-static void symtab_add_library_functions(SemaContext *sc, Node *unit,
+static void symtab_add_library_functions(FrontendUnit *frontend_unit, Node *unit,
                                          const LoadedLibraryFunction *funcs,
                                          int func_count)
 {
-  if (!sc || !sc->syms || !funcs || func_count <= 0)
+  if (!frontend_unit || !unit || !funcs || func_count <= 0)
     return;
-  SymTable *syms = sc->syms;
+  SymTable *syms = chance_frontend_unit_symtab(frontend_unit);
+  if (!syms)
+    return;
   for (int i = 0; i < func_count; ++i)
   {
     const LoadedLibraryFunction *lf = &funcs[i];
@@ -2962,7 +2964,8 @@ static void symtab_add_library_functions(SemaContext *sc, Node *unit,
       Symbol unqual = sym;
       unqual.name = lf->name;
       unqual.backend_name = sym.backend_name;
-      sema_track_imported_function(sc, lf->name, module_full, &unqual);
+      chance_frontend_unit_track_imported_function(frontend_unit, lf->name,
+                                                   module_full, &unqual);
     }
   }
 }
@@ -4326,24 +4329,61 @@ int main(int argc, char **argv)
       int pre_len = 0;
       char *preprocessed = chance_preprocess_source(
           input, src, len, &pre_len, target_arch_to_macro(target_arch));
+      const ChanceFrontend *frontend = chance_frontend_for_input_path(input);
+      if (!frontend)
+      {
+        fprintf(stderr, "error: no frontend found for input '%s'\n", input);
+        rc = 1;
+        free(preprocessed);
+        free(src);
+        break;
+      }
       SourceBuffer sb = {preprocessed ? preprocessed : src,
                          preprocessed ? pre_len : len, input};
-      Parser *ps = parser_create(sb);
-      SemaContext *sc = sema_create();
-      chance_process_includes_and_scan(input, src, len, include_dirs,
-                                       include_dir_count, sc->syms);
-      Node *unit = parse_unit(ps);
-      parser_export_externs(ps, sc->syms);
-      symtab_add_library_functions(sc, unit, loaded_library_functions,
+      ChanceFrontendLoadRequest req = {
+          .input_path = input,
+          .raw_source = src,
+          .raw_source_len = len,
+          .source = sb,
+          .include_dirs = include_dirs,
+          .include_dir_count = include_dir_count,
+      };
+      FrontendUnit *frontend_unit =
+          chance_frontend_load_unit(frontend, &req, 1);
+      if (!frontend_unit)
+      {
+        fprintf(stderr, "error: failed to parse input '%s'\n", input);
+        rc = 1;
+        free(preprocessed);
+        free(src);
+        break;
+      }
+      Node *unit = chance_frontend_unit_ast(frontend_unit);
+      if (!unit)
+      {
+        if (chance_frontend_unit_supports_direct_ccb_emit(frontend_unit))
+          fprintf(stderr,
+                  "error: -sr currently requires AST-capable frontends; '%s' is direct-emission only\n",
+                  chance_frontend_name(frontend));
+        else
+          fprintf(stderr, "error: failed to parse input '%s'\n", input);
+        chance_frontend_unit_destroy(frontend_unit);
+        rc = 1;
+        free(preprocessed);
+        free(src);
+        break;
+      }
+      symtab_add_library_functions(frontend_unit, unit,
+                                   loaded_library_functions,
                                    loaded_library_function_count);
+      chance_frontend_unit_discard_semantic_state(frontend_unit);
 
       symbol_ref_units[si].input_path = input ? xstrdup(input) : NULL;
       symbol_ref_units[si].src = src;
       symbol_ref_units[si].stripped = preprocessed;
       symbol_ref_units[si].unit = unit;
-
-      sema_destroy(sc);
-      parser_destroy(ps);
+      symbol_ref_units[si].frontend = frontend;
+      symbol_ref_units[si].frontend_unit = frontend_unit;
     }
     if (rc)
       goto cleanup;
@@ -4375,23 +4415,55 @@ int main(int argc, char **argv)
       exit(0);
     }
     (void)pre_len;
+    const ChanceFrontend *frontend = chance_frontend_for_input_path(input);
+    if (!frontend)
+    {
+      fprintf(stderr, "error: no frontend found for input '%s'\n", input);
+      free(preprocessed);
+      free(src);
+      rc = 1;
+      break;
+    }
     SourceBuffer sb = {preprocessed ? preprocessed : src,
                        preprocessed ? pre_len : len, input};
-    Parser *ps = parser_create(sb);
-    SemaContext *sc = sema_create();
-    chance_process_includes_and_scan(input, src, len, include_dirs,
-                                     include_dir_count, sc->syms);
-    Node *unit = parse_unit(ps);
-    parser_export_externs(ps, sc->syms);
-    symtab_add_library_functions(sc, unit, loaded_library_functions,
-                                 loaded_library_function_count);
+    ChanceFrontendLoadRequest req = {
+        .input_path = input,
+        .raw_source = src,
+        .raw_source_len = len,
+        .source = sb,
+        .include_dirs = include_dirs,
+        .include_dir_count = include_dir_count,
+    };
+    FrontendUnit *frontend_unit = chance_frontend_load_unit(frontend, &req, 1);
+    if (!frontend_unit)
+    {
+      fprintf(stderr, "error: failed to parse input '%s'\n", input);
+      free(preprocessed);
+      free(src);
+      rc = 1;
+      break;
+    }
+    Node *unit = chance_frontend_unit_ast(frontend_unit);
+    if (!unit && !chance_frontend_unit_supports_direct_ccb_emit(frontend_unit))
+    {
+      fprintf(stderr, "error: failed to parse input '%s'\n", input);
+      chance_frontend_unit_destroy(frontend_unit);
+      free(preprocessed);
+      free(src);
+      rc = 1;
+      break;
+    }
+    if (unit)
+      symtab_add_library_functions(frontend_unit, unit,
+                                   loaded_library_functions,
+                                   loaded_library_function_count);
 
     units[fi].input_path = xstrdup(input);
     units[fi].src = src;
     units[fi].stripped = preprocessed;
     units[fi].unit = unit;
-    units[fi].sc = sc;
-    units[fi].parser = ps;
+    units[fi].frontend = frontend;
+    units[fi].frontend_unit = frontend_unit;
   }
   if (rc)
     goto cleanup;
@@ -4425,7 +4497,7 @@ int main(int argc, char **argv)
       if (compiler_verbose_enabled())
         verbose_progress("ce-sema", fi + 1, ce_count);
       UnitCompile *uc = &units[fi];
-      if (sema_check_unit(uc->sc, uc->unit) != 0)
+      if (chance_frontend_unit_check(uc->frontend_unit) != 0)
         rc = 1;
     }
     goto cleanup;
@@ -4441,8 +4513,9 @@ int main(int argc, char **argv)
     {
       if (target == source)
         continue;
-      sema_register_foreign_unit_symbols(units[target].sc, units[target].unit,
-                                         units[source].unit);
+      chance_frontend_unit_register_foreign_symbols(
+          units[target].frontend_unit,
+          units[source].frontend_unit);
     }
   }
 
@@ -4458,9 +4531,9 @@ int main(int argc, char **argv)
       {
         if (!symbol_ref_units[sr].unit)
           continue;
-        sema_register_foreign_unit_symbols(units[target].sc,
-                                           units[target].unit,
-                                           symbol_ref_units[sr].unit);
+        chance_frontend_unit_register_foreign_symbols(
+            units[target].frontend_unit,
+            symbol_ref_units[sr].frontend_unit);
       }
     }
   }
@@ -4492,20 +4565,20 @@ int main(int argc, char **argv)
   for (int fi = 0; fi < ce_count && rc == 0; ++fi)
   {
     UnitCompile *uc = &units[fi];
+    FrontendUnit *frontend_unit = uc->frontend_unit;
     Node *unit = uc->unit;
-    SemaContext *sc = uc->sc;
-    Parser *ps = uc->parser;
 
     if (compiler_verbose_enabled())
       verbose_progress("ce-codegen", fi + 1, ce_count);
 
-    int serr = sema_check_unit(sc, unit);
+    int serr = chance_frontend_unit_check(frontend_unit);
     if (!serr)
     {
       char dir[512], base[512];
       split_path(uc->input_path, dir, sizeof(dir), base, sizeof(base));
 
-      if (!emit_library && ce_count > 1 && unit_is_embedded_force_inline_literal_only(unit))
+        if (unit && !emit_library && ce_count > 1 &&
+          unit_is_embedded_force_inline_literal_only(unit))
       {
         if (!(stop_after_ccb && ends_with_icase(out, ".ccb")))
         {
@@ -4600,7 +4673,7 @@ int main(int argc, char **argv)
       }
 
       int imported_count = 0;
-      Symbol *imported_syms = sema_copy_imported_function_symbols(sc, &imported_count);
+      Symbol *imported_syms = chance_frontend_unit_copy_imported_function_symbols(frontend_unit, &imported_count);
       int imported_cap = imported_count;
       if (merge_stdlib_externs_into_imported(
               &imported_syms, &imported_count, &imported_cap,
@@ -4619,7 +4692,7 @@ int main(int argc, char **argv)
         break;
       }
       int imported_global_count = 0;
-      Symbol *imported_global_syms = sema_copy_imported_global_symbols(sc, &imported_global_count);
+      Symbol *imported_global_syms = chance_frontend_unit_copy_imported_global_symbols(frontend_unit, &imported_global_count);
 
       CodegenOptions co = {.freestanding = freestanding != 0,
                            .m32 = (m32 != 0) || (target_arch == ARCH_BSLASH),
@@ -4639,22 +4712,45 @@ int main(int argc, char **argv)
                            .imported_globals = imported_global_syms,
                            .imported_global_count = imported_global_count,
                            .opt_level = opt_level};
-      int extern_count = 0;
-      const Symbol *extern_syms = parser_get_externs(ps, &extern_count);
-      co.externs = extern_syms;
-      co.extern_count = extern_count;
-      rc = codegen_ccb_write_module(unit, &co);
+      if (chance_frontend_unit_supports_direct_ccb_emit(frontend_unit))
+      {
+        ChanceFrontendEmitRequest fe = {
+            .input_path = uc->input_path,
+            .ccb_output_path = ccb_path,
+            .opt_level = opt_level,
+        };
+        rc = chance_frontend_unit_emit_ccb(frontend_unit, &fe);
+      }
+      else
+      {
+        int extern_count = 0;
+        const Symbol *extern_syms = chance_frontend_unit_externs(frontend_unit,
+                                                                  &extern_count);
+        co.externs = extern_syms;
+        co.extern_count = extern_count;
+        rc = codegen_ccb_write_module(unit, &co);
+
+        if (!rc)
+        {
+          if (codegen_ccb_resolve_module_path(&co, ccb_path, sizeof(ccb_path)))
+            rc = 1;
+        }
+      }
       free(imported_syms);
       free(imported_global_syms);
 
-      if (!rc)
-      {
-        if (codegen_ccb_resolve_module_path(&co, ccb_path, sizeof(ccb_path)))
-          rc = 1;
-      }
-
       if (!rc && emit_library)
       {
+        if (!unit)
+        {
+          fprintf(stderr,
+                  "error: --library is not yet supported for frontend '%s'\n",
+              chance_frontend_name(uc->frontend));
+          rc = 1;
+        }
+        if (rc)
+          goto unit_done;
+
         char module_name_buf[256];
         const char *fallback_name = derive_module_name_from_path(
             ccb_path, module_name_buf, sizeof(module_name_buf));
@@ -4813,15 +4909,10 @@ int main(int argc, char **argv)
       rc = 1;
     }
 
-    sema_destroy(sc);
-    uc->sc = NULL;
-    ast_free(unit);
+  unit_done:
+    chance_frontend_unit_destroy(frontend_unit);
+    uc->frontend_unit = NULL;
     uc->unit = NULL;
-    if (ps)
-    {
-      parser_destroy(ps);
-      uc->parser = NULL;
-    }
     if (uc->stripped)
     {
       free(uc->stripped);
@@ -5364,12 +5455,8 @@ cleanup:
     for (int i = 0; i < ce_count; ++i)
     {
       UnitCompile *uc = &units[i];
-      if (uc->sc)
-        sema_destroy(uc->sc);
-      if (uc->unit)
-        ast_free(uc->unit);
-      if (uc->parser)
-        parser_destroy(uc->parser);
+      if (uc->frontend_unit)
+        chance_frontend_unit_destroy(uc->frontend_unit);
       if (uc->stripped)
         free(uc->stripped);
       if (uc->src)
@@ -5384,8 +5471,8 @@ cleanup:
     for (int i = 0; i < symbol_ref_ce_count; ++i)
     {
       SymbolRefUnit *sr = &symbol_ref_units[i];
-      if (sr->unit)
-        ast_free(sr->unit);
+      if (sr->frontend_unit)
+        chance_frontend_unit_destroy(sr->frontend_unit);
       if (sr->stripped)
         free(sr->stripped);
       if (sr->src)

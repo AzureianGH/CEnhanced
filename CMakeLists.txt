@@ -17,6 +17,9 @@ set(CHANCE_CORE_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/mangle.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/includes.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/preproc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend_ce.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/frontend_cinder.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/codegen_ccb.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ccsim.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/module_registry.c

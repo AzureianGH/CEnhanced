@@ -507,7 +507,7 @@ static int project_args_apply(const char *proj_path, int lineno,
         else if (is_ce_source_arg(cand))
         {
           fprintf(stderr,
-                  "error: -c in project args cannot list .ce inputs; use ce= instead (line %d)\n",
+                  "error: -c in project args cannot list .ce/.cin inputs; use ce= instead (line %d)\n",
                   lineno);
           return -1;
         }
@@ -802,14 +802,14 @@ static int project_args_apply(const char *proj_path, int lineno,
       if (!sr_path || !*sr_path)
       {
         fprintf(stderr,
-                "error: -sr: requires a .ce or .cclib path in '%s' (line %d)\n",
+                "error: -sr: requires a .ce, .cin, or .cclib path in '%s' (line %d)\n",
                 proj_path, lineno);
         return -1;
       }
       char resolved[1024];
       resolve_project_relative_path(resolved, sizeof(resolved), project_dir,
                                     sr_path);
-      if (ends_with_icase(sr_path, ".ce"))
+      if (ends_with_icase(sr_path, ".ce") || ends_with_icase(sr_path, ".cin"))
       {
         if (push_input_entry(resolved, state->symbol_ref_ce_list, 1) != 0)
           return -1;
@@ -822,7 +822,7 @@ static int project_args_apply(const char *proj_path, int lineno,
       else
       {
         fprintf(stderr,
-                "error: -sr: path '%s' must be a .ce or .cclib file (line %d)\n",
+                "error: -sr: path '%s' must be a .ce, .cin, or .cclib file (line %d)\n",
                 sr_path, lineno);
         return -1;
       }

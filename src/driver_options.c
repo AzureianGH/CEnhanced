@@ -416,10 +416,10 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
       if (!sr_path || !*sr_path)
       {
         fprintf(stderr,
-                "error: -sr: requires a .ce or .cclib path immediately following\n");
+                "error: -sr: requires a .ce, .cin, or .cclib path immediately following\n");
         return 2;
       }
-      if (ends_with_icase(sr_path, ".ce"))
+      if (ends_with_icase(sr_path, ".ce") || ends_with_icase(sr_path, ".cin"))
       {
         if (*state->symbol_ref_ce_count == *state->symbol_ref_ce_cap)
         {
@@ -451,7 +451,7 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
       else
       {
         fprintf(stderr,
-                "error: -sr: path '%s' must be a .ce or .cclib file\n",
+                "error: -sr: path '%s' must be a .ce, .cin, or .cclib file\n",
                 sr_path);
         return 2;
       }
@@ -523,7 +523,7 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
       continue;
     }
 
-    if (ends_with_icase(arg, ".ce"))
+    if (ends_with_icase(arg, ".ce") || ends_with_icase(arg, ".cin"))
     {
       if (push_input_entry(arg, ce_cli_list, 0) != 0)
         return -1;
@@ -550,7 +550,7 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
     else
     {
       fprintf(stderr,
-              "error: unknown input type '%s' (expected .ce or .o/.obj)\n",
+              "error: unknown input type '%s' (expected .ce/.cin or .o/.obj)\n",
               arg);
       return 2;
     }

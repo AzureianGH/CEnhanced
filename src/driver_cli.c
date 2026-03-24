@@ -6,7 +6,7 @@
 
 void usage(const char *prog)
 {
-  fprintf(stderr, "Usage: %s [options] input.ce [more.ce ...]\n", prog);
+        fprintf(stderr, "Usage: %s [options] input.ce|input.cin [more.ce|more.cin ...]\n", prog);
   fprintf(stderr, "       %s [options] project.ceproj\n", prog);
   fprintf(stderr, "       %s new <template> [name]\n", prog);
   fprintf(stderr, "Options:\n");
@@ -45,7 +45,7 @@ void usage(const char *prog)
                   "(default: auto-detect or PATH)\n");
         fprintf(stderr, "  --entry <symbol>  Set entry symbol passed to linker (e.g., _start)\n");
   fprintf(stderr,
-          "  -sr:<path>       Load .ce/.cclib for symbols only (no codegen)\n");
+          "  -sr:<path>       Load .ce/.cin/.cclib for symbols only (no codegen)\n");
   fprintf(stderr,
           "  -I <dir>          Add include search directory for #include <>\n");
   fprintf(stderr, "  -Nno-formatting  Disable formatting guidance notes\n");
@@ -100,7 +100,8 @@ int ends_with_icase(const char *s, const char *suf)
 
 int is_ce_source_arg(const char *path)
 {
-  return path && (ends_with_icase(path, ".ce") || ends_with_icase(path, ".ceproj"));
+        return path && (ends_with_icase(path, ".ce") || ends_with_icase(path, ".cin") ||
+                                                                        ends_with_icase(path, ".ceproj"));
 }
 
 int is_object_file_arg(const char *path)
