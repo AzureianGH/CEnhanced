@@ -190,6 +190,13 @@ if exist "%CHS_DIR%\build\chs.exe" (
   if errorlevel 1 goto :error
 )
 
+REM install path variables, permanent
+setx /M CHANCE_PREFIX "%PREFIX%" >nul
+setx /M CHANCE_BIN_DIR "%BIN_DIR%" >nul
+setx /M CHANCE_SHARE_DIR "%SHARE_DIR%" >nul
+setx /M CHANCE_STDLIB_DIR "%STDLIB_DIR%" >nul
+setx /M CHANCE_RUNTIME_DIR "%RUNTIME_DIR%" >nul
+
 echo Done
 exit /b 0
 
