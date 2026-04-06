@@ -196,6 +196,10 @@ setx /M CHANCE_BIN_DIR "%BIN_DIR%" >nul
 setx /M CHANCE_SHARE_DIR "%SHARE_DIR%" >nul
 setx /M CHANCE_STDLIB_DIR "%STDLIB_DIR%" >nul
 setx /M CHANCE_RUNTIME_DIR "%RUNTIME_DIR%" >nul
+setx /M CHANCECODE_DIR "%CHANCECODE_DIR%" >nul
+setx /M CLD_DIR "%CLD_DIR%" >nul
+setx /M CHS_DIR "%CHS_DIR%" >nul
+setx /M PATH "%PATH%;%BIN_DIR%" >nul
 
 echo Done
 exit /b 0
