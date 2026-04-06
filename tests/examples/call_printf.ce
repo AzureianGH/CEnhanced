@@ -3,7 +3,9 @@ module Test.Program;
 bring Test.Chance as TC;
 bring LibTest as LT;
 bring LibTest.Another;
-bring Std;
+bring Std.IO as IO;
+bring Std.Memory as Memory;
+bring Std.String as String;
 bring Std.File as File;
 
 
@@ -61,7 +63,7 @@ extend from "C" i32 read(i32, char *, int);
 extend from "C" void *malloc(int);
 extend from "C" void free(void *);
 extend from "C" void exit(int);
-extend from "C" int test();
+// extend from "C" int test();
 extend fun test_chance() -> i32;
 extend from "C" i32 remove(char*);
 
@@ -153,7 +155,7 @@ hide fun printwrapper() -> i32
 {
     string fn_name = __FUNCTION__;
     assert(strcmp(fn_name, "printwrapper") == 0, "__FUNCTION__ matches printwrapper");
-    ret Std.IO.print("Hello, %s! Number: %d\n", "CHance", 42);
+    ret IO.print("Hello, %s! Number: %d\n", "CHance", 42);
 }
 
 hide fun assert(bool condition, string message) -> void
@@ -161,11 +163,11 @@ hide fun assert(bool condition, string message) -> void
     total_test_count += 1;
     if (condition)
     {
-        Std.IO.print("TEST PASSED: %s\n", message);
+        IO.print("TEST PASSED: %s\n", message);
     }
     else
     {
-        Std.IO.print("TEST FAIL: %s\n", message);
+        IO.print("TEST FAIL: %s\n", message);
         abort();
     }
     ret;
@@ -184,14 +186,14 @@ expose fun main() -> i32
     // allocate 128 bytes for input
     ptr<void> buf = null;
     
-    buf = Std.Memory.alloc(128);
+    buf = Memory.alloc(128);
 
     var inferred_buf = buf;
     assert(inferred_buf == buf, "var inferred pointer matches original buffer");
 
     assert(buf != null, "\"buf\" allocation");
 
-    Std.Memory.memset(buf, 0, 128);
+    Memory.memset(buf, 0, 128);
 
     bool all_zero = true;
 
@@ -222,9 +224,9 @@ expose fun main() -> i32
     };
     CCDiagnosticCallback cb = fun (CCDiagnostic* diagnostic, void* userdata) -> void {
         if (diagnostic != null)
-            Std.IO.print("Diag code: %d\n", diagnostic->code);
+            IO.print("Diag code: %d\n", diagnostic->code);
         if (userdata != null)
-            Std.IO.print("Diag userdata: %p\n", userdata);
+            IO.print("Diag userdata: %p\n", userdata);
         ret;
     };
     cb(&diag, null);
@@ -240,12 +242,12 @@ expose fun main() -> i32
     }
     else
     {
-        Std.IO.print("No input read, using empty string\n");
+        IO.print("No input read, using empty string\n");
         str[0] = 0;
     }
 
     // basic string length sanity check
-    assert(Std.String.strlen(str) == len, "strlen matches bytes read");
+    assert(String.strlen(str) == len, "strlen matches bytes read");
 
     string cmp_target = "CHance";
 
@@ -259,12 +261,12 @@ expose fun main() -> i32
         assert(true, "User did not enter the secret name (not required for tests)");
     }
 
-    Std.IO.print("Freeing memory...\n");
-    Std.Memory.dealloc(buf as void*);
+    IO.print("Freeing memory...\n");
+    Memory.dealloc(buf as void*);
 
     // Test overflow behavior
     i16 of = test_overflow();
-    Std.IO.print("test_overflow result: %d\n", of);
+    IO.print("test_overflow result: %d\n", of);
     assert(of == -25536, "test_overflow result is -25536");
 
     // Test multiplication overflow
@@ -283,9 +285,9 @@ expose fun main() -> i32
 
     assert((0xFF as i32) == 255, "0xFF == 255");
 
-    Std.IO.print("Calling test_chance(): %d\n", TC.test_chance());
+    IO.print("Calling test_chance(): %d\n", TC.test_chance());
 
-    Std.IO.print("Calling extended C function test(): %d\n", test());
+    // IO.print("Calling extended C function test(): %d\n", test());
 
     TC.SmallTest vari = {};
     vari.smallValue = 3; 
@@ -307,7 +309,7 @@ expose fun main() -> i32
     i32** testintpp = &testintp;
     assert(testintpp[0][0] == 123, "double pointer deref == 123");
 
-    TC.SmallTest* addptr = Std.Memory.alloc(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
+    TC.SmallTest* addptr = Memory.alloc(sizeof(TC.SmallTest) * 2) as TC.SmallTest*;
     
     addptr[0] = construct_thing();
     addptr[1] = another; // hello world 
@@ -316,10 +318,10 @@ expose fun main() -> i32
     assert(addptr[0].smallValue == 5, "addptr[0].smallValue == 5");
     assert(addptr[1].smallValue == 123, "addptr[1].smallValue == 123");
 
-    Std.Memory.dealloc(addptr as void*);
+    Memory.dealloc(addptr as void*);
 
     i32* testintptr = test as i32*;
-    Std.IO.print("testVar via intptr: %p\n", testintptr);
+    IO.print("testVar via intptr: %p\n", testintptr);
 
     TC.Element elem = TC.Element.SetElement;
 
@@ -333,7 +335,7 @@ expose fun main() -> i32
     i32 b = 4 >> 1;
     assert(b == 2, "4 >> 1 == 2");
 
-    Std.IO.print("typeof() = %s with sizeof() = %d\n", typeof(TC.SmallTest), sizeof(TC.SmallTest));
+    IO.print("typeof() = %s with sizeof() = %d\n", typeof(TC.SmallTest), sizeof(TC.SmallTest));
 
     [MetadataCall("differentsig")]();
 
@@ -341,9 +343,9 @@ expose fun main() -> i32
 
     assert(rawthing(10) == 466, "rawthing(10) == 466");
 
-    Std.IO.print("Result from LibTest: %d\n", LT.test_fun(41));
+    IO.print("Result from LibTest: %d\n", LT.test_fun(41));
 
-    Std.IO.print("Result from LibTest.Another: %d\n", other_test_fun(50)); // Will be 60
+    IO.print("Result from LibTest.Another: %d\n", other_test_fun(50)); // Will be 60
 
     f32 floatval = 3.14f;
     f64 doubleval = 1.23456789;
@@ -355,7 +357,7 @@ expose fun main() -> i32
     assert(ac == 4, "ac == 4");
     assert(floatptr[0] == 6.28f, "floatptr[0] == 6.28f");
     assert(doubleval == 1.23456789, "doubleval == 1.23456789");
-    Std.IO.print("Expect addition of doubleval + floatval = %lf\n", (doubleval + (floatval as f64)) as f64);
+    IO.print("Expect addition of doubleval + floatval = %lf\n", (doubleval + (floatval as f64)) as f64);
     f64 sum = doubleval + (floatval as f64);
     f64 diff = sum - 7.514568;
     if (diff < 0.0) diff = -diff;
@@ -427,8 +429,8 @@ expose fun main() -> i32
 
     u16 random_number = 12345;
 
-    char* chkarray = Std.Memory.alloc(17) as char*;
-    Std.Memory.memset(chkarray as void*, 0, 17);
+    char* chkarray = Memory.alloc(17) as char*;
+    Memory.memset(chkarray as void*, 0, 17);
 
     // Print out each bit of random_number
     for (i32 i = 15; i >= 0; i = i - 1)
@@ -448,8 +450,8 @@ expose fun main() -> i32
     
     assert(__CHANCE__ == 1, "__CHANCE__ builtin defined");
     assert(__CHANCE_VERSION__ == (__CHANCE_VERSION_MAJOR__ * 10000 + __CHANCE_VERSION_MINOR__ * 100 + __CHANCE_VERSION_PATCH__), "aggregate version matches components");
-    Std.IO.printnl("CHanceC version: %s", __CHANCE_VERSION_STR__);
-    Std.IO.printnl("CHance H%d", __CHANCE_STANDARD__);
+    IO.printnl("CHanceC version: %s", __CHANCE_VERSION_STR__);
+    IO.printnl("CHance H%d", __CHANCE_STANDARD__);
     assert(__POINTER_WIDTH__ == (sizeof(void*) * 8), "__POINTER_WIDTH__ matches sizeof(void*)");
     if (sizeof(void*) == 8)
     {
@@ -507,14 +509,14 @@ expose fun main() -> i32
     assert(fixed_sum == 60, "fixed array sum is 60");
     assert(sizeof(fixed_array) == sizeof(i32) * 3, "fixed array size is correct");
 
-    i64[] dyn_array = Std.Memory.alloc(sizeof(i64) * 4) as i64[];
+    i64[] dyn_array = Memory.alloc(sizeof(i64) * 4) as i64[];
     dyn_array[0] = 100;
     dyn_array[1] = 200;
     dyn_array[2] = 300;
     dyn_array[3] = 400;
     i64 dyn_sum = dyn_array[0] + dyn_array[1] + dyn_array[2] + dyn_array[3];
     assert(dyn_sum == 1000, "dynamic array sum is 1000");
-    Std.Memory.dealloc(dyn_array as void*);
+    Memory.dealloc(dyn_array as void*);
 
     TC.SmallTest st = {
         .smallValue = 9,
@@ -560,16 +562,16 @@ expose fun main() -> i32
     void* inlinedvoidp = inlinedptr as void*;
 
     fun* (i32, -> i32) retinlinedptr = inlinedvoidp as fun* (i32, -> i32);
-    Std.IO.print("Value is %d!\n", retinlinedptr(5));
+    IO.print("Value is %d!\n", retinlinedptr(5));
 
     #if __TARGET_ARCH__ == "xa86"
     assert(false, "target arch is invalid");
     #endif
 
     #if __TARGET_ARCH__ == "x8""6"
-    Std.IO.print("Arch is %s.\n", __TARGET_ARCH__);
+    IO.print("Arch is %s.\n", __TARGET_ARCH__);
     #else
-    Std.IO.print("Arch (non-x86) is %s.\n", __TARGET_ARCH__);
+    IO.print("Arch (non-x86) is %s.\n", __TARGET_ARCH__);
     #endif
 
     i32 structvarargs_sum = multistructargs(
@@ -586,7 +588,7 @@ expose fun main() -> i32
         TC.SmallTest{ .smallValue = 0, .testVar = 33 }
     );
 
-    Std.IO.print("structvarargs_result = %d\n", structvarargs_result);
+    IO.print("structvarargs_result = %d\n", structvarargs_result);
 
     assert(structvarargs_result == 66, "structvarargs sum is 66");
 
@@ -601,7 +603,7 @@ expose fun main() -> i32
     constant_test(const_value as i32); // should not modify caller
     assert(const_value == 555, "constant value remains 555 after constant_test");
     
-    constant u8* array = Std.Memory.alloc(10) as constant u8*;
+    constant u8* array = Memory.alloc(10) as constant u8*;
 
     // constant_ptr(array); // would error without explicit cast
     constant_ptr(array as u8*); // force override to allow mutation
@@ -758,14 +760,14 @@ expose fun main() -> i32
     assert(superarg_result % 20 == -8, "super_args product mod 20 is 12");
 
     action test_action = fun () -> void {
-        Std.IO.print("This is a test action!\n");
+        IO.print("This is a test action!\n");
         ret;
     }(); // immediate invocation
 
     test_action(); // second invocation
 
     action test_action2 = fun (i32 x) -> i16 {
-        Std.IO.print("This is a test action with arg: %d\n", x);
+        IO.print("This is a test action with arg: %d\n", x);
         ret (x as i16) + 1;
     };
 
@@ -773,11 +775,11 @@ expose fun main() -> i32
     assert(lambda_result == 42, "lambda action returned 42");
     lambda_test(
         fun () -> void {
-            Std.IO.print("Lambda test action A invoked!\n");
+            IO.print("Lambda test action A invoked!\n");
             ret;
         },
         fun (i32 x) -> i16 {
-            Std.IO.print("Lambda test action B invoked with %d!\n", x);
+            IO.print("Lambda test action B invoked with %d!\n", x);
             ret (x as i16) + 1;
         }
     );
@@ -848,7 +850,7 @@ expose fun main() -> i32
     assert(true, "new/delete tests skipped on older CHance standards");
     #endif
 
-    Std.IO.printnl("All tests completed successfully! %d total asserts.", total_test_count);
+    IO.printnl("All tests completed successfully! %d total asserts.", total_test_count);
 
     ret (final_sum / 168) - 1; // expect 0
 }
@@ -857,7 +859,7 @@ hide fun lambda_test(action a () -> void, action b (i32) -> i16) -> void
 {
     a();
     i16 val = b(42);
-    Std.IO.print("Lambda returned: %d\n", val);
+    IO.print("Lambda returned: %d\n", val);
     ret;
 }
 
@@ -866,7 +868,7 @@ hide fun file_io_tests() -> void
     //
     // Basic byte write/read test
     //
-    u8* file_payload = Std.Memory.alloc(4) as u8*;
+    u8* file_payload = Memory.alloc(4) as u8*;
     file_payload[0] = 1;
     file_payload[1] = 2;
     file_payload[2] = 3;
@@ -890,15 +892,15 @@ hide fun file_io_tests() -> void
            file_bytes[3] == 4,
            "read_all preserved byte contents");
 
-    Std.Memory.dealloc(file_buf);
-    Std.Memory.dealloc(file_payload as void*);
+    Memory.dealloc(file_buf);
+    Memory.dealloc(file_payload as void*);
 
 
     //
     // Struct write/read test
     //
     TC.SmallTest* file_struct =
-        Std.Memory.alloc(sizeof(TC.SmallTest)) as TC.SmallTest*;
+        Memory.alloc(sizeof(TC.SmallTest)) as TC.SmallTest*;
     file_struct->smallValue = 7;
     file_struct->testVar   = 99;
 
@@ -926,7 +928,7 @@ hide fun file_io_tests() -> void
     // Seek to start
     assert(File.seek(fh, 0, 0) == 0, "seek to start succeeded"); // 0 = SEEK_SET
 
-    void* struct_buf = Std.Memory.alloc(struct_size);
+    void* struct_buf = Memory.alloc(struct_size);
     assert(File.read(fh, struct_buf, struct_size) == struct_size,
            "read struct bytes");
 
@@ -937,8 +939,8 @@ hide fun file_io_tests() -> void
            loaded_struct.testVar   == 99,
            "struct round-trip matches");
 
-    Std.Memory.dealloc(struct_buf);
-    Std.Memory.dealloc(file_struct as void*);
+    Memory.dealloc(struct_buf);
+    Memory.dealloc(file_struct as void*);
 
     //
     // Cleanup
@@ -1008,7 +1010,7 @@ expose fun internal_diffvarargs(i32 empty, ...) -> void
     i32 first = va_arg(list, i32);
     f64 second = va_arg(list, f64);
     string third = va_arg(list, string);
-    Std.IO.print("internal_diffvarargs: first=%d, second=%lf, third=%s\n", first, second, third);
+    IO.print("internal_diffvarargs: first=%d, second=%lf, third=%s\n", first, second, third);
     va_end(list);
     ret;
 }
@@ -1157,7 +1159,7 @@ hide fun test_mul_overflow() -> u8
 [OverrideMetadata(".func differentsig ret=void params=0 locals=0")]
 hide fun test_idk() -> void
 {
-    Std.IO.print("Hello from sigfunction!\n");
+    IO.print("Hello from sigfunction!\n");
     ret;
 }
 

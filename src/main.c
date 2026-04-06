@@ -2453,6 +2453,202 @@ static int collect_metadata_for_unit(const Node *unit, const char *ccb_path,
   return 0;
 }
 
+static void trim_ascii_inplace(char *s)
+{
+  if (!s)
+    return;
+  size_t len = strlen(s);
+  size_t start = 0;
+  while (start < len && isspace((unsigned char)s[start]))
+    ++start;
+  size_t end = len;
+  while (end > start && isspace((unsigned char)s[end - 1]))
+    --end;
+  if (start > 0)
+    memmove(s, s + start, end - start);
+  s[end - start] = '\0';
+}
+
+static int parse_func_signature_from_ccb_line(const char *line,
+                                              LibraryFunction *out)
+{
+  if (!line || !out)
+    return 0;
+  memset(out, 0, sizeof(*out));
+
+  const char *prefix = ".func ";
+  size_t prefix_len = strlen(prefix);
+  if (strncmp(line, prefix, prefix_len) != 0)
+    return 0;
+
+  const char *cursor = line + prefix_len;
+  while (*cursor && isspace((unsigned char)*cursor))
+    ++cursor;
+  if (!*cursor)
+    return 0;
+
+  const char *name_end = cursor;
+  while (*name_end && !isspace((unsigned char)*name_end))
+    ++name_end;
+  if (name_end == cursor)
+    return 0;
+
+  size_t name_len = (size_t)(name_end - cursor);
+  char *name = (char *)xmalloc(name_len + 1);
+  memcpy(name, cursor, name_len);
+  name[name_len] = '\0';
+  out->name = name;
+  out->backend_name = xstrdup(name);
+
+  const char *ret_pos = strstr(name_end, " ret=");
+  if (!ret_pos)
+    ret_pos = strstr(name_end, "ret=");
+  if (!ret_pos)
+  {
+    free_library_function(out);
+    return 0;
+  }
+  ret_pos = strstr(ret_pos, "ret=");
+  ret_pos += 4;
+  const char *ret_end = ret_pos;
+  while (*ret_end && !isspace((unsigned char)*ret_end))
+    ++ret_end;
+  size_t ret_len = (size_t)(ret_end - ret_pos);
+  out->return_spec = (char *)xmalloc(ret_len + 1);
+  memcpy(out->return_spec, ret_pos, ret_len);
+  out->return_spec[ret_len] = '\0';
+
+  out->param_count = 0;
+  const char *params_pos = strstr(name_end, " params=");
+  if (!params_pos)
+    params_pos = strstr(name_end, "params=");
+  if (params_pos)
+  {
+    params_pos = strstr(params_pos, "params=");
+    params_pos += 7;
+    out->param_count = (int)strtol(params_pos, NULL, 10);
+    if (out->param_count < 0)
+      out->param_count = 0;
+  }
+
+  if (out->param_count > 0)
+  {
+    out->param_specs =
+        (char **)xcalloc((size_t)out->param_count, sizeof(char *));
+    if (!out->param_specs)
+    {
+      free_library_function(out);
+      return 0;
+    }
+    for (int i = 0; i < out->param_count; ++i)
+      out->param_specs[i] = xstrdup("i32");
+  }
+
+  out->is_varargs = strstr(name_end, " varargs") ? 1 : 0;
+  out->is_noreturn = 0;
+  out->is_exposed = 1;
+  return 1;
+}
+
+static void apply_params_line_to_function(LibraryFunction *fn,
+                                          const char *line)
+{
+  if (!fn || !line || fn->param_count <= 0)
+    return;
+  const char *prefix = ".params";
+  if (strncmp(line, prefix, strlen(prefix)) != 0)
+    return;
+
+  char *copy = xstrdup(line + strlen(prefix));
+  if (!copy)
+    return;
+  trim_ascii_inplace(copy);
+  if (!copy[0])
+  {
+    free(copy);
+    return;
+  }
+
+  int idx = 0;
+  char *tok = strtok(copy, " \t\r\n");
+  while (tok && idx < fn->param_count)
+  {
+    free(fn->param_specs[idx]);
+    fn->param_specs[idx] = xstrdup(tok);
+    ++idx;
+    tok = strtok(NULL, " \t\r\n");
+  }
+  free(copy);
+}
+
+static int collect_metadata_for_ccb_text(const char *ccb_path,
+                                         const char *module_name,
+                                         LibraryModuleData **modules,
+                                         int *module_count,
+                                         int *module_cap)
+{
+  if (!ccb_path || !*ccb_path || !module_name || !*module_name || !modules ||
+      !module_count || !module_cap)
+    return 1;
+
+  FILE *f = fopen(ccb_path, "rb");
+  if (!f)
+    return 1;
+
+  LibraryModuleData *mod =
+      find_or_add_module(modules, module_count, module_cap, module_name);
+  if (!mod)
+  {
+    fclose(f);
+    return 1;
+  }
+  if (!mod->ccb_path)
+    mod->ccb_path = xstrdup(ccb_path);
+
+  char line[4096];
+  int current_fn = -1;
+  while (fgets(line, sizeof(line), f))
+  {
+    trim_ascii_inplace(line);
+    if (!line[0])
+      continue;
+
+    if (strncmp(line, ".func ", 6) == 0)
+    {
+      LibraryFunction fn = {0};
+      if (!parse_func_signature_from_ccb_line(line, &fn))
+      {
+        fclose(f);
+        return 1;
+      }
+      if (append_library_function(mod, &fn) != 0)
+      {
+        free_library_function(&fn);
+        fclose(f);
+        return 1;
+      }
+      current_fn = mod->function_count - 1;
+      continue;
+    }
+
+    if (strncmp(line, ".params", 7) == 0 && current_fn >= 0 &&
+        current_fn < mod->function_count)
+    {
+      apply_params_line_to_function(&mod->functions[current_fn], line);
+      continue;
+    }
+
+    if (strncmp(line, ".endfunc", 8) == 0)
+    {
+      current_fn = -1;
+      continue;
+    }
+  }
+
+  fclose(f);
+  return 0;
+}
+
 static int write_library_file(const char *path, LibraryModuleData *mods,
                               int module_count)
 {
@@ -4741,27 +4937,34 @@ int main(int argc, char **argv)
 
       if (!rc && emit_library)
       {
-        if (!unit)
-        {
-          fprintf(stderr,
-                  "error: --library is not yet supported for frontend '%s'\n",
-              chance_frontend_name(uc->frontend));
-          rc = 1;
-        }
-        if (rc)
-          goto unit_done;
-
         char module_name_buf[256];
         const char *fallback_name = derive_module_name_from_path(
             ccb_path, module_name_buf, sizeof(module_name_buf));
-        const char *module_name = unit->module_path.full_name;
+        const char *module_name = (unit ? unit->module_path.full_name : NULL);
         const char *effective_module =
             (module_name && *module_name) ? module_name : fallback_name;
-        if (collect_metadata_for_unit(unit, ccb_path, effective_module,
-                                      &library_modules,
-                                      &library_module_count,
-                                      &library_module_cap))
+        int metadata_rc = 0;
+        if (unit)
         {
+          metadata_rc = collect_metadata_for_unit(unit, ccb_path,
+                                                  effective_module,
+                                                  &library_modules,
+                                                  &library_module_count,
+                                                  &library_module_cap);
+        }
+        else
+        {
+          metadata_rc = collect_metadata_for_ccb_text(
+              ccb_path, effective_module,
+              &library_modules, &library_module_count,
+              &library_module_cap);
+        }
+
+        if (metadata_rc)
+        {
+          fprintf(stderr,
+                  "error: failed collecting library metadata for frontend '%s'\n",
+                  chance_frontend_name(uc->frontend));
           rc = 1;
         }
         else
@@ -5342,7 +5545,7 @@ int main(int argc, char **argv)
       library_out_path = export_cclib_path;
     }
 
-    if (loaded_library_count > 0)
+    if (static_link && loaded_library_count > 0)
     {
       if (merge_loaded_libraries_into_library_modules(
               loaded_libraries, loaded_library_count,

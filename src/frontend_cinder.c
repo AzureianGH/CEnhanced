@@ -2713,6 +2713,40 @@ static int cinder_supports_direct_ccb_emit(const FrontendUnit *unit)
   return impl && impl->program.parse_ok;
 }
 
+static int cinder_program_declares_extern_fflush(const CinderProgram *program)
+{
+  if (!program)
+    return 0;
+  for (int ni = 0; ni < program->namespace_count; ++ni)
+  {
+    const CinderNamespace *ns = &program->namespaces[ni];
+    for (int mi = 0; mi < ns->method_count; ++mi)
+    {
+      const CinderMethod *m = &ns->methods[mi];
+      if (m->is_extern && m->symbol_name && strcmp(m->symbol_name, "fflush") == 0)
+        return 1;
+    }
+  }
+  return 0;
+}
+
+static int cinder_program_has_main(const CinderProgram *program)
+{
+  if (!program)
+    return 0;
+  for (int ni = 0; ni < program->namespace_count; ++ni)
+  {
+    const CinderNamespace *ns = &program->namespaces[ni];
+    for (int mi = 0; mi < ns->method_count; ++mi)
+    {
+      const CinderMethod *m = &ns->methods[mi];
+      if (!m->is_extern && m->base_name && strcmp(m->base_name, "main") == 0)
+        return 1;
+    }
+  }
+  return 0;
+}
+
 static int cinder_emit_ccb(FrontendUnit *unit,
                            const ChanceFrontendEmitRequest *request)
 {
@@ -2730,21 +2764,9 @@ static int cinder_emit_ccb(FrontendUnit *unit,
 
   if (ok)
   {
-    int has_fflush = 0;
-    for (int ni = 0; ni < impl->program.namespace_count && !has_fflush; ++ni)
-    {
-      CinderNamespace *ns = &impl->program.namespaces[ni];
-      for (int mi = 0; mi < ns->method_count; ++mi)
-      {
-        CinderMethod *m = &ns->methods[mi];
-        if (m->is_extern && m->symbol_name && strcmp(m->symbol_name, "fflush") == 0)
-        {
-          has_fflush = 1;
-          break;
-        }
-      }
-    }
-    if (!has_fflush)
+    int needs_fflush = cinder_program_has_main(&impl->program);
+    int has_fflush = cinder_program_declares_extern_fflush(&impl->program);
+    if (needs_fflush && !has_fflush)
       ok = (fprintf(out, ".extern fflush params=(ptr) returns=i32\n") > 0);
   }
 
