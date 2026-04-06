@@ -25,10 +25,16 @@ if "%~3"=="" (
 ) else (
   set "CHS_DIR=%~3"
 )
+if "%~4"=="" (
+  set "CVM_DIR=%SCRIPT_DIR%\..\CVM"
+) else (
+  set "CVM_DIR=%~4"
+)
 
 for %%I in ("%CHANCECODE_DIR%") do set "CHANCECODE_DIR=%%~fI"
 for %%I in ("%CLD_DIR%") do set "CLD_DIR=%%~fI"
 for %%I in ("%CHS_DIR%") do set "CHS_DIR=%%~fI"
+for %%I in ("%CVM_DIR%") do set "CVM_DIR=%%~fI"
 
 echo.
 echo == Build ==
@@ -49,6 +55,29 @@ if exist "%CHANCECODE_DIR%\build.bat" (
   )
   popd
   echo ChanceCode build complete
+)
+
+if exist "%CVM_DIR%\CMakeLists.txt" (
+  where cmake >nul 2>&1
+  if errorlevel 1 (
+    echo error: cmake is required to build CVM
+    goto :error
+  )
+
+  echo Building CVM
+  pushd "%CVM_DIR%"
+  cmake -S . -B build -DCHANCECODE_ROOT="%CHANCECODE_DIR%"
+  if errorlevel 1 (
+    popd
+    goto :error
+  )
+  cmake --build build
+  if errorlevel 1 (
+    popd
+    goto :error
+  )
+  popd
+  echo CVM build complete
 )
 
 set "CHANCEC_BIN=%SCRIPT_DIR%\build\chancec.exe"
@@ -190,6 +219,46 @@ if exist "%CHS_DIR%\build\chs.exe" (
   if errorlevel 1 goto :error
 )
 
+if exist "%CVM_DIR%\build\cvm.exe" (
+  echo Installing CVM
+  copy /Y "%CVM_DIR%\build\cvm.exe" "%BIN_DIR%\cvm.exe" >nul
+  if errorlevel 1 goto :error
+) else if exist "%CVM_DIR%\build\cvm" (
+  echo Installing CVM
+  copy /Y "%CVM_DIR%\build\cvm" "%BIN_DIR%\cvm.exe" >nul
+  if errorlevel 1 goto :error
+)
+
+if exist "%BIN_DIR%\cvm.exe" (
+  if exist "%SCRIPT_DIR%\src\stdlib\stdlib.cclib" (
+    copy /Y "%SCRIPT_DIR%\src\stdlib\stdlib.cclib" "%BIN_DIR%\stdlib.cclib" >nul
+    if errorlevel 1 goto :error
+  ) else (
+    echo warning: stdlib.cclib not found at "%SCRIPT_DIR%\src\stdlib\stdlib.cclib"
+  )
+
+  if exist "%SCRIPT_DIR%\runtime\runtime.cclib" (
+    copy /Y "%SCRIPT_DIR%\runtime\runtime.cclib" "%BIN_DIR%\runtime.cclib" >nul
+    if errorlevel 1 goto :error
+  ) else (
+    echo warning: runtime.cclib not found at "%SCRIPT_DIR%\runtime\runtime.cclib"
+  )
+
+  if exist "%SCRIPT_DIR%\src\stdlib\stdlib.ccb" (
+    copy /Y "%SCRIPT_DIR%\src\stdlib\stdlib.ccb" "%BIN_DIR%\stdlib.ccb" >nul
+    if errorlevel 1 goto :error
+  ) else (
+    echo warning: stdlib.ccb not found at "%SCRIPT_DIR%\src\stdlib\stdlib.ccb"
+  )
+
+  if exist "%SCRIPT_DIR%\runtime\runtime.ccb" (
+    copy /Y "%SCRIPT_DIR%\runtime\runtime.ccb" "%BIN_DIR%\runtime.ccb" >nul
+    if errorlevel 1 goto :error
+  ) else (
+    echo warning: runtime.ccb not found at "%SCRIPT_DIR%\runtime\runtime.ccb"
+  )
+)
+
 REM install path variables, permanent
 setx /M CHANCE_PREFIX "%PREFIX%" >nul
 setx /M CHANCE_BIN_DIR "%BIN_DIR%" >nul
@@ -199,7 +268,12 @@ setx /M CHANCE_RUNTIME_DIR "%RUNTIME_DIR%" >nul
 setx /M CHANCECODE_DIR "%CHANCECODE_DIR%" >nul
 setx /M CLD_DIR "%CLD_DIR%" >nul
 setx /M CHS_DIR "%CHS_DIR%" >nul
-setx /M PATH "%PATH%;%BIN_DIR%" >nul
+setx /M CVM_DIR "%CVM_DIR%" >nul
+setx /M CHANCEC_HOME "%BIN_DIR%\chancec.exe" >nul
+setx /M CHANCECODEC_HOME "%BIN_DIR%\chancecodec.exe" >nul
+setx /M CLD_HOME "%BIN_DIR%\cld.exe" >nul
+setx /M CHS_HOME "%BIN_DIR%\chs.exe" >nul
+setx /M CVM_HOME "%BIN_DIR%\cvm.exe" >nul
 
 echo Done
 exit /b 0
