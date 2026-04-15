@@ -1,0 +1,113 @@
+managed module Std.Generics.Collection;
+
+bring Std.Memory as Mem;
+bring Std.Exception as Exception;
+
+expose bundle List<T>
+{
+    T* items;
+    i32 length;
+    i32 capacity;
+
+    expose on new() -> void
+    {
+        this.items = null;
+        this.length = 0;
+        this.capacity = 0;
+    }
+
+    expose on new(i32 initial_capacity) -> void
+    {
+        if (initial_capacity < 0)
+            throw Exception.RuntimeError
+                -> "Initial capacity cannot be negative in List constructor";
+        this.items = (T*)Mem.Alloc(initial_capacity * sizeof(T));
+        if (this.items == null)
+            throw Exception.OutOfMemory
+                -> "Failed to allocate memory for List items in constructor";
+        this.length = 0;
+        this.capacity = initial_capacity;
+    }
+
+    expose fun Add(T item) -> void
+    {
+        if (this.length >= this.capacity)
+        {
+            i32 new_capacity = this.capacity == 0 ? 4 : this.capacity * 2;
+            T* new_items = (T*)Mem.Realloc(this.items as void*, new_capacity * sizeof(T));
+            if (new_items == null)
+                throw Exception.OutOfMemory
+                    -> "Failed to allocate memory for List items in Add";
+            this.items = new_items;
+            this.capacity = new_capacity;
+        }
+        this.items[this.length] = item;
+        this.length = this.length + 1;
+    }
+
+    expose fun Get(i32 index) -> T
+    {
+        if (index < 0 || index >= this.length)
+            throw Exception.IndexOutOfBounds
+                -> "Index out of range in List Get";
+        ret this.items[index];
+    }
+
+    expose fun Length() -> i32
+    {
+        ret this.length;
+    }
+
+    expose fun Count() -> i32
+    {
+        ret this.length;
+    }
+
+    expose fun Clear() -> void
+    {
+        this.length = 0;
+    }
+
+    expose fun Dispose() -> void
+    {
+        if (this.items != null)
+        {
+            Mem.Dealloc(this.items as void*);
+            this.items = null;
+            this.length = 0;
+            this.capacity = 0;
+        }
+    }
+
+    expose fun Remove(T item) -> bool
+    {
+        for (i32 i = 0; i < this.length; i++)
+        {
+            if (this.items[i] == item)
+            {
+                for (i32 j = i; j < this.length - 1; j++)
+                {
+                    this.items[j] = this.items[j + 1];
+                }
+                this.length = this.length - 1;
+                ret true;
+            }
+        }
+        ret false;
+    }
+
+    expose fun [](i32 index) -> T
+    {
+        ret this.Get(index);
+    }
+
+    expose fun [](i32 index, T setter) -> void
+    {
+        if (index < 0 || index >= this.length)
+            throw Exception.IndexOutOfBounds
+                -> "Index out of range in List setter";
+        this.items[index] = setter;
+    }
+};
+
+hide List<i32> __list_i32_seed;
