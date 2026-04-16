@@ -34,7 +34,6 @@ expose bundle List<T>
 
     expose on delete() -> void
     {
-        IO.PrintLine("Del");
         if (this.items != null)
         {
             delete this.items;
@@ -178,5 +177,10 @@ expose bundle Stack<T> {
     expose fun Clear() -> void
     {
         this.list.Clear();
+    }
+
+    expose fun IsEmpty() -> bool
+    {
+        ret this.list.Count() == 0;
     }
 };

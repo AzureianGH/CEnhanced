@@ -572,6 +572,9 @@ static int parser_type_tree_match_score_recur(Type *haystack,
     if (!haystack || !needle)
         return 0;
 
+    if (haystack->kind == TY_TEMPLATE_PARAM)
+        return through_container ? 1 : 1;
+
     int best = 0;
     if (type_equals(haystack, needle))
         best = through_container ? 2 : 1;
@@ -628,6 +631,86 @@ static int parser_type_tree_match_score(Type *haystack, Type *needle)
     return parser_type_tree_match_score_recur(haystack, needle, seen, 0, 0);
 }
 
+static int parser_bind_template_pattern_to_actual(Type *pattern,
+                                                  Type *actual,
+                                                  Type **bindings,
+                                                  int binding_count)
+{
+    pattern = module_registry_canonical_type(pattern);
+    actual = module_registry_canonical_type(actual);
+    if (!pattern || !actual)
+        return 0;
+
+    if (pattern->kind == TY_TEMPLATE_PARAM)
+    {
+        int idx = pattern->template_param_index;
+        if (idx < 0 || idx >= binding_count)
+            return 0;
+        if (!bindings[idx])
+        {
+            bindings[idx] = actual;
+            return 1;
+        }
+        return type_equals(bindings[idx], actual);
+    }
+
+    if (pattern->kind != actual->kind)
+        return 0;
+
+    switch (pattern->kind)
+    {
+    case TY_PTR:
+    case TY_REF:
+        return parser_bind_template_pattern_to_actual(pattern->pointee,
+                                                      actual->pointee,
+                                                      bindings,
+                                                      binding_count);
+    case TY_ARRAY:
+        if (pattern->array.is_unsized != actual->array.is_unsized)
+            return 0;
+        if (!pattern->array.is_unsized && pattern->array.length != actual->array.length)
+            return 0;
+        return parser_bind_template_pattern_to_actual(pattern->array.elem,
+                                                      actual->array.elem,
+                                                      bindings,
+                                                      binding_count);
+    case TY_FUNC:
+        if (pattern->func.param_count != actual->func.param_count)
+            return 0;
+        if (pattern->func.is_varargs != actual->func.is_varargs)
+            return 0;
+        if (!!pattern->func.ret != !!actual->func.ret)
+            return 0;
+        if (pattern->func.ret &&
+            !parser_bind_template_pattern_to_actual(pattern->func.ret,
+                                                    actual->func.ret,
+                                                    bindings,
+                                                    binding_count))
+            return 0;
+        for (int i = 0; i < pattern->func.param_count; ++i)
+        {
+            Type *pp = pattern->func.params ? pattern->func.params[i] : NULL;
+            Type *ap = actual->func.params ? actual->func.params[i] : NULL;
+            if (!parser_bind_template_pattern_to_actual(pp, ap, bindings, binding_count))
+                return 0;
+        }
+        return 1;
+    case TY_STRUCT:
+        if (pattern->strct.field_count != actual->strct.field_count)
+            return 0;
+        for (int i = 0; i < pattern->strct.field_count; ++i)
+        {
+            Type *pf = pattern->strct.field_types ? pattern->strct.field_types[i] : NULL;
+            Type *af = actual->strct.field_types ? actual->strct.field_types[i] : NULL;
+            if (!parser_bind_template_pattern_to_actual(pf, af, bindings, binding_count))
+                return 0;
+        }
+        return 1;
+    default:
+        return type_equals(pattern, actual);
+    }
+}
+
 static Type *parser_lookup_preinstantiated_template_instance(Parser *ps,
                                                              const char *module_full,
                                                              const char *base_name,
@@ -638,8 +721,8 @@ static Type *parser_lookup_preinstantiated_template_instance(Parser *ps,
 {
     int matches = 0;
     Type *resolved = NULL;
-    int best_score = INT_MIN;
-    int best_count = 0;
+    Type *template_candidates[64];
+    int template_candidate_count = 0;
     if (!base_name || base_name_len <= 0)
     {
         if (out_match_count)
@@ -669,41 +752,65 @@ static Type *parser_lookup_preinstantiated_template_instance(Parser *ps,
                 continue;
         }
 
-        if (parser_type_contains_template_param(entry_type))
+        int candidate_is_template_pattern = parser_type_contains_template_param(entry_type);
+
+        if (template_candidate_count < (int)(sizeof(template_candidates) / sizeof(template_candidates[0])) &&
+            candidate_is_template_pattern)
+            template_candidates[template_candidate_count++] = entry_type;
+
+        if (template_type_arg_count <= 0 && candidate_is_template_pattern)
             continue;
 
         if (template_type_arg_count > 0)
         {
-            int candidate_score = 0;
-            int arg_match = 1;
-            for (int ai = 0; ai < template_type_arg_count; ++ai)
-            {
-                Type *want = template_type_args ? template_type_args[ai] : NULL;
-                want = module_registry_canonical_type(want);
-                if (!want)
-                    continue;
-
-                int score = parser_type_tree_match_score(entry_type, want);
-                if (score <= 0)
-                {
-                    arg_match = 0;
-                    break;
-                }
-                candidate_score += score;
-            }
-            if (!arg_match)
+            if (candidate_is_template_pattern)
                 continue;
 
-            if (candidate_score > best_score)
+            int candidate_match = 0;
+            for (int ti = 0; ti < template_candidate_count; ++ti)
             {
-                best_score = candidate_score;
-                best_count = 1;
-                resolved = entry_type;
+                Type *pattern = template_candidates[ti];
+                if (!pattern)
+                    continue;
+
+                Type **bindings = (Type **)xcalloc((size_t)template_type_arg_count, sizeof(Type *));
+                if (!bindings)
+                {
+                    diag_error("out of memory while matching imported template instance");
+                    exit(1);
+                }
+
+                int bind_ok = parser_bind_template_pattern_to_actual(pattern,
+                                                                     entry_type,
+                                                                     bindings,
+                                                                     template_type_arg_count);
+                if (bind_ok)
+                {
+                    for (int ai = 0; ai < template_type_arg_count; ++ai)
+                    {
+                        Type *want = module_registry_canonical_type(template_type_args ? template_type_args[ai] : NULL);
+                        Type *have = module_registry_canonical_type(bindings[ai]);
+                        if (!want || !have || !type_equals(want, have))
+                        {
+                            bind_ok = 0;
+                            break;
+                        }
+                    }
+                }
+
+                free(bindings);
+                if (bind_ok)
+                {
+                    candidate_match = 1;
+                    break;
+                }
             }
-            else if (candidate_score == best_score)
-            {
-                best_count++;
-            }
+
+            if (!candidate_match)
+                continue;
+
+            resolved = entry_type;
+            matches++;
             continue;
         }
 
@@ -713,14 +820,103 @@ static Type *parser_lookup_preinstantiated_template_instance(Parser *ps,
 
     if (template_type_arg_count > 0)
     {
+        if (matches == 0)
+        {
+            int template_fallback_matches = 0;
+            Type *template_fallback = NULL;
+            for (int ti = 0; ti < template_candidate_count; ++ti)
+            {
+                Type *pattern = template_candidates[ti];
+                if (!pattern)
+                    continue;
+                template_fallback = pattern;
+                template_fallback_matches++;
+            }
+
+            if (out_match_count)
+                *out_match_count = template_fallback_matches;
+            return template_fallback_matches == 1 ? template_fallback : NULL;
+        }
+
         if (out_match_count)
-            *out_match_count = best_count;
-        return best_count == 1 ? resolved : NULL;
+            *out_match_count = matches;
+        return matches == 1 ? resolved : NULL;
     }
 
     if (out_match_count)
         *out_match_count = matches;
     return matches == 1 ? resolved : NULL;
+}
+
+static char *parser_make_imported_template_instance_key(const char *module_full,
+                                                        const char *base_name,
+                                                        Type **template_type_args,
+                                                        int template_type_arg_count)
+{
+    if (!base_name || !*base_name)
+        return NULL;
+
+    size_t cap = 512 + (size_t)(template_type_arg_count > 0 ? template_type_arg_count : 1) * 256;
+    char *key = (char *)xcalloc(cap, 1);
+    size_t pos = 0;
+
+    if (module_full && *module_full)
+        pos += (size_t)snprintf(key + pos, cap - pos, "%s.%s<", module_full, base_name);
+    else
+        pos += (size_t)snprintf(key + pos, cap - pos, "%s<", base_name);
+
+    for (int i = 0; i < template_type_arg_count; ++i)
+    {
+        if (i > 0)
+            pos += (size_t)snprintf(key + pos, cap - pos, ",");
+
+        char ty_buf[192];
+        ty_buf[0] = '\0';
+        Type *arg = module_registry_canonical_type(template_type_args ? template_type_args[i] : NULL);
+        if (arg)
+            describe_type(arg, ty_buf, sizeof(ty_buf));
+        else
+            snprintf(ty_buf, sizeof(ty_buf), "?");
+
+        pos += (size_t)snprintf(key + pos, cap - pos, "%s", ty_buf);
+        if (pos + 8 >= cap)
+            break;
+    }
+
+    (void)snprintf(key + pos, cap - pos, ">");
+    return key;
+}
+
+static Type *parser_make_imported_template_instance_view(Type *inst,
+                                                         const char *module_full,
+                                                         const char *base_name,
+                                                         Type **template_type_args,
+                                                         int template_type_arg_count)
+{
+    inst = module_registry_canonical_type(inst);
+    if (!inst || inst->kind != TY_STRUCT || template_type_arg_count <= 0)
+        return inst;
+
+    Type *view = (Type *)xcalloc(1, sizeof(Type));
+    *view = *inst;
+    view->import_resolved = NULL;
+
+    if (module_full && *module_full)
+        view->import_module = xstrdup(module_full);
+    else
+    {
+        const char *owner_module = module_registry_find_struct_module(inst);
+        view->import_module = owner_module ? xstrdup(owner_module) : NULL;
+    }
+
+    const char *key_base = base_name;
+    if ((!key_base || !*key_base) && inst->struct_name)
+        key_base = inst->struct_name;
+    view->import_type_name = parser_make_imported_template_instance_key(view->import_module,
+                                                                        key_base,
+                                                                        template_type_args,
+                                                                        template_type_arg_count);
+    return view;
 }
 
 static Type **parser_parse_type_arg_list(Parser *ps, int *out_count)
@@ -1360,8 +1556,6 @@ static void parser_auto_seed_template_bundle(Parser *ps,
         return;
     if (!templ->is_exposed)
         return;
-    if (templ->instance_count > 0)
-        return;
     if (templ->generic_param_count <= 0)
         return;
 
@@ -1376,7 +1570,7 @@ static void parser_auto_seed_template_bundle(Parser *ps,
     for (int i = 0; i < arg_count; ++i)
     {
         Type *placeholder = templ->generic_param_types ? templ->generic_param_types[i] : NULL;
-        seed_args[i] = parser_default_type_for_template_param(placeholder);
+        seed_args[i] = module_registry_canonical_type(placeholder);
         if (!seed_args[i])
         {
             free(seed_args);
@@ -1385,6 +1579,35 @@ static void parser_auto_seed_template_bundle(Parser *ps,
     }
 
     (void)parser_instantiate_bundle_template(ps, templ, seed_args, arg_count, line, col);
+
+    int has_distinct_default = 0;
+    for (int i = 0; i < arg_count; ++i)
+    {
+        Type *placeholder = templ->generic_param_types ? templ->generic_param_types[i] : NULL;
+        Type *def_ty = parser_default_type_for_template_param(placeholder);
+        def_ty = module_registry_canonical_type(def_ty);
+        if (!def_ty || !seed_args[i] || !type_equals(def_ty, seed_args[i]))
+        {
+            has_distinct_default = 1;
+            break;
+        }
+    }
+
+    if (has_distinct_default)
+    {
+        for (int i = 0; i < arg_count; ++i)
+        {
+            Type *placeholder = templ->generic_param_types ? templ->generic_param_types[i] : NULL;
+            seed_args[i] = parser_default_type_for_template_param(placeholder);
+            if (!seed_args[i])
+            {
+                free(seed_args);
+                return;
+            }
+        }
+        (void)parser_instantiate_bundle_template(ps, templ, seed_args, arg_count, line, col);
+    }
+
     free(seed_args);
 }
 
@@ -4566,7 +4789,11 @@ static Type *parse_type_base(Parser *ps)
                     exit(1);
                 }
 
-                base = inst;
+                base = parser_make_imported_template_instance_view(inst,
+                                                                   module_full,
+                                                                   type_name,
+                                                                   template_type_args,
+                                                                   template_type_arg_count);
                 free(type_name);
                 if (tokens != local_buf)
                     free(tokens);
@@ -4653,7 +4880,11 @@ static Type *parse_type_base(Parser *ps)
                                               b.length, b.lexeme, inst_matches);
                                 exit(1);
                             }
-                            base = inst;
+                            base = parser_make_imported_template_instance_view(inst,
+                                                                               NULL,
+                                                                               "",
+                                                                               template_type_args,
+                                                                               template_type_arg_count);
                         }
                         else
                         {
@@ -5110,7 +5341,11 @@ static Type *parse_type_spec(Parser *ps)
                     exit(1);
                 }
 
-                base = inst;
+                base = parser_make_imported_template_instance_view(inst,
+                                                                   module_full,
+                                                                   type_name,
+                                                                   template_type_args,
+                                                                   template_type_arg_count);
                 free(type_name);
                 if (tokens != local_buf)
                     free(tokens);
@@ -5197,7 +5432,11 @@ static Type *parse_type_spec(Parser *ps)
                                               b.length, b.lexeme, inst_matches);
                                 exit(1);
                             }
-                            base = inst;
+                            base = parser_make_imported_template_instance_view(inst,
+                                                                               NULL,
+                                                                               "",
+                                                                               template_type_args,
+                                                                               template_type_arg_count);
                         }
                         else
                         {

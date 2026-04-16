@@ -1650,6 +1650,14 @@ static char *type_to_spec(Type *ty)
     const char *name = ty->import_type_name ? ty->import_type_name : "";
     return format_string("import(%s,%s)", module, name);
   }
+  case TY_TEMPLATE_PARAM:
+  {
+    const char *name = ty->template_param_name ? ty->template_param_name : "T";
+    return format_string("tparam(%s,%d,%d)",
+                         name,
+                         ty->template_param_index,
+                         (int)ty->template_constraint_kind);
+  }
   default:
     break;
   }
@@ -1775,6 +1783,61 @@ static Type *spec_to_type(const char *spec)
     imp->import_module = module;
     imp->import_type_name = name;
     return imp;
+  }
+
+  if (strncmp(spec, "tparam(", 7) == 0)
+  {
+    const char *open = spec + 7;
+    const char *first_comma = strchr(open, ',');
+    const char *second_comma = first_comma ? strchr(first_comma + 1, ',') : NULL;
+    const char *close = second_comma ? strrchr(second_comma, ')') : NULL;
+    if (!first_comma || !second_comma || !close || close <= second_comma)
+      return &builtin_ty_void;
+
+    size_t name_len = (size_t)(first_comma - open);
+    size_t index_len = (size_t)(second_comma - (first_comma + 1));
+    size_t constraint_len = (size_t)(close - (second_comma + 1));
+    if (name_len == 0 || index_len == 0 || constraint_len == 0)
+      return &builtin_ty_void;
+
+    char *name = (char *)xmalloc(name_len + 1);
+    memcpy(name, open, name_len);
+    name[name_len] = '\0';
+
+    char *index_text = (char *)xmalloc(index_len + 1);
+    memcpy(index_text, first_comma + 1, index_len);
+    index_text[index_len] = '\0';
+
+    char *constraint_text = (char *)xmalloc(constraint_len + 1);
+    memcpy(constraint_text, second_comma + 1, constraint_len);
+    constraint_text[constraint_len] = '\0';
+
+    char *endptr = NULL;
+    long idx = strtol(index_text, &endptr, 10);
+    if (!endptr || *endptr != '\0')
+    {
+      free(name);
+      free(index_text);
+      free(constraint_text);
+      return &builtin_ty_void;
+    }
+
+    endptr = NULL;
+    long constraint = strtol(constraint_text, &endptr, 10);
+    if (!endptr || *endptr != '\0')
+    {
+      free(name);
+      free(index_text);
+      free(constraint_text);
+      return &builtin_ty_void;
+    }
+
+    Type *tp = type_template_param(name, (int)idx);
+    tp->template_constraint_kind = (TemplateConstraintKind)constraint;
+    free(name);
+    free(index_text);
+    free(constraint_text);
+    return tp;
   }
 
   return &builtin_ty_void;

@@ -14207,6 +14207,8 @@ static CCValueType map_type_to_cc(const Type *ty)
         return CC_TYPE_PTR;
     case TY_VA_LIST:
         return CC_TYPE_PTR;
+    case TY_TEMPLATE_PARAM:
+        return CC_TYPE_PTR;
     case TY_F128:
         return CC_TYPE_F64;
     default:

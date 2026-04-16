@@ -1183,6 +1183,8 @@ static const Symbol *sema_lookup_bundle_member_symbol_raw(SemaContext *sc,
     }
 
     const char *module_full = module_registry_find_struct_module(bundle_type);
+    if ((!module_full || !*module_full) && bundle_type->import_module && *bundle_type->import_module)
+        module_full = bundle_type->import_module;
     if (!sym && module_full && *module_full && primary)
     {
         char *qualified = sema_make_module_qualified_symbol_name(module_full, primary);
@@ -1353,6 +1355,8 @@ static const Symbol *sema_lookup_bundle_method_overload_symbol(SemaContext *sc,
         bundle_short = dot + 1;
     char *secondary = bundle_short ? sema_make_bundle_symbol_name(prefix, bundle_short, method_name) : NULL;
     const char *module_full = module_registry_find_struct_module(bundle_type);
+    if ((!module_full || !*module_full) && bundle_type->import_module && *bundle_type->import_module)
+        module_full = bundle_type->import_module;
     int allow_template_instance_fallback = 0;
     if (bundle_type->struct_name)
         allow_template_instance_fallback = strstr(bundle_type->struct_name, "__inst") == NULL;
@@ -2834,6 +2838,8 @@ static int type_equal(Type *a, Type *b)
     }
     if (a->kind == TY_STRUCT)
     {
+        if (a->import_type_name && b->import_type_name)
+            return strcmp(a->import_type_name, b->import_type_name) == 0;
         if (a->struct_name && b->struct_name)
             return strcmp(a->struct_name, b->struct_name) == 0;
         return a == b;
@@ -3649,6 +3655,50 @@ static int can_assign(Type *target, Node *rhs)
     Type *canon_target = canonicalize_type_deep(target);
     if (!canon_target)
         return 0;
+    Type *rhs_ty = canonicalize_type_deep(rhs->type);
+
+    if (canon_target->kind == TY_TEMPLATE_PARAM)
+    {
+        if (rhs->kind == ND_NULL)
+        {
+            if (canon_target->template_constraint_kind == TEMPLATE_CONSTRAINT_NONE ||
+                canon_target->template_constraint_kind == TEMPLATE_CONSTRAINT_POINTER)
+            {
+                rhs->type = canon_target;
+                return 1;
+            }
+            return 0;
+        }
+
+        if (!rhs_ty)
+            return 0;
+        if (!type_matches_constraint(rhs_ty, canon_target->template_constraint_kind))
+            return 0;
+
+        rhs->type = rhs_ty;
+        return 1;
+    }
+
+    if (rhs_ty && rhs_ty->kind == TY_TEMPLATE_PARAM)
+    {
+        if (rhs->kind == ND_NULL)
+        {
+            if (rhs_ty->template_constraint_kind == TEMPLATE_CONSTRAINT_NONE ||
+                rhs_ty->template_constraint_kind == TEMPLATE_CONSTRAINT_POINTER)
+            {
+                rhs->type = canon_target;
+                return 1;
+            }
+            return 0;
+        }
+
+        if (!type_matches_constraint(canon_target, rhs_ty->template_constraint_kind))
+            return 0;
+
+        rhs->type = canon_target;
+        return 1;
+    }
+
     if (sema_allow_implicit_sizeof &&
         (rhs->kind == ND_SIZEOF || rhs->kind == ND_ALIGNOF || rhs->kind == ND_OFFSETOF) &&
         type_is_int(canon_target))
@@ -3734,12 +3784,6 @@ static int can_assign(Type *target, Node *rhs)
                 return 1;
             }
             if (canon_target->kind == TY_PTR && rhs_ty->pointee && canon_target->pointee && type_equal(canon_target->pointee, rhs_ty->pointee))
-            {
-                rhs->type = canon_target;
-                return 1;
-            }
-            
-            if (canon_target->kind == TY_PTR && rhs_ty->kind == TY_PTR)
             {
                 rhs->type = canon_target;
                 return 1;
