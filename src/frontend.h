@@ -8,6 +8,12 @@
 typedef struct ChanceFrontend ChanceFrontend;
 typedef struct FrontendUnit FrontendUnit;
 
+typedef enum
+{
+  CHANCE_C_DIALECT_C23 = 0,
+  CHANCE_C_DIALECT_GNU23 = 1,
+} ChanceCDialect;
+
 typedef struct
 {
   const char *input_path;
@@ -23,6 +29,7 @@ typedef struct
   SourceBuffer source;
   char **include_dirs;
   int include_dir_count;
+  ChanceCDialect c_dialect;
 } ChanceFrontendLoadRequest;
 
 const ChanceFrontend *chance_frontend_default(void);

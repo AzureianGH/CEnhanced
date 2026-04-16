@@ -180,6 +180,32 @@ hide fun mock_assemble(AsmProgram* program) -> i32
     ret 7;
 }
 
+#if __CHANCE_STANDARD__ >= 28
+    bundle TestClass {
+        expose int* another = null;
+        expose int x = 1;
+
+        on new(int val) {
+            this.x = val;
+            this.another = new int[1];
+        }
+
+        on delete() {
+            delete this.another;
+        }
+
+        expose fun Example(int val) -> void {
+            this.x = val;
+        }
+
+        expose static fun New(int val) -> TestClass {
+            ret new TestClass(val);
+        }
+    };
+#endif
+
+TestClass globalctr = new TestClass(5);
+
 [EntryPoint]
 expose fun main() -> i32
 {
@@ -850,12 +876,22 @@ expose fun main() -> i32
     assert(true, "new/delete tests skipped on older CHance standards");
     #endif
 
+    #if __CHANCE_STANDARD__ >= 28
+    TestClass class = new TestClass(3);
+    class.Example(22);
+    assert(class.x == 22 && globalctr.x == 5, "Bundle Tests");
+
+    #endif
+
     IO.printnl("All tests completed successfully! %d total asserts.", total_test_count);
 
     ret (final_sum / 168) - 1; // expect 0
 }
 
-hide fun lambda_test(action a () -> void, action b (i32) -> i16) -> void
+hide fun lambda_test(
+    action a () -> void, 
+    action b (i32) -> i16
+) -> void
 {
     a();
     i16 val = b(42);
@@ -1163,8 +1199,8 @@ hide fun test_idk() -> void
     ret;
 }
 
-[ChanceCode]
-fun rawthing(i32 a) -> i32
+
+chancecode fun rawthing(i32 a) -> i32
 {
     const i32 456;
     load_param 0;

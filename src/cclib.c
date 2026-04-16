@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define CCLIB_MAGIC "CCLIB"
-#define CCLIB_VERSION 2u
+#define CCLIB_VERSION 3u
 
 static int write_u8(FILE *out, uint8_t value)
 {
@@ -181,6 +181,8 @@ static int write_struct(FILE *out, const CclibStruct *st)
     if (!write_u32(out, st ? st->size_bytes : 0))
         return 0;
     if (!write_u8(out, st ? st->is_exposed : 0))
+        return 0;
+    if (!write_u8(out, st ? st->is_bundle : 0))
         return 0;
     return 1;
 }
@@ -384,6 +386,15 @@ static int read_struct(FILE *in, CclibStruct *st, uint32_t version)
         return 0;
     if (!read_u8(in, &st->is_exposed))
         return 0;
+    if (version >= 3)
+    {
+        if (!read_u8(in, &st->is_bundle))
+            return 0;
+    }
+    else
+    {
+        st->is_bundle = 0;
+    }
     return 1;
 }
 

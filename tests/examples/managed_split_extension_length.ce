@@ -1,0 +1,15 @@
+managed module Test.ManagedSplitExtensionLength;
+
+bring Std.String.Extensions;
+
+entrypoint expose fun main() -> i32
+{
+    string[] parts = "a,b,c".Split();
+    if (parts == null)
+        ret 1;
+    if (parts.length != 3)
+        ret 2;
+    if (parts[0] == null || parts[1] == null || parts[2] == null)
+        ret 3;
+    ret 0;
+}

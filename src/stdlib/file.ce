@@ -18,96 +18,96 @@ expose constant i32 SEEK_SET = 0;
 expose constant i32 SEEK_CUR = 1;
 expose constant i32 SEEK_END = 2;
 
-expose fun open(char* path, char* mode) -> void*
+expose fun Open(char* path, char* mode) -> void*
 {
     if (path == 0 as char* || mode == 0 as char*)
         ret 0 as void*;
     ret fopen(path, mode);
 }
 
-expose fun close(void* handle) -> i32
+expose fun Close(void* handle) -> i32
 {
     if (handle == 0 as void*)
         ret -1;
     ret fclose(handle);
 }
 
-expose fun read(void* handle, void* buffer, i32 size) -> i32
+expose fun Read(void* handle, void* buffer, i32 size) -> i32
 {
     if (handle == 0 as void* || buffer == 0 as void* || size < 0)
         ret -1;
     ret fread(buffer, 1, size, handle);
 }
 
-expose fun write(void* handle, void* buffer, i32 size) -> i32
+expose fun Write(void* handle, void* buffer, i32 size) -> i32
 {
     if (handle == 0 as void* || buffer == 0 as void* || size < 0)
         ret -1;
     ret fwrite(buffer, 1, size, handle);
 }
 
-expose fun flush(void* handle) -> i32
+expose fun Flush(void* handle) -> i32
 {
     if (handle == 0 as void*)
         ret -1;
     ret fflush(handle);
 }
 
-expose fun seek(void* handle, i64 offset, i32 whence) -> i32
+expose fun Seek(void* handle, i64 offset, i32 whence) -> i32
 {
     if (handle == 0 as void*)
         ret -1;
     ret fseek(handle, offset, whence);
 }
 
-expose fun tell(void* handle) -> i64
+expose fun Tell(void* handle) -> i64
 {
     if (handle == 0 as void*)
         ret -1 as i64;
     ret ftell(handle);
 }
 
-expose fun read_all(char* path, void** out_buf, i32* out_len) -> i32
+expose fun ReadAll(char* path, void** out_buf, i32* out_len) -> i32
 {
     if (path == 0 as char* || out_buf == 0 as void** || out_len == 0 as i32*)
         ret -1;
     *out_buf = 0 as void*;
     *out_len = 0;
 
-    void* handle = open(path, "rb");
+    void* handle = Open(path, "rb");
     if (handle == 0 as void*)
         ret -1;
 
-    if (seek(handle, 0, SEEK_END as i32) != 0)
+    if (Seek(handle, 0, SEEK_END as i32) != 0)
     {
-        close(handle);
+        Close(handle);
         ret -1;
     }
-    i64 size64 = tell(handle);
+    i64 size64 = Tell(handle);
     if (size64 < 0 || size64 > 0x7FFFFFFF)
     {
-        close(handle);
+        Close(handle);
         ret -1;
     }
     i32 size = size64 as i32;
-    if (seek(handle, 0, SEEK_SET as i32) != 0)
+    if (Seek(handle, 0, SEEK_SET as i32) != 0)
     {
-        close(handle);
+        Close(handle);
         ret -1;
     }
 
-    void* buf = Mem.alloc(size + 1);
+    void* buf = Mem.Alloc(size + 1);
     if (buf == 0 as void*)
     {
-        close(handle);
+        Close(handle);
         ret -1;
     }
 
-    i32 read_bytes = read(handle, buf, size);
-    close(handle);
+    i32 read_bytes = Read(handle, buf, size);
+    Close(handle);
     if (read_bytes < 0)
     {
-        Mem.dealloc(buf);
+        Mem.Dealloc(buf);
         ret -1;
     }
     u8* ubuf = buf as u8*;
@@ -119,73 +119,73 @@ expose fun read_all(char* path, void** out_buf, i32* out_len) -> i32
     ret read_bytes;
 }
 
-expose fun write_all(char* path, void* data, i32 len) -> i32
+expose fun WriteAll(char* path, void* data, i32 len) -> i32
 {
     if (path == 0 as char* || data == 0 as void* || len < 0)
         ret -1;
-    void* handle = open(path, "wb");
+    void* handle = Open(path, "wb");
     if (handle == 0 as void*)
         ret -1;
-    i32 written = write(handle, data, len);
-    flush(handle);
-    close(handle);
+    i32 written = Write(handle, data, len);
+    Flush(handle);
+    Close(handle);
     ret written;
 }
 
-expose fun exists(char* path) -> i32
+expose fun Exists(char* path) -> i32
 {
     if (path == 0 as char*)
         ret 0;
-    void* handle = open(path, "rb");
+    void* handle = Open(path, "rb");
     if (handle == 0 as void*)
         ret 0;
-    close(handle);
+    Close(handle);
     ret 1;
 }
 
-expose fun remove(char* path) -> i32
+expose fun Remove(char* path) -> i32
 {
     if (path == 0 as char*)
         ret -1;
     ret remove(path);
 }
 
-expose fun getcwd() -> char*
+expose fun GetCwd() -> char*
 {
     char[1024] buf = {};
     char* res = getcwd(buf as char*, 1024);
     if (res == 0 as char*)
         ret 0 as char*;
-    ret Str.strdup(buf as char*);
+    ret Str.StrDup(buf as char*);
 }
 
-managed expose fun cwd() -> string
+managed expose fun Cwd() -> string
 {
     char[1024] buf = {};
     char* res = getcwd(buf as char*, 1024);
     char* path = 0 as char*;
     if (res != 0 as char*)
-        path = Str.strdup(buf as char*);
+        path = Str.StrDup(buf as char*);
     if (path == 0 as char*)
         throw Exception.IOError -> "Failed to get current working directory";
     ret path as string;
 }
 
-managed expose fun read_text(char* path) -> string
+managed expose fun ReadText(char* path) -> string
 {
     void* buf = 0 as void*;
     i32 len = 0;
-    if (read_all(path, &buf, &len) < 0 || buf == 0 as void*)
+    if (ReadAll(path, &buf, &len) < 0 || buf == 0 as void*)
         throw Exception.IOError -> "Failed to read text file";
     ret buf as string;
 }
 
-managed expose fun write_text(char* path, string text) -> i32
+managed expose fun WriteText(char* path, string text) -> i32
 {
     if (path == 0 as char* || text == null)
-        throw Exception.InvalidCast -> "Invalid arguments to write_text";
-    i32 len = Str.strlen(text as char*);
-    i32 written = write_all(path, text as void*, len);
+        throw Exception.InvalidCast -> "Invalid arguments to WriteText";
+    i32 len = Str.StrLen(text as char*);
+    i32 written = WriteAll(path, text as void*, len);
     if (written != len)
         throw Exception.IOError -> "Failed to write text file";
     ret written;

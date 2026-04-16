@@ -1,54 +1,79 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: ./build.sh [preset]
-# - If a preset is given, use it.
-# - Otherwise auto-select a sane default per platform.
+SCRIPT_DIR="$(cd -- "$(dirname -- "$0")" && pwd)"
+MAKE_BIN=""
+MAKE_CORES=""
 
-PRESET="${1:-}"
+usage() {
+  cat <<'EOF'
+Usage: ./build.sh [--cores=<count>]
 
-if [[ -z "$PRESET" ]]; then
-  if [[ "${OS:-}" == "Windows_NT" ]] || [[ -n "${MSYSTEM:-}" ]]; then
-    PRESET="mingw-release"
+Options:
+  --cores=<count>   Run make with -j <count>
+  --cores <count>   Run make with -j <count>
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --cores=*)
+      MAKE_CORES="${1#--cores=}"
+      shift
+      ;;
+    --cores)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --cores requires a value"
+        usage
+        exit 1
+      fi
+      MAKE_CORES="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument: $1"
+      usage
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -n "$MAKE_CORES" ]]; then
+  if ! [[ "$MAKE_CORES" =~ ^[1-9][0-9]*$ ]]; then
+    echo "error: --cores must be a positive integer"
+    exit 1
   fi
 fi
 
-if [[ -n "$PRESET" ]]; then
-  echo "Configuring with preset: $PRESET"
-  cmake --preset "$PRESET" \
-    ${CHANCE_DEFAULT_RUNTIME:+-DCHANCE_DEFAULT_RUNTIME="$CHANCE_DEFAULT_RUNTIME"} \
-    ${CHANCE_DEFAULT_STDLIB:+-DCHANCE_DEFAULT_STDLIB="$CHANCE_DEFAULT_STDLIB"}
-  cmake --build --preset "$PRESET"
-  exit 0
+if command -v make >/dev/null 2>&1; then
+  MAKE_BIN="make"
+elif command -v mingw32-make >/dev/null 2>&1; then
+  MAKE_BIN="mingw32-make"
 fi
 
-mkdir -p build
-
-# Fallback path for non-preset builds.
-if command -v ninja >/dev/null 2>&1; then
-  GENERATOR="Ninja"
-elif command -v make >/dev/null 2>&1; then
-  GENERATOR="Unix Makefiles"
-else
-  echo "error: no build tool found (need ninja or make)."
-  echo "hint: on MSYS2 use a MinGW shell and run ./build.sh mingw-release"
+if [[ -z "$MAKE_BIN" ]]; then
+  echo "error: no make tool found (need make or mingw32-make)."
   exit 1
 fi
 
 if ! command -v cc >/dev/null 2>&1 && ! command -v gcc >/dev/null 2>&1 && ! command -v clang >/dev/null 2>&1; then
   echo "error: no C compiler found in PATH."
-  echo "hint: install a compiler toolchain (MSYS2: pacman -S mingw-w64-ucrt-x86_64-gcc)."
   exit 1
 fi
 
-if [[ ! -f build/CMakeCache.txt ]]; then
-  cmake -S . -B build -G "$GENERATOR" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_FLAGS_RELEASE="-O2" \
-    ${CHANCE_DEFAULT_RUNTIME:+-DCHANCE_DEFAULT_RUNTIME="$CHANCE_DEFAULT_RUNTIME"} \
-    ${CHANCE_DEFAULT_STDLIB:+-DCHANCE_DEFAULT_STDLIB="$CHANCE_DEFAULT_STDLIB"}
-else
-  echo "Using existing CMake cache in ./build (skipping configure)"
-fi
+MAKE_ARGS=(
+  -C "$SCRIPT_DIR"
+  CHANCE_DEFAULT_RUNTIME="${CHANCE_DEFAULT_RUNTIME:-}"
+  CHANCE_DEFAULT_STDLIB="${CHANCE_DEFAULT_STDLIB:-}"
+  all
+)
 
-cmake --build build --config Release
+if [[ -n "$MAKE_CORES" ]]; then
+  "$MAKE_BIN" -j "$MAKE_CORES" "${MAKE_ARGS[@]}"
+else
+  "$MAKE_BIN" "${MAKE_ARGS[@]}"
+fi

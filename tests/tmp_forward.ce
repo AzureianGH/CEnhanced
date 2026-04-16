@@ -1,0 +1,10 @@
+module F;
+extend from "C" i32 printf(char*, ...);
+expose fun p(char* fmt, ...) -> i32 {
+    printf(fmt, ...);
+    ret 0;
+}
+entrypoint expose fun main() -> int {
+    p("X %d\n", 3);
+    ret 0;
+}

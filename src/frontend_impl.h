@@ -45,5 +45,6 @@ struct FrontendUnit
 
 const ChanceFrontend *chance_frontend_ce(void);
 const ChanceFrontend *chance_frontend_cinder(void);
+const ChanceFrontend *chance_frontend_c(void);
 
 #endif

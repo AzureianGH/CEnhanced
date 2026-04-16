@@ -521,6 +521,8 @@ static Token lex_ident_or_kw(Lexer *lx)
     else if ((len == 6 && strncmp(p, "struct", 6) == 0) ||
              (len == 5 && strncmp(p, "struc", 5) == 0))
         k = TK_KW_STRUCT;
+    else if (len == 6 && strncmp(p, "bundle", 6) == 0)
+        k = TK_KW_BUNDLE;
     else if (len == 5 && strncmp(p, "union", 5) == 0)
         k = TK_KW_UNION;
     else if (len == 6 && strncmp(p, "packed", 6) == 0)

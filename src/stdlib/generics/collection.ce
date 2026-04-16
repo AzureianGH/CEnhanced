@@ -1,7 +1,9 @@
+#hint implicit-voidp
 managed module Std.Generics.Collection;
 
 bring Std.Memory as Mem;
 bring Std.Exception as Exception;
+bring Std.IO as IO;
 
 expose bundle List<T>
 {
@@ -19,14 +21,35 @@ expose bundle List<T>
     expose on new(i32 initial_capacity) -> void
     {
         if (initial_capacity < 0)
-            throw Exception.RuntimeError
-                -> "Initial capacity cannot be negative in List constructor";
-        this.items = (T*)Mem.Alloc(initial_capacity * sizeof(T));
+            throw Exception.RuntimeError -> "Initial capacity cannot be negative in List constructor";
+        
+        this.items = new T[initial_capacity * sizeof(T)];
+        
         if (this.items == null)
-            throw Exception.OutOfMemory
-                -> "Failed to allocate memory for List items in constructor";
+            throw Exception.OutOfMemory -> "Failed to allocate memory for List items in constructor";
+        
         this.length = 0;
         this.capacity = initial_capacity;
+    }
+
+    expose on delete() -> void
+    {
+        IO.PrintLine("Del");
+        if (this.items != null)
+        {
+            delete this.items;
+            this.items = null;
+            this.length = 0;
+            this.capacity = 0;
+        }
+    }
+
+    expose on iterate() -> T
+    {
+        for (i32 i = 0; i < this.length; i++)
+        {
+            yield this.items[i];
+        }
     }
 
     expose fun Add(T item) -> void
@@ -34,7 +57,11 @@ expose bundle List<T>
         if (this.length >= this.capacity)
         {
             i32 new_capacity = this.capacity == 0 ? 4 : this.capacity * 2;
-            T* new_items = (T*)Mem.Realloc(this.items as void*, new_capacity * sizeof(T));
+
+            T* new_items = new T[new_capacity * sizeof(T)];
+            Mem.MemCpy(new_items, this.items, this.length * sizeof(T));
+            delete this.items;
+
             if (new_items == null)
                 throw Exception.OutOfMemory
                     -> "Failed to allocate memory for List items in Add";
@@ -68,17 +95,6 @@ expose bundle List<T>
         this.length = 0;
     }
 
-    expose fun Dispose() -> void
-    {
-        if (this.items != null)
-        {
-            Mem.Dealloc(this.items as void*);
-            this.items = null;
-            this.length = 0;
-            this.capacity = 0;
-        }
-    }
-
     expose fun Remove(T item) -> bool
     {
         for (i32 i = 0; i < this.length; i++)
@@ -110,4 +126,57 @@ expose bundle List<T>
     }
 };
 
-hide List<i32> __list_i32_seed;
+expose bundle Stack<T> {
+    List<T> list;
+
+    expose on new() -> void
+    {
+        this.list = new List<T>();
+    }
+
+    expose on delete() -> void
+    {
+        delete this.list;
+    }
+
+    expose on iterate() -> T
+    {
+        foreach (T item in this.list)
+        {
+            yield item;
+        }
+    }
+
+    expose fun Push(T item) -> void
+    {
+        this.list.Add(item);
+    }
+
+    expose fun Pop() -> T
+    {
+        if (this.list.Length() == 0)
+            throw Exception.InvalidOperation -> "Cannot pop from an empty Stack";
+
+        T item = this.list.Get(this.list.Length() - 1);
+        this.list.Remove(item);
+        ret item;
+    }
+
+    expose fun Peek() -> T
+    {
+        if (this.list.Length() == 0)
+            throw Exception.InvalidOperation
+                -> "Cannot peek from an empty Stack";
+        ret this.list.Get(this.list.Length() - 1);
+    }
+
+    expose fun Count() -> i32
+    {
+        ret this.list.Count();
+    }
+
+    expose fun Clear() -> void
+    {
+        this.list.Clear();
+    }
+};

@@ -1,0 +1,16 @@
+managed module Test.ManagedEmptyArrayLiteral;
+
+expose fun make_empty() -> string[]
+{
+    ret [];
+}
+
+entrypoint expose fun main() -> i32
+{
+    string[] values = make_empty();
+    if (values == null)
+        ret 1;
+    if (values.length != 0)
+        ret 2;
+    ret 0;
+}

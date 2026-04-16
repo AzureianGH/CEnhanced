@@ -29,10 +29,12 @@ cd CEnhanced
 
 - H26 specification: [`H26.md`](H26.md)
 - H27 specification: [`H27.md`](H27.md)
+- H28 draft overlay: [`draftH28.md`](draftH28.md)
 
-H27 is the default language mode.
+H28 is the default language mode.
 
-- Use `-H27` for full current language behavior.
+- Use `-H28` for full current language behavior.
+- Use `-H27` for H27 compatibility mode.
 - Use `-H26` for H26 compatibility mode.
 
 ## Repository Layout
@@ -66,7 +68,7 @@ chancec -x86 hello.ce
 Stop after bytecode emission:
 
 ```bash
-chancec -H27 -Sccb hello.ce
+chancec -H28 -Sccb hello.ce
 ```
 
 Compile in H26 mode:

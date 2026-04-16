@@ -1,4 +1,4 @@
 type=Library
 output=runtime.cclib
 ce=memory.ce,panic.ce,init.ce,new_delete.ce,managed.ce
-args=-O3 --freestanding
+args=-O3

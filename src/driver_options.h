@@ -36,6 +36,7 @@ typedef struct
   int *toolchain_debug_mode;
   int *toolchain_debug_deep;
   int *language_standard;
+  int *c_dialect;
   int *verbose_use_ansi;
 
   AsmSyntax *asm_syntax;

@@ -1,3 +1,3 @@
 type=Library
 output=stdlib.cclib
-ce=string.ce, memory.ce, io.ce, file.ce, net.ce, environment.ce, exception.ce, profiling.ce
+ce=string.ce, stringext.ce, memory.ce, io.ce, file.ce, net.ce, environment.ce, exception.ce, profiling.ce, generics/collection.ce

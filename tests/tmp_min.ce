@@ -1,0 +1,4 @@
+module T;
+entrypoint expose fun main() -> int {
+    ret 7;
+}

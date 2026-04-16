@@ -28,6 +28,8 @@ static const ChanceFrontend *registry_entry(int i)
     return chance_frontend_ce();
   case 1:
     return chance_frontend_cinder();
+  case 2:
+    return chance_frontend_c();
   default:
     return NULL;
   }

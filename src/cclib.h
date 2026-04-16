@@ -31,6 +31,7 @@ extern "C"
         uint32_t field_count;
         uint32_t size_bytes;
         uint8_t is_exposed;
+        uint8_t is_bundle;
     } CclibStruct;
 
     typedef struct CclibEnumValue

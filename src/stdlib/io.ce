@@ -1,6 +1,7 @@
 module Std.IO;
 
 bring Std.String as Str;
+bring Std.Memory as Mem;
 bring Std.Exception as Exception;
 
 extend from "C" i32 write(i32, char*, int);
@@ -16,14 +17,14 @@ constant i32 STDOUT_FD = 1;
 constant i32 STDIN_FD = 0;
 constant i32 STDERR_FD = 2;
 
-hide fun flush_buf(char* buf, i32 len) -> i32
+hide fun FlushBuf(char* buf, i32 len) -> i32
 {
     if (len <= 0)
         ret 0;
     ret write(STDOUT_FD as i32, buf, len);
 }
 
-hide fun reverse_range(char* buf, i32 start, i32 end) -> void
+hide fun ReverseRange(char* buf, i32 start, i32 end) -> void
 {
     i32 i = start;
     i32 j = end - 1;
@@ -37,7 +38,7 @@ hide fun reverse_range(char* buf, i32 start, i32 end) -> void
     }
 }
 
-hide fun u32_to_str(u32 val, char* out, i32 cap) -> i32
+hide fun U32ToStr(u32 val, char* out, i32 cap) -> i32
 {
     if (cap <= 1)
         ret 0;
@@ -54,12 +55,12 @@ hide fun u32_to_str(u32 val, char* out, i32 cap) -> i32
         out[idx++] = (digit as char) + '0';
         val = val / 10;
     }
-    reverse_range(out, 0, idx);
+    ReverseRange(out, 0, idx);
     out[idx] = 0;
     ret idx;
 }
 
-hide fun i32_to_str(i32 val, char* out, i32 cap) -> i32
+hide fun I32ToStr(i32 val, char* out, i32 cap) -> i32
 {
     if (cap <= 1)
         ret 0;
@@ -83,12 +84,12 @@ hide fun i32_to_str(i32 val, char* out, i32 cap) -> i32
         out[idx++] = (digit as char) + '0';
         val = val / 10;
     }
-    reverse_range(out, start, idx);
+    ReverseRange(out, start, idx);
     out[idx] = 0;
     ret idx;
 }
 
-hide fun u32_to_hex(u32 val, char* out, i32 cap) -> i32
+hide fun U32ToHex(u32 val, char* out, i32 cap) -> i32
 {
     if (cap <= 1)
         ret 0;
@@ -106,12 +107,12 @@ hide fun u32_to_hex(u32 val, char* out, i32 cap) -> i32
         out[idx++] = digits[nibble];
         val = val >> 4;
     }
-    reverse_range(out, 0, idx);
+    ReverseRange(out, 0, idx);
     out[idx] = 0;
     ret idx;
 }
 
-hide fun u64_to_hex(u64 val, char* out, i32 cap) -> i32
+hide fun U64ToHex(u64 val, char* out, i32 cap) -> i32
 {
     if (cap <= 1)
         ret 0;
@@ -129,12 +130,12 @@ hide fun u64_to_hex(u64 val, char* out, i32 cap) -> i32
         out[idx++] = digits[nibble];
         val = val >> 4;
     }
-    reverse_range(out, 0, idx);
+    ReverseRange(out, 0, idx);
     out[idx] = 0;
     ret idx;
 }
 
-hide fun u64_to_str(u64 val, char* out, i32 cap) -> i32
+hide fun U64ToStr(u64 val, char* out, i32 cap) -> i32
 {
     if (cap <= 1)
         ret 0;
@@ -151,12 +152,12 @@ hide fun u64_to_str(u64 val, char* out, i32 cap) -> i32
         out[idx++] = (digit as char) + '0';
         val = val / 10;
     }
-    reverse_range(out, 0, idx);
+    ReverseRange(out, 0, idx);
     out[idx] = 0;
     ret idx;
 }
 
-hide fun f64_to_str(f64 val, char* out, i32 cap) -> i32
+hide fun F64ToStr(f64 val, char* out, i32 cap) -> i32
 {
     if (cap < 8)
         ret 0;
@@ -188,7 +189,7 @@ hide fun f64_to_str(f64 val, char* out, i32 cap) -> i32
     f64 frac = val - (int_part as f64);
 
     char[32] intbuf = {};
-    i32 ilen = u64_to_str(int_part, intbuf, 32);
+    i32 ilen = U64ToStr(int_part, intbuf, 32);
     if (idx + ilen + 1 + 6 >= cap)
         ret 0;
     i32 j = 0;
@@ -208,7 +209,7 @@ hide fun f64_to_str(f64 val, char* out, i32 cap) -> i32
     {
         frac_scaled = frac_scaled - 1000000;
         // carry into integer part
-        i32 carry_len = u64_to_str(int_part + 1, intbuf, 32);
+        i32 carry_len = U64ToStr(int_part + 1, intbuf, 32);
         if (idx - 1 + carry_len + 6 >= cap)
             ret 0;
         // rewrite integer portion
@@ -236,14 +237,14 @@ hide fun f64_to_str(f64 val, char* out, i32 cap) -> i32
     ret idx;
 }
 
-hide fun append_bytes(char* out, i32 cap, i32* idx, char* data, i32 len, i32* total_written) -> void
+hide fun AppendBytes(char* out, i32 cap, i32* idx, char* data, i32 len, i32* total_written) -> void
 {
     i32 offset = 0;
     while (offset < len)
     {
         if (*idx >= cap)
         {
-            *total_written = *total_written + flush_buf(out, *idx);
+            *total_written = *total_written + FlushBuf(out, *idx);
             *idx = 0;
         }
         i32 space = cap - *idx;
@@ -263,20 +264,20 @@ hide fun append_bytes(char* out, i32 cap, i32* idx, char* data, i32 len, i32* to
     }
 }
 
-hide fun append_cstr(char* out, i32 cap, i32* idx, char* str, i32* total_written) -> void
+hide fun AppendCStr(char* out, i32 cap, i32* idx, char* str, i32* total_written) -> void
 {
-    i32 slen = Str.strlen(str);
-    append_bytes(out, cap, idx, str, slen, total_written);
+    i32 slen = Str.StrLen(str);
+    AppendBytes(out, cap, idx, str, slen, total_written);
 }
 
-hide fun append_char(char* out, i32 cap, i32* idx, char c, i32* total_written) -> void
+hide fun AppendChar(char* out, i32 cap, i32* idx, char c, i32* total_written) -> void
 {
     char[1] tmp = {};
     tmp[0] = c;
-    append_bytes(out, cap, idx, tmp as char*, 1, total_written);
+    AppendBytes(out, cap, idx, tmp as char*, 1, total_written);
 }
 
-hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
+hide fun VFormatOut(char* fmt, va_list* list, i32 append_newline) -> i32
 {
     char[1024] out = {};
     i32 out_idx = 0;
@@ -287,7 +288,7 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
         char c = fmt[i];
         if (c != '%')
         {
-            append_char(out, 1024, &out_idx, c, &written);
+            AppendChar(out, 1024, &out_idx, c, &written);
             i++;
             continue;
         }
@@ -297,7 +298,7 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
             break;
         if (spec == '%')
         {
-            append_char(out, 1024, &out_idx, '%', &written);
+            AppendChar(out, 1024, &out_idx, '%', &written);
             i++;
             continue;
         }
@@ -306,14 +307,14 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
             char* s = va_arg(*list, char*);
             if (s == 0 as char*)
                 s = "(null)";
-            append_cstr(out, 1024, &out_idx, s, &written);
+            AppendCStr(out, 1024, &out_idx, s, &written);
             i++;
             continue;
         }
         if (spec == 'c')
         {
             i32 v = va_arg(*list, i32);
-            append_char(out, 1024, &out_idx, v as char, &written);
+            AppendChar(out, 1024, &out_idx, v as char, &written);
             i++;
             continue;
         }
@@ -321,8 +322,8 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
         {
             char[32] numbuf = {};
             i32 v = va_arg(*list, i32);
-            i32 nlen = i32_to_str(v, numbuf, 32);
-            append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+            i32 nlen = I32ToStr(v, numbuf, 32);
+            AppendBytes(out, 1024, &out_idx, numbuf, nlen, &written);
             i++;
             continue;
         }
@@ -330,8 +331,8 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
         {
             char[32] numbuf = {};
             u32 v = va_arg(*list, u32);
-            i32 nlen = u32_to_str(v, numbuf, 32);
-            append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+            i32 nlen = U32ToStr(v, numbuf, 32);
+            AppendBytes(out, 1024, &out_idx, numbuf, nlen, &written);
             i++;
             continue;
         }
@@ -339,8 +340,8 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
         {
             char[32] numbuf = {};
             u32 v = va_arg(*list, u32);
-            i32 nlen = u32_to_hex(v, numbuf, 32);
-            append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+            i32 nlen = U32ToHex(v, numbuf, 32);
+            AppendBytes(out, 1024, &out_idx, numbuf, nlen, &written);
             i++;
             continue;
         }
@@ -348,8 +349,8 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
         {
             char[64] fbuf = {};
             f64 v = va_arg(*list, f64);
-            i32 flen = f64_to_str(v, fbuf, 64);
-            append_bytes(out, 1024, &out_idx, fbuf, flen, &written);
+            i32 flen = F64ToStr(v, fbuf, 64);
+            AppendBytes(out, 1024, &out_idx, fbuf, flen, &written);
             i++;
             continue;
         }
@@ -360,8 +361,8 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
             {
                 char[32] numbuf = {};
                 u64 v = va_arg(*list, u64);
-                i32 nlen = u64_to_hex(v, numbuf, 32);
-                append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+                i32 nlen = U64ToHex(v, numbuf, 32);
+                AppendBytes(out, 1024, &out_idx, numbuf, nlen, &written);
                 i = i + 2;
                 continue;
             }
@@ -369,8 +370,8 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
             {
                 char[32] numbuf = {};
                 u64 v = va_arg(*list, u64);
-                i32 nlen = u64_to_str(v, numbuf, 32);
-                append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+                i32 nlen = U64ToStr(v, numbuf, 32);
+                AppendBytes(out, 1024, &out_idx, numbuf, nlen, &written);
                 i = i + 2;
                 continue;
             }
@@ -378,8 +379,8 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
             {
                 char[32] numbuf = {};
                 u64 v = va_arg(*list, u64);
-                i32 nlen = u64_to_hex(v, numbuf, 32);
-                append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+                i32 nlen = U64ToHex(v, numbuf, 32);
+                AppendBytes(out, 1024, &out_idx, numbuf, nlen, &written);
                 i = i + 3;
                 continue;
             }
@@ -387,8 +388,8 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
             {
                 char[32] numbuf = {};
                 u64 v = va_arg(*list, u64);
-                i32 nlen = u64_to_str(v, numbuf, 32);
-                append_bytes(out, 1024, &out_idx, numbuf, nlen, &written);
+                i32 nlen = U64ToStr(v, numbuf, 32);
+                AppendBytes(out, 1024, &out_idx, numbuf, nlen, &written);
                 i = i + 3;
                 continue;
             }
@@ -396,48 +397,142 @@ hide fun vformat_out(char* fmt, va_list* list, i32 append_newline) -> i32
             {
                 char[64] fbuf = {};
                 f64 v = va_arg(*list, f64);
-                i32 flen = f64_to_str(v, fbuf, 64);
-                append_bytes(out, 1024, &out_idx, fbuf, flen, &written);
+                i32 flen = F64ToStr(v, fbuf, 64);
+                AppendBytes(out, 1024, &out_idx, fbuf, flen, &written);
                 i = i + 2;
                 continue;
             }
         }
+        if (spec == 'b') {
+            char next = fmt[i + 1];
+            if (next == 'l')
+            {
+                // bl means boolean
+                i32 v = va_arg(*list, i32);
+                char* s = v != 0 ? "true" : "false";
+                AppendCStr(out, 1024, &out_idx, s, &written);
+                i = i + 2;
+                continue;
+            }
+
+            // else is binary
+            char[64] binbuf = {};
+            u32 v = va_arg(*list, u32);
+            i32 blen = 0;
+            if (v == 0)
+            {
+                binbuf[0] = '0';
+                blen = 1;
+            }
+            else
+            {
+                i32 bit_idx = 0;
+                while (v > 0 && bit_idx < 32 && blen < 63)
+                {
+                    char bit = (v & 1) != 0 ? '1' : '0';
+                    binbuf[blen++] = bit;
+                    v = v >> 1;
+                    bit_idx++;
+                }
+                // reverse to get correct order
+                i32 start = 0;
+                i32 end = blen;
+                while (start < end - 1)
+                {
+                    char tmp = binbuf[start];
+                    binbuf[start] = binbuf[end - 1];
+                    binbuf[end - 1] = tmp;
+                    start++;
+                    end--;
+                }
+            }
+            binbuf[blen] = 0;
+            AppendBytes(out, 1024, &out_idx, binbuf, blen, &written);
+            i = i + 2;
+            continue;
+        }
+        if (spec == 'B') {
+            char next = fmt[i + 1];
+            if (next == 'L') {
+                // BL means boolean in uppercase
+                i32 v = va_arg(*list, i32);
+                char* s = v != 0 ? "TRUE" : "FALSE";
+                AppendCStr(out, 1024, &out_idx, s, &written);
+                i = i + 2;
+                continue;
+            }
+            // else is binary
+            char[64] binbuf = {};
+            u32 v = va_arg(*list, u32);
+            i32 blen = 0;
+            if (v == 0)
+            {
+                binbuf[0] = '0';
+                blen = 1;
+            }
+            else
+            {
+                i32 bit_idx = 0;
+                while (v > 0 && bit_idx < 32 && blen < 63)
+                {
+                    char bit = (v & 1) != 0 ? '1' : '0';
+                    binbuf[blen++] = bit;
+                    v = v >> 1;
+                    bit_idx++;
+                }
+                // reverse to get correct order
+                i32 start = 0;
+                i32 end = blen;
+                while (start < end - 1)
+                {
+                    char tmp = binbuf[start];
+                    binbuf[start] = binbuf[end - 1];
+                    binbuf[end - 1] = tmp;
+                    start++;
+                    end--;
+                }
+            }
+            binbuf[blen] = 0;
+            AppendBytes(out, 1024, &out_idx, binbuf, blen, &written);
+            i = i + 2;
+            continue;
+        }
         // Unknown specifier: emit it literally
-        append_char(out, 1024, &out_idx, '%', &written);
-        append_char(out, 1024, &out_idx, spec, &written);
+        AppendChar(out, 1024, &out_idx, '%', &written);
+        AppendChar(out, 1024, &out_idx, spec, &written);
         i++;
     }
     if (append_newline != 0)
-        append_char(out, 1024, &out_idx, '\n', &written);
-    written = written + flush_buf(out, out_idx);
+        AppendChar(out, 1024, &out_idx, '\n', &written);
+    written = written + FlushBuf(out, out_idx);
     ret written;
 }
 
-expose fun format(char* fmt, ...) -> i32
+expose fun Format(char* fmt, ...) -> i32
 {
     va_list list = va_start();
-    i32 written = vformat_out(fmt, &list, 0);
+    i32 written = VFormatOut(fmt, &list, 0);
     va_end(list);
     ret written;
 }
 
-expose fun print(char* fmt, ...) -> i32
+expose fun Print(char* fmt, ...) -> i32
 {
     va_list list = va_start();
-    i32 written = vformat_out(fmt, &list, 0);
+    i32 written = VFormatOut(fmt, &list, 0);
     va_end(list);
     ret written;
 }
 
-expose fun printnl(char* fmt, ...) -> i32
+expose fun PrintLine(char* fmt, ...) -> i32
 {
     va_list list = va_start();
-    i32 written = vformat_out(fmt, &list, 1);
+    i32 written = VFormatOut(fmt, &list, 1);
     va_end(list);
     ret written;
 }
 
-expose fun sprintf(char* buf, i32 cap, char* fmt, ...) -> i32
+expose fun SPrintF(char* buf, i32 cap, char* fmt, ...) -> i32
 {
     if (buf == 0 as char* || cap <= 0)
         ret -1;
@@ -452,48 +547,85 @@ expose fun sprintf(char* buf, i32 cap, char* fmt, ...) -> i32
     ret written;
 }
 
-// Std.IO.readin
+// Std.IO.Read / Std.IO.ReadLine
 
-managed expose fun readin() -> char*
+expose fun Read(char* buffer, i32 capacity) -> i32
 {
-    string buf = new char[1024];
-    if (buf == null)
-        throw Exception.OutOfMemory -> "Failed to allocate buffer in readin";
+    if (buffer == 0 as char* || capacity <= 0)
+        ret -1;
 
-    i32 read_bytes = read(STDIN_FD as i32, buf, buf.length as int);
+    i32 max_read = capacity - 1;
+    if (max_read <= 0)
+    {
+        buffer[0] = 0;
+        ret 0;
+    }
+
+    i32 read_bytes = read(STDIN_FD as i32, buffer, max_read);
+    if (read_bytes < 0)
+        ret -1;
+
+    buffer[read_bytes] = 0;
+    ret read_bytes;
+}
+
+managed expose fun ReadLine() -> string
+{
+    void* tempBuf = Mem.Alloc(1024);
+    if (tempBuf == 0 as void*)
+        throw Exception.OutOfMemory -> "Failed to allocate buffer in ReadLine";
+
+    char* buf = tempBuf as char*;
+
+    i32 read_bytes = Read(buf, 1024);
     if (read_bytes < 0)
     {
-        delete buf;
-        throw Exception.IOError -> "Error reading from stdin in readin";
+        Mem.Dealloc(tempBuf);
+        throw Exception.IOError -> "Error reading from stdin in ReadLine";
     }
     if (read_bytes == 0)
     {
-        delete buf;
+        Mem.Dealloc(tempBuf);
         ret "";
     }
 
+    while (read_bytes > 0 && (buf[read_bytes - 1] == '\n' || buf[read_bytes - 1] == '\r'))
+        --read_bytes;
+
     buf[read_bytes] = 0;
-    ret buf;
+    char* line = Str.StrDup(buf);
+    Mem.Dealloc(tempBuf);
+
+    if (line == 0 as char*)
+        throw Exception.OutOfMemory -> "Failed to duplicate line buffer in ReadLine";
+
+    ret line as string;
 }
 
-managed expose fun readin(int count) -> string
+managed expose fun Read(i32 count) -> string
 {
     if (count == 0)
         ret "";
     if (count < 0)
-        throw Exception.IndexOutOfBounds -> "Negative count not allowed in readin";
+        throw Exception.IndexOutOfBounds -> "Negative count not allowed in Read";
     
-    string buf = new char[(count + 1)];
-    if (buf == null)
-        throw Exception.OutOfMemory -> "Failed to allocate buffer in readin";
+    void* tempBuf = Mem.Alloc(count + 1);
+    if (tempBuf == 0 as void*)
+        throw Exception.OutOfMemory -> "Failed to allocate buffer in Read";
+
+    char* buf = tempBuf as char*;
     
-    i32 read_bytes = read(STDIN_FD as i32, buf, count);
+    i32 read_bytes = Read(buf, count + 1);
     if (read_bytes < 0)
     {
-        delete buf;
-        throw Exception.IOError -> "Error reading from stdin in readin";
+        Mem.Dealloc(tempBuf);
+        throw Exception.IOError -> "Error reading from stdin in Read";
     }
 
     buf[read_bytes] = 0;
-    ret buf;
+    char* text = Str.StrDup(buf);
+    Mem.Dealloc(tempBuf);
+    if (text == 0 as char*)
+        throw Exception.OutOfMemory -> "Failed to duplicate read buffer in Read";
+    ret text as string;
 }

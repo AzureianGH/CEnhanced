@@ -1,0 +1,14 @@
+module F;
+extend from "C" i32 vprintf(char*, va_list);
+extend from "C" i32 printf(char*, ...);
+expose fun p(char* fmt, ...) -> i32 {
+    va_list list = va_start();
+    i32 r = vprintf(fmt, list);
+    va_end(list);
+    printf("\n");
+    ret r;
+}
+entrypoint expose fun main() -> int {
+    p("X %d", 3);
+    ret 0;
+}

@@ -66,6 +66,28 @@ static void sema_register_function_local(SemaContext *sc, Node *unit_node, Node 
 static int sema_check_function(SemaContext *sc, Node *fn);
 static void sema_ensure_call_args_checked(SemaContext *sc, Node *call_expr, int *args_checked);
 static const Symbol *sema_resolve_local_overload(SemaContext *sc, const char *name, Node *call_expr, int *args_checked);
+static Type *sema_lookup_bundle_type_by_name(SemaContext *sc, const char *name);
+static char *sema_make_bundle_symbol_name(const char *prefix, const char *bundle_name, const char *member_name);
+static const Symbol *sema_lookup_bundle_method_symbol(SemaContext *sc, const Type *bundle_type, const char *method_name, int is_static);
+static const Symbol *sema_lookup_bundle_method_overload_symbol(SemaContext *sc,
+                                                               const Type *bundle_type,
+                                                               const char *method_name,
+                                                               int is_static,
+                                                               Node *call_expr);
+static const Symbol *sema_lookup_bundle_destructor_symbol(SemaContext *sc, const Type *bundle_type, Type *this_ptr_type);
+static const Symbol *sema_lookup_bundle_constructor_symbol(SemaContext *sc,
+                                                           const Type *bundle_type,
+                                                           Type *this_ptr_type,
+                                                           Node **args,
+                                                           int arg_count);
+static Type *sema_bundle_indexer_base_type(Node *base_expr, Node **out_this_arg);
+static const Symbol *sema_resolve_bundle_indexer_method(SemaContext *sc,
+                                                        const Type *bundle_type,
+                                                        Node *this_arg,
+                                                        Node *index_arg,
+                                                        Node *value_arg);
+static int sema_function_is_bundle_method_owner(const Node *fn, const char *bundle_name);
+static int sema_bundle_member_access_allowed(SemaContext *sc, const Type *bundle_type);
 
 static Type ty_u64;
 
@@ -100,6 +122,20 @@ static Type *canonicalize_type_deep(Type *ty)
         }
     }
     return ty;
+}
+
+static int sema_new_struct_assignment_compatible(Type *target, Node *rhs)
+{
+    Type *canon_target = canonicalize_type_deep(target);
+    if (!canon_target || canon_target->kind != TY_STRUCT || !rhs || rhs->kind != ND_NEW)
+        return 0;
+
+    Type *rhs_ty = canonicalize_type_deep(rhs->type);
+    if (!rhs_ty || rhs_ty->kind != TY_PTR || !rhs_ty->pointee)
+        return 0;
+
+    Type *rhs_elem = canonicalize_type_deep(rhs_ty->pointee);
+    return rhs_elem && type_equal(canon_target, rhs_elem);
 }
 
 static Type *make_function_type_from_sig(const FuncSig *sig)
@@ -426,9 +462,24 @@ static void sema_imported_function_insert(SemaContext *sc, const char *name, con
     {
         if (funcsig_equal(&set->candidates[i].symbol.sig, &symbol->sig))
         {
-            const char *existing_mod = set->candidates[i].module_full;
-            if (!existing_mod || !module_full || strcmp(existing_mod, module_full) == 0)
+            ImportedFunctionCandidate *existing = &set->candidates[i];
+            const char *existing_mod = existing->module_full;
+
+            int same_module = (!existing_mod || !module_full || strcmp(existing_mod, module_full) == 0);
+            if (same_module)
+            {
+                int existing_has_ast = existing->symbol.ast_node ? 1 : 0;
+                int incoming_has_ast = symbol->ast_node ? 1 : 0;
+                int existing_has_module = (existing_mod && existing_mod[0]) ? 1 : 0;
+                int incoming_has_module = (module_full && module_full[0]) ? 1 : 0;
+
+                if ((!existing_has_ast && incoming_has_ast) || (!existing_has_module && incoming_has_module))
+                {
+                    existing->symbol = *symbol;
+                    existing->module_full = module_full;
+                }
                 return;
+            }
             diag_error("ambiguous import: function '%s' from module '%s' conflicts with module '%s'",
                        name,
                        existing_mod ? existing_mod : "<unknown>",
@@ -601,7 +652,21 @@ static const ImportedFunctionCandidate *sema_get_unique_imported_candidate(SemaC
     return NULL;
 }
 
+static int imported_function_set_non_extension_count(const ImportedFunctionSet *set)
+{
+    if (!set || set->count <= 0)
+        return 0;
+    int count = 0;
+    for (int i = 0; i < set->count; ++i)
+    {
+        if (!set->candidates[i].symbol.is_extension_method)
+            count++;
+    }
+    return count;
+}
+
 static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, const char *name, Node *call_expr, int *args_checked);
+static ImportedFunctionCandidate *sema_resolve_imported_extension_call(SemaContext *sc, Node *member_expr, Node *call_expr, int *args_checked);
 static int call_arguments_match_signature(Node *call_expr, const FuncSig *sig);
 static void check_expr(SemaContext *sc, Node *e);
 static int can_assign(Type *target, Node *rhs);
@@ -626,6 +691,7 @@ struct SemaContext
     SymTable *syms;
     struct Scope *scope;
     Node *unit;
+    Node *current_function;
     ImportedFunctionSet *imported_funcs;
     int imported_func_count;
     int imported_func_cap;
@@ -641,6 +707,7 @@ SemaContext *sema_create(void)
     SemaContext *sc = (SemaContext *)xcalloc(1, sizeof(SemaContext));
     sc->syms = symtab_create();
     sc->unit = NULL;
+    sc->current_function = NULL;
     sc->imported_funcs = NULL;
     sc->imported_func_count = 0;
     sc->imported_func_cap = 0;
@@ -928,12 +995,59 @@ static int type_is_string_ptr(Type *t)
     return (pointee->kind == TY_CHAR || pointee->kind == TY_I8 || pointee->kind == TY_U8);
 }
 
-static int type_is_pointer_like(Type *t)
+static int string_literal_nodes_equal(const Node *a, const Node *b)
+{
+    if (!a || !b || a->kind != ND_STRING || b->kind != ND_STRING)
+        return 0;
+    if (a->str_len != b->str_len)
+        return 0;
+    if (a->str_len <= 0)
+        return 1;
+    if (!a->str_data || !b->str_data)
+        return 0;
+    return memcmp(a->str_data, b->str_data, (size_t)a->str_len) == 0;
+}
+
+static Type *type_value_view(Type *t)
 {
     t = canonicalize_type_deep(t);
+    while (t && t->kind == TY_REF && t->pointee)
+        t = canonicalize_type_deep(t->pointee);
+    return t;
+}
+
+static int type_is_pointer_like(Type *t)
+{
+    t = type_value_view(t);
     if (!t)
         return 0;
-    return (t->kind == TY_PTR || t->kind == TY_REF);
+    return t->kind == TY_PTR;
+}
+
+static int type_is_bundle_handle(Type *t)
+{
+    t = canonicalize_type_deep(t);
+    if (!t || t->kind != TY_PTR || !t->pointee)
+        return 0;
+    Type *pointee = canonicalize_type_deep(t->pointee);
+    return pointee && pointee->kind == TY_STRUCT && pointee->is_bundle;
+}
+
+static int sema_global_uses_runtime_bundle_init(const Node *decl)
+{
+    if (!decl || decl->kind != ND_VAR_DECL || !decl->var_is_global)
+        return 0;
+    if (!decl->rhs || decl->rhs->kind != ND_NEW)
+        return 0;
+    if (decl->rhs->lhs)
+        return 0;
+    Type *decl_ty = canonicalize_type_deep(decl->var_type);
+    Type *rhs_ty = canonicalize_type_deep(decl->rhs->type);
+    if (!decl_ty || !rhs_ty)
+        return 0;
+    if (!type_is_bundle_handle(decl_ty))
+        return 0;
+    return type_equal(decl_ty, rhs_ty);
 }
 
 static int type_is_object(Type *t)
@@ -956,6 +1070,484 @@ static int type_is_boxable(Type *t)
     if (t->kind == TY_STRUCT || t->kind == TY_ARRAY)
         return 1;
     return 0;
+}
+
+static Type *sema_lookup_bundle_type_by_name(SemaContext *sc, const char *name)
+{
+    if (!name || !*name)
+        return NULL;
+
+    Type *resolved = NULL;
+    int match_count = 0;
+
+    const Node *unit = sc ? sc->unit : NULL;
+    if (unit && unit->kind == ND_UNIT)
+    {
+        const char *module_full = unit->module_path.full_name;
+        if (module_full && *module_full)
+        {
+            Type *local = module_registry_lookup_struct(module_full, name);
+            if (local && local->is_bundle)
+                return local;
+        }
+
+        for (int i = 0; i < unit->import_count; ++i)
+        {
+            const ModulePath *imp = &unit->imports[i];
+            if (!imp || !imp->full_name)
+                continue;
+            Type *candidate = module_registry_lookup_struct(imp->full_name, name);
+            if (!candidate || !candidate->is_bundle)
+                continue;
+            resolved = candidate;
+            match_count++;
+            if (match_count > 1)
+                break;
+        }
+    }
+
+    if (!resolved)
+    {
+        int total = module_registry_struct_entry_count();
+        for (int i = 0; i < total; ++i)
+        {
+            const char *entry_name = module_registry_struct_entry_name(i);
+            if (!entry_name || strcmp(entry_name, name) != 0)
+                continue;
+            Type *candidate = module_registry_struct_entry_type(i);
+            if (!candidate || !candidate->is_bundle)
+                continue;
+            resolved = candidate;
+            match_count++;
+            if (match_count > 1)
+                break;
+        }
+    }
+
+    if (match_count == 1)
+        return resolved;
+    return NULL;
+}
+
+static char *sema_make_bundle_symbol_name(const char *prefix, const char *bundle_name, const char *member_name)
+{
+    if (!prefix || !bundle_name || !member_name)
+        return NULL;
+    const char *member_segment =
+        (member_name[0] == '[' && member_name[1] == ']' && member_name[2] == '\0')
+            ? "__index"
+            : member_name;
+    size_t need = strlen(prefix) + strlen(bundle_name) + strlen(member_segment) + 3;
+    char *out = (char *)xmalloc(need);
+    snprintf(out, need, "%s_%s_%s", prefix, bundle_name, member_segment);
+    return out;
+}
+
+static char *sema_make_module_qualified_symbol_name(const char *module_full, const char *symbol_name)
+{
+    if (!module_full || !*module_full || !symbol_name || !*symbol_name)
+        return NULL;
+    size_t module_len = strlen(module_full);
+    size_t symbol_len = strlen(symbol_name);
+    char *qualified = (char *)xmalloc(module_len + 1 + symbol_len + 1);
+    memcpy(qualified, module_full, module_len);
+    qualified[module_len] = '.';
+    memcpy(qualified + module_len + 1, symbol_name, symbol_len + 1);
+    return qualified;
+}
+
+static const Symbol *sema_lookup_bundle_member_symbol_raw(SemaContext *sc,
+                                                           const Type *bundle_type,
+                                                           const char *prefix,
+                                                           const char *member_name)
+{
+    if (!sc || !sc->syms || !bundle_type || !bundle_type->struct_name || !*bundle_type->struct_name || !prefix || !member_name || !*member_name)
+        return NULL;
+
+    const Symbol *sym = NULL;
+    char *primary = sema_make_bundle_symbol_name(prefix, bundle_type->struct_name, member_name);
+    if (primary)
+        sym = symtab_get(sc->syms, primary);
+
+    const char *bundle_short = NULL;
+    const char *dot = strrchr(bundle_type->struct_name, '.');
+    if (dot && dot[1] != '\0')
+        bundle_short = dot + 1;
+
+    char *secondary = NULL;
+    if (!sym && bundle_short)
+    {
+        secondary = sema_make_bundle_symbol_name(prefix, bundle_short, member_name);
+        if (secondary)
+            sym = symtab_get(sc->syms, secondary);
+    }
+
+    const char *module_full = module_registry_find_struct_module(bundle_type);
+    if (!sym && module_full && *module_full && primary)
+    {
+        char *qualified = sema_make_module_qualified_symbol_name(module_full, primary);
+        if (qualified)
+        {
+            sym = symtab_get(sc->syms, qualified);
+            free(qualified);
+        }
+    }
+    if (!sym && module_full && *module_full && secondary)
+    {
+        char *qualified = sema_make_module_qualified_symbol_name(module_full, secondary);
+        if (qualified)
+        {
+            sym = symtab_get(sc->syms, qualified);
+            free(qualified);
+        }
+    }
+
+    free(secondary);
+    free(primary);
+    return sym;
+}
+
+static int sema_bundle_member_symbol_name_matches(const char *candidate_name,
+                                                  const char *primary,
+                                                  const char *secondary,
+                                                  const char *module_full)
+{
+    if (!candidate_name || !*candidate_name)
+        return 0;
+    if (primary && strcmp(candidate_name, primary) == 0)
+        return 1;
+    if (secondary && strcmp(candidate_name, secondary) == 0)
+        return 1;
+    if (!module_full || !*module_full)
+        return 0;
+
+    if (primary)
+    {
+        char *qualified = sema_make_module_qualified_symbol_name(module_full, primary);
+        if (qualified)
+        {
+            int matched = (strcmp(candidate_name, qualified) == 0);
+            free(qualified);
+            if (matched)
+                return 1;
+        }
+    }
+    if (secondary)
+    {
+        char *qualified = sema_make_module_qualified_symbol_name(module_full, secondary);
+        if (qualified)
+        {
+            int matched = (strcmp(candidate_name, qualified) == 0);
+            free(qualified);
+            if (matched)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+static int sema_bundle_template_instance_symbol_name_matches(const char *candidate_name,
+                                                             const char *bundle_name,
+                                                             const char *method_name)
+{
+    if (!candidate_name || !bundle_name || !*bundle_name || !method_name || !*method_name)
+        return 0;
+
+    const char *core = strstr(candidate_name, "__bundle_inst_");
+    if (!core)
+        return 0;
+
+    core += strlen("__bundle_inst_");
+    size_t bundle_len = strlen(bundle_name);
+    if (strncmp(core, bundle_name, bundle_len) != 0)
+        return 0;
+    core += bundle_len;
+
+    if (strncmp(core, "__inst", 6) != 0)
+        return 0;
+    core += 6;
+
+    if (!isdigit((unsigned char)*core))
+        return 0;
+    while (isdigit((unsigned char)*core))
+        core++;
+
+    if (*core != '_')
+        return 0;
+    core++;
+
+    const char *member_segment =
+        (method_name[0] == '[' && method_name[1] == ']' && method_name[2] == '\0')
+            ? "__index"
+            : method_name;
+
+    return strcmp(core, member_segment) == 0;
+}
+
+static const char *sema_pretty_bundle_name(const char *bundle_name, char *buffer, size_t buffer_size)
+{
+    if (!bundle_name || !*bundle_name)
+        return "<anonymous>";
+    if (!buffer || buffer_size == 0)
+        return bundle_name;
+
+    const char *inst = strstr(bundle_name, "__inst");
+    if (inst && inst != bundle_name)
+    {
+        const char *digits = inst + 6;
+        if (*digits)
+        {
+            int all_digits = 1;
+            for (const char *p = digits; *p; ++p)
+            {
+                if (!isdigit((unsigned char)*p))
+                {
+                    all_digits = 0;
+                    break;
+                }
+            }
+            if (all_digits)
+            {
+                size_t keep = (size_t)(inst - bundle_name);
+                if (keep >= buffer_size)
+                    keep = buffer_size - 1;
+                memcpy(buffer, bundle_name, keep);
+                buffer[keep] = '\0';
+                return buffer;
+            }
+        }
+    }
+
+    snprintf(buffer, buffer_size, "%s", bundle_name);
+    return buffer;
+}
+
+static const Symbol *sema_lookup_bundle_method_symbol(SemaContext *sc, const Type *bundle_type, const char *method_name, int is_static)
+{
+    if (!sc || !sc->syms || !bundle_type || !bundle_type->struct_name || !method_name || !*method_name)
+        return NULL;
+    const char *prefix = is_static ? "__bundle_static" : "__bundle_inst";
+    const Symbol *sym = sema_lookup_bundle_member_symbol_raw(sc, bundle_type, prefix, method_name);
+    if (!sym || sym->kind != SYM_FUNC)
+        return NULL;
+    return sym;
+}
+
+static const Symbol *sema_lookup_bundle_method_overload_symbol(SemaContext *sc,
+                                                               const Type *bundle_type,
+                                                               const char *method_name,
+                                                               int is_static,
+                                                               Node *call_expr)
+{
+    if (!sc || !sc->syms || !bundle_type || !bundle_type->struct_name || !method_name || !*method_name || !call_expr)
+        return NULL;
+
+    const char *prefix = is_static ? "__bundle_static" : "__bundle_inst";
+    char *primary = sema_make_bundle_symbol_name(prefix, bundle_type->struct_name, method_name);
+    if (!primary)
+        return NULL;
+
+    const char *bundle_short = NULL;
+    const char *dot = strrchr(bundle_type->struct_name, '.');
+    if (dot && dot[1] != '\0')
+        bundle_short = dot + 1;
+    char *secondary = bundle_short ? sema_make_bundle_symbol_name(prefix, bundle_short, method_name) : NULL;
+    const char *module_full = module_registry_find_struct_module(bundle_type);
+    int allow_template_instance_fallback = 0;
+    if (bundle_type->struct_name)
+        allow_template_instance_fallback = strstr(bundle_type->struct_name, "__inst") == NULL;
+
+    const Symbol *match = NULL;
+    for (int i = 0; i < sc->syms->count; ++i)
+    {
+        const Symbol *cand = &sc->syms->items[i];
+        if (!cand || cand->kind != SYM_FUNC || !cand->name)
+            continue;
+        int name_matches = sema_bundle_member_symbol_name_matches(cand->name, primary, secondary, module_full);
+        if (!name_matches && allow_template_instance_fallback)
+            name_matches = sema_bundle_template_instance_symbol_name_matches(cand->name, bundle_type->struct_name, method_name);
+        if (!name_matches)
+            continue;
+        if (!call_arguments_match_signature(call_expr, &cand->sig))
+            continue;
+
+        if (match && match != cand && !symbols_share_body(match, cand))
+        {
+            diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                          "ambiguous call to bundle method '%s' on '%s'",
+                          method_name, bundle_type->struct_name);
+            exit(1);
+        }
+        match = cand;
+    }
+
+    free(secondary);
+    free(primary);
+    return match;
+}
+
+static const Symbol *sema_lookup_bundle_constructor_symbol(SemaContext *sc,
+                                                           const Type *bundle_type,
+                                                           Type *this_ptr_type,
+                                                           Node **args,
+                                                           int arg_count)
+{
+    static const char *names[] = {"init", "constructor"};
+    if (!this_ptr_type)
+        return NULL;
+
+    Node this_arg = {0};
+    this_arg.kind = ND_VAR;
+    this_arg.type = this_ptr_type;
+
+    int total_args = arg_count + 1;
+    Node **call_args = (Node **)xcalloc((size_t)total_args, sizeof(Node *));
+    call_args[0] = &this_arg;
+    for (int i = 0; i < arg_count; ++i)
+        call_args[i + 1] = args ? args[i] : NULL;
+
+    Node call = {0};
+    call.kind = ND_CALL;
+    call.args = call_args;
+    call.arg_count = total_args;
+
+    const Symbol *matched = NULL;
+    for (size_t i = 0; i < (sizeof(names) / sizeof(names[0])); ++i)
+    {
+        const Symbol *sym = sema_lookup_bundle_method_overload_symbol(sc, bundle_type, names[i], 0, &call);
+        if (sym)
+        {
+            matched = sym;
+            break;
+        }
+    }
+
+    free(call_args);
+    return matched;
+}
+
+static Type *sema_bundle_indexer_base_type(Node *base_expr, Node **out_this_arg)
+{
+    if (out_this_arg)
+        *out_this_arg = NULL;
+    if (!base_expr)
+        return NULL;
+
+    Type *base_ty = canonicalize_type_deep(base_expr->type);
+    if (!base_ty)
+        return NULL;
+
+    if (base_ty->kind == TY_REF && base_ty->pointee)
+        base_ty = canonicalize_type_deep(base_ty->pointee);
+
+    if (type_is_bundle_handle(base_ty))
+    {
+        Type *bundle_ty = canonicalize_type_deep(base_ty->pointee);
+        if (!bundle_ty || bundle_ty->kind != TY_STRUCT || !bundle_ty->is_bundle)
+            return NULL;
+        if (out_this_arg)
+            *out_this_arg = base_expr;
+        return bundle_ty;
+    }
+
+    if (base_ty->kind == TY_STRUCT && base_ty->is_bundle)
+    {
+        Node *this_arg = (Node *)xcalloc(1, sizeof(Node));
+        if (!this_arg)
+        {
+            diag_error("out of memory while preparing bundle indexer receiver");
+            exit(1);
+        }
+        this_arg->kind = ND_ADDR;
+        this_arg->lhs = base_expr;
+        this_arg->line = base_expr->line;
+        this_arg->col = base_expr->col;
+        this_arg->src = base_expr->src;
+        this_arg->type = type_ptr(base_ty);
+        if (out_this_arg)
+            *out_this_arg = this_arg;
+        return base_ty;
+    }
+
+    return NULL;
+}
+
+static const Symbol *sema_resolve_bundle_indexer_method(SemaContext *sc,
+                                                        const Type *bundle_type,
+                                                        Node *this_arg,
+                                                        Node *index_arg,
+                                                        Node *value_arg)
+{
+    if (!sc || !bundle_type || !this_arg || !index_arg)
+        return NULL;
+
+    Node *call_args[3] = {0};
+    Node call = {0};
+    call.kind = ND_CALL;
+    call.arg_count = value_arg ? 3 : 2;
+    call.args = call_args;
+    call_args[0] = this_arg;
+    call_args[1] = index_arg;
+    if (value_arg)
+        call_args[2] = value_arg;
+
+    return sema_lookup_bundle_method_overload_symbol(sc, bundle_type, "[]", 0, &call);
+}
+
+static const Symbol *sema_lookup_bundle_destructor_symbol(SemaContext *sc, const Type *bundle_type, Type *this_ptr_type)
+{
+    static const char *names[] = {"deinit", "deconstructor", "destructor"};
+    if (!this_ptr_type)
+        return NULL;
+
+    Node this_arg = {0};
+    this_arg.kind = ND_VAR;
+    this_arg.type = this_ptr_type;
+
+    Node *call_args[1] = {&this_arg};
+    Node call = {0};
+    call.kind = ND_CALL;
+    call.args = call_args;
+    call.arg_count = 1;
+
+    for (size_t i = 0; i < (sizeof(names) / sizeof(names[0])); ++i)
+    {
+        const Symbol *sym = sema_lookup_bundle_method_overload_symbol(sc, bundle_type, names[i], 0, &call);
+        if (sym)
+            return sym;
+    }
+    return NULL;
+}
+
+static int sema_function_is_bundle_method_owner(const Node *fn, const char *bundle_name)
+{
+    if (!fn || fn->kind != ND_FUNC || !fn->name || !bundle_name || !*bundle_name)
+        return 0;
+
+    static const char *prefixes[] = {"__bundle_inst_", "__bundle_static_"};
+    for (size_t i = 0; i < (sizeof(prefixes) / sizeof(prefixes[0])); ++i)
+    {
+        const char *prefix = prefixes[i];
+        size_t prefix_len = strlen(prefix);
+        size_t bundle_len = strlen(bundle_name);
+        if (strncmp(fn->name, prefix, prefix_len) != 0)
+            continue;
+        if (strncmp(fn->name + prefix_len, bundle_name, bundle_len) != 0)
+            continue;
+        if (fn->name[prefix_len + bundle_len] != '_')
+            continue;
+        return 1;
+    }
+    return 0;
+}
+
+static int sema_bundle_member_access_allowed(SemaContext *sc, const Type *bundle_type)
+{
+    if (!sc || !bundle_type)
+        return 0;
+    if (!bundle_type->is_bundle || !bundle_type->struct_name)
+        return 1;
+    return sema_function_is_bundle_method_owner(sc->current_function, bundle_type->struct_name);
 }
 
 static void sema_wrap_node_with_cast(Node *node, Type *target_type)
@@ -1784,6 +2376,168 @@ static int type_is_builtin(const Type *t)
     }
 }
 
+static int sema_imported_candidate_quality(const ImportedFunctionCandidate *cand)
+{
+    if (!cand)
+        return 0;
+    int q = 0;
+    if (cand->symbol.ast_node)
+        q += 2;
+    if (cand->module_full && cand->module_full[0])
+        q += 1;
+    if (cand->symbol.is_extension_method)
+        q += 1;
+    return q;
+}
+
+static ImportedFunctionCandidate *sema_resolve_imported_extension_call(SemaContext *sc, Node *member_expr, Node *call_expr, int *args_checked)
+{
+    if (!sc || !member_expr || member_expr->kind != ND_MEMBER || !call_expr)
+        return NULL;
+    const char *name = member_expr->field_name;
+    if (!name || !*name || strchr(name, '.'))
+        return NULL;
+    if (!member_expr->lhs)
+        return NULL;
+
+    ImportedFunctionSet *set = sema_find_imported_function_set(sc, name);
+    if (!set || set->count <= 0)
+        return NULL;
+
+    check_expr(sc, member_expr->lhs);
+    if (!member_expr->lhs->type)
+        return NULL;
+    if (member_expr->lhs->module_ref)
+        return NULL;
+
+    Type *receiver_ty = canonicalize_type_deep(member_expr->lhs->type);
+    if (!receiver_ty || receiver_ty->kind == TY_IMPORT)
+        return NULL;
+
+    if (!args_checked || !*args_checked)
+    {
+        for (int i = 0; i < call_expr->arg_count; ++i)
+        {
+            if (call_expr->args && call_expr->args[i])
+                check_expr(sc, call_expr->args[i]);
+        }
+        if (args_checked)
+            *args_checked = 1;
+    }
+
+    Node receiver_call = {0};
+    receiver_call.kind = ND_CALL;
+    receiver_call.arg_count = call_expr->arg_count + 1;
+    receiver_call.args = (Node **)xcalloc((size_t)receiver_call.arg_count, sizeof(Node *));
+    if (!receiver_call.args)
+    {
+        diag_error("out of memory while resolving extension call arguments");
+        exit(1);
+    }
+    receiver_call.args[0] = member_expr->lhs;
+    for (int i = 0; i < call_expr->arg_count; ++i)
+        receiver_call.args[i + 1] = call_expr->args ? call_expr->args[i] : NULL;
+
+    ImportedFunctionCandidate *match = NULL;
+    ImportedFunctionCandidate *template_match = NULL;
+    int has_marked_extensions = 0;
+    for (int ci = 0; ci < set->count; ++ci)
+    {
+        ImportedFunctionCandidate *cand = &set->candidates[ci];
+        if (cand->symbol.is_extension_method)
+        {
+            has_marked_extensions = 1;
+            break;
+        }
+    }
+    for (int ci = 0; ci < set->count; ++ci)
+    {
+        ImportedFunctionCandidate *cand = &set->candidates[ci];
+        if (has_marked_extensions && !cand->symbol.is_extension_method)
+            continue;
+
+        if (!call_arguments_match_signature(&receiver_call, &cand->symbol.sig))
+            continue;
+
+        int is_template = symbol_is_template_function(&cand->symbol);
+        if (is_template)
+        {
+            if (!template_match)
+            {
+                template_match = cand;
+                continue;
+            }
+
+            if (funcsig_equal(&template_match->symbol.sig, &cand->symbol.sig))
+            {
+                const char *mod_a = template_match->module_full ? template_match->module_full : "<unknown>";
+                const char *mod_b = cand->module_full ? cand->module_full : "<unknown>";
+                diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                              "ambiguous extension call to '%s'; both modules '%s' and '%s' provide identical overloads",
+                              name, mod_a, mod_b);
+                exit(1);
+            }
+            else
+            {
+                const char *mod_a = template_match->module_full ? template_match->module_full : "<unknown>";
+                const char *mod_b = cand->module_full ? cand->module_full : "<unknown>";
+                diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                              "ambiguous extension call to '%s'; matches found in modules '%s' and '%s'",
+                              name, mod_a, mod_b);
+                exit(1);
+            }
+        }
+
+        if (!match)
+        {
+            match = cand;
+            continue;
+        }
+
+        if (funcsig_equal(&match->symbol.sig, &cand->symbol.sig))
+        {
+            int q_match = sema_imported_candidate_quality(match);
+            int q_cand = sema_imported_candidate_quality(cand);
+            if (q_cand > q_match)
+            {
+                match = cand;
+                continue;
+            }
+            if (q_match > q_cand)
+                continue;
+
+            const char *mod_a = match->module_full ? match->module_full : "<unknown>";
+            const char *mod_b = cand->module_full ? cand->module_full : "<unknown>";
+            if (strcmp(mod_a, mod_b) != 0)
+            {
+                diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                              "ambiguous extension call to '%s'; both modules '%s' and '%s' provide identical overloads",
+                              name, mod_a, mod_b);
+                exit(1);
+            }
+            continue;
+        }
+        else
+        {
+            const char *mod_a = match->module_full ? match->module_full : "<unknown>";
+            const char *mod_b = cand->module_full ? cand->module_full : "<unknown>";
+            diag_error_at(call_expr->src, call_expr->line, call_expr->col,
+                          "ambiguous extension call to '%s'; matches found in modules '%s' and '%s'",
+                          name, mod_a, mod_b);
+            exit(1);
+        }
+    }
+
+    if (!match && template_match)
+    {
+        free(receiver_call.args);
+        return template_match;
+    }
+
+    free(receiver_call.args);
+    return match;
+}
+
 static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, const char *name, Node *call_expr, int *args_checked)
 {
     if (!sc || !name || !call_expr)
@@ -1792,6 +2546,8 @@ static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, co
         return NULL;
     ImportedFunctionSet *set = sema_find_imported_function_set(sc, name);
     if (!set)
+        return NULL;
+    if (imported_function_set_non_extension_count(set) == 0)
         return NULL;
 
     if (!args_checked || !*args_checked)
@@ -1810,18 +2566,11 @@ static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, co
     for (int ci = 0; ci < set->count; ++ci)
     {
         ImportedFunctionCandidate *cand = &set->candidates[ci];
-        const FuncSig *sig = &cand->symbol.sig;
-        int provided = call_expr->arg_count;
-        int expected = sig->param_count;
-        if (!sig->is_varargs)
-        {
-            if (provided != expected)
-                continue;
-        }
-        else if (provided < expected)
-        {
+        if (cand->symbol.is_extension_method)
             continue;
-        }
+        const FuncSig *sig = &cand->symbol.sig;
+        if (!call_arguments_match_signature(call_expr, sig))
+            continue;
 
         int ok = 1;
         int is_template = symbol_is_template_function(&cand->symbol);
@@ -1853,26 +2602,6 @@ static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, co
             }
         }
 
-        for (int pi = 0; pi < expected && ok; ++pi)
-        {
-            if (!sig->params || pi >= sig->param_count)
-                continue;
-            Type *expected_ty = sig->params[pi];
-            if (!expected_ty)
-                continue;
-            if (!call_expr->args || !call_expr->args[pi])
-            {
-                ok = 0;
-                break;
-            }
-            Node *arg_node = call_expr->args[pi];
-            Type *saved_type = arg_node->type;
-            int64_t saved_int = arg_node->int_val;
-            if (!can_assign(expected_ty, arg_node))
-                ok = 0;
-            arg_node->type = saved_type;
-            arg_node->int_val = saved_int;
-        }
         if (!ok)
             continue;
 
@@ -1913,6 +2642,8 @@ static ImportedFunctionCandidate *sema_resolve_imported_call(SemaContext *sc, co
         {
             for (int i = 0; i < set->count; ++i)
             {
+                if (set->candidates[i].symbol.is_extension_method)
+                    continue;
                 const char *mod = set->candidates[i].module_full ? set->candidates[i].module_full : "<unknown>";
                 diag_note_at(call_expr->src, call_expr->line, call_expr->col,
                              "candidate: %s.%s", mod, set->candidates[i].symbol.name);
@@ -1957,6 +2688,8 @@ static const Symbol *sema_resolve_local_overload(SemaContext *sc,
     {
         const Symbol *sym = &sc->syms->items[i];
         if (!sym || sym->kind != SYM_FUNC || !sym->name)
+            continue;
+        if (sym->is_extension_method)
             continue;
         if (strcmp(sym->name, name) != 0)
             continue;
@@ -2252,6 +2985,7 @@ static void populate_symbol_from_function(Symbol *s, Node *fn)
     s->sig.is_varargs = fn->is_varargs ? 1 : 0;
     s->sig.param_const_flags = NULL;
     s->ast_node = fn;
+    s->is_extension_method = fn->is_extension_method ? 1 : 0;
 
     Type *decl_ret = fn->ret_type ? fn->ret_type : &ty_i32;
     if (fn->metadata.ret_token)
@@ -2356,6 +3090,7 @@ static void populate_symbol_from_global(Symbol *s, Node *decl)
     s->sig.param_count = 0;
     s->sig.is_varargs = 0;
     s->is_noreturn = 0;
+    s->is_extension_method = 0;
     s->var_type = decl->var_type;
     s->is_const = decl->var_is_const;
     s->ast_node = decl;
@@ -2978,6 +3713,21 @@ static int can_assign(Type *target, Node *rhs)
         Type *rhs_ty = canonicalize_type_deep(rhs->type);
         if (rhs_ty && rhs_ty->kind == TY_PTR)
         {
+            if (sema_new_struct_assignment_compatible(canon_target, rhs))
+            {
+                rhs->type = rhs_ty;
+                return 1;
+            }
+            if (canon_target->kind == TY_ARRAY && canon_target->array.is_unsized)
+            {
+                Type *target_elem = canonicalize_type_deep(canon_target->array.elem);
+                Type *rhs_elem = canonicalize_type_deep(rhs_ty->pointee);
+                if (target_elem && rhs_elem && type_equal(target_elem, rhs_elem))
+                {
+                    rhs->type = rhs_ty;
+                    return 1;
+                }
+            }
             if (type_equal(canon_target, rhs_ty))
             {
                 rhs->type = canon_target;
@@ -3080,43 +3830,150 @@ static int can_assign(Type *target, Node *rhs)
     return 0;
 }
 
+static int call_arg_can_use_ref_value(Type *expected_ty, const Node *arg)
+{
+    Type *expected = canonicalize_type_deep(expected_ty);
+    Type *arg_ty = canonicalize_type_deep(arg ? arg->type : NULL);
+    if (!expected || !arg_ty)
+        return 0;
+    if (expected->kind == TY_REF)
+        return 0;
+    if (arg_ty->kind != TY_REF || !arg_ty->pointee)
+        return 0;
+    return type_equal(expected, canonicalize_type_deep(arg_ty->pointee));
+}
+
+static Node *sema_make_ref_value_deref(Node *arg)
+{
+    if (!arg)
+        return NULL;
+    Type *arg_ty = canonicalize_type_deep(arg->type);
+    if (!arg_ty || arg_ty->kind != TY_REF || !arg_ty->pointee)
+        return arg;
+
+    Node *deref = (Node *)xcalloc(1, sizeof(Node));
+    if (!deref)
+    {
+        diag_error("out of memory while rewriting ref argument");
+        exit(1);
+    }
+    deref->kind = ND_DEREF;
+    deref->lhs = arg;
+    deref->line = arg->line;
+    deref->col = arg->col;
+    deref->src = arg->src;
+    deref->type = canonicalize_type_deep(arg_ty->pointee);
+    return deref;
+}
+
 static int call_arguments_match_signature(Node *call_expr, const FuncSig *sig)
 {
     if (!call_expr || !sig)
         return 0;
     int provided = call_expr->arg_count;
-    int expected = sig->param_count;
-    if (!sig->is_varargs)
+
+    if (sig->is_varargs)
     {
-        if (provided != expected)
+        int expected = sig->param_count;
+        if (provided < expected)
             return 0;
+        for (int i = 0; i < expected; ++i)
+        {
+            if (!sig->params || i >= sig->param_count)
+                continue;
+            Type *expected_ty = sig->params[i];
+            if (!expected_ty)
+                continue;
+            if (!call_expr->args || !call_expr->args[i])
+                return 0;
+            Node *arg = call_expr->args[i];
+            Type *saved_type = arg->type;
+            int64_t saved_int = arg->int_val;
+            if (!can_assign(expected_ty, arg))
+            {
+                if (call_arg_can_use_ref_value(expected_ty, arg))
+                {
+                    arg->type = saved_type;
+                    arg->int_val = saved_int;
+                    continue;
+                }
+                arg->type = saved_type;
+                arg->int_val = saved_int;
+                return 0;
+            }
+            arg->type = saved_type;
+            arg->int_val = saved_int;
+        }
+        return 1;
     }
-    else if (provided < expected)
+
+    int sig_index = 0;
+    for (int ai = 0; ai < provided; ++ai)
     {
-        return 0;
-    }
-    for (int i = 0; i < expected; ++i)
-    {
-        if (!sig->params || i >= sig->param_count)
-            continue;
-        Type *expected_ty = sig->params[i];
+        if (sig_index >= sig->param_count)
+            return 0;
+        if (!sig->params || !call_expr->args || !call_expr->args[ai])
+            return 0;
+
+        int visible_sig_index = sig_index;
+        Type *expected_ty = sig->params[visible_sig_index];
         if (!expected_ty)
-            continue;
-        if (!call_expr->args || !call_expr->args[i])
             return 0;
-        Node *arg = call_expr->args[i];
+
+        Node *arg = call_expr->args[ai];
         Type *saved_type = arg->type;
         int64_t saved_int = arg->int_val;
         if (!can_assign(expected_ty, arg))
         {
+            if (call_arg_can_use_ref_value(expected_ty, arg))
+            {
+                arg->type = saved_type;
+                arg->int_val = saved_int;
+                sig_index++;
+
+                Type *canon_expected = canonicalize_type_deep(expected_ty);
+                if (canon_expected && canon_expected->kind == TY_ARRAY && canon_expected->array.is_unsized &&
+                    sig_index < sig->param_count && sig->params)
+                {
+                    Type *hidden_ty = canonicalize_type_deep(sig->params[sig_index]);
+                    if (hidden_ty && hidden_ty->kind == TY_U64)
+                        sig_index++;
+                }
+                continue;
+            }
             arg->type = saved_type;
             arg->int_val = saved_int;
             return 0;
         }
         arg->type = saved_type;
         arg->int_val = saved_int;
+
+        sig_index++;
+
+        Type *canon_expected = canonicalize_type_deep(expected_ty);
+        if (canon_expected && canon_expected->kind == TY_ARRAY && canon_expected->array.is_unsized &&
+            sig_index < sig->param_count && sig->params)
+        {
+            Type *hidden_ty = canonicalize_type_deep(sig->params[sig_index]);
+            if (hidden_ty && hidden_ty->kind == TY_U64)
+                sig_index++;
+        }
     }
-    return 1;
+
+    if (sig_index == sig->param_count)
+        return 1;
+
+    if (sig_index + 1 == sig->param_count && sig->params)
+    {
+        Type *ret_ty = canonicalize_type_deep(sig->ret);
+        Type *tail_ty = canonicalize_type_deep(sig->params[sig_index]);
+        Type *tail_pointee = tail_ty && tail_ty->kind == TY_PTR ? canonicalize_type_deep(tail_ty->pointee) : NULL;
+        if (ret_ty && ret_ty->kind == TY_ARRAY && ret_ty->array.is_unsized &&
+            tail_ty && tail_ty->kind == TY_PTR && (!tail_pointee || tail_pointee->kind == TY_VOID))
+            return 1;
+    }
+
+    return 0;
 }
 
 static void apply_default_vararg_promotion(Node **slot)
@@ -3186,6 +4043,13 @@ static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target
         Type *elem = sema_resolve_import_type(target->array.elem);
         if (target->array.is_unsized)
         {
+            Type *ptr_ty = type_ptr(elem ? elem : &ty_i32);
+            if (init->kind == ND_INIT_LIST && init->init.is_zero)
+            {
+                init->var_type = target;
+                init->type = ptr_ty;
+                return;
+            }
             if (init->kind == ND_INIT_LIST && !init->init.is_zero)
             {
                 diag_error_at(init->src, init->line, init->col,
@@ -3193,7 +4057,6 @@ static void check_initializer_for_type(SemaContext *sc, Node *init, Type *target
                 exit(1);
             }
             check_expr(sc, init);
-            Type *ptr_ty = type_ptr(elem ? elem : &ty_i32);
             if (!can_assign(ptr_ty, init))
             {
                 diag_error_at(init->src, init->line, init->col,
@@ -3522,6 +4385,54 @@ static int expr_provides_managed_array_length(const Node *expr)
         return 0;
     if (expr->kind == ND_MANAGED_ARRAY_ADAPT)
         return 1;
+    if (expr->kind == ND_NEW && expr->lhs)
+        return 1;
+    if (expr->kind == ND_CALL && expr->call_target && expr->call_target->is_managed)
+    {
+        Type *ret_ty = canonicalize_type_deep(expr->call_target->ret_type);
+        if (ret_ty && ret_ty->kind == TY_ARRAY && ret_ty->array.is_unsized)
+            return 1;
+    }
+    if (expr->kind == ND_CALL && expr->call_func_type)
+    {
+        Type *fn_ty = canonicalize_type_deep(expr->call_func_type);
+        if (fn_ty && fn_ty->kind == TY_FUNC && !fn_ty->func.is_varargs)
+        {
+            FuncSig sig_view = {
+                .ret = fn_ty->func.ret,
+                .params = fn_ty->func.params,
+                .param_count = fn_ty->func.param_count,
+                .param_const_flags = NULL,
+                .is_varargs = fn_ty->func.is_varargs,
+            };
+
+            int provided = expr->arg_count;
+            int sig_index = 0;
+            for (int ai = 0; ai < provided && sig_index < sig_view.param_count; ++ai)
+            {
+                Type *visible_ty = sig_view.params ? sig_view.params[sig_index] : NULL;
+                sig_index++;
+                Type *canon_visible = canonicalize_type_deep(visible_ty);
+                if (canon_visible && canon_visible->kind == TY_ARRAY && canon_visible->array.is_unsized &&
+                    sig_index < sig_view.param_count && sig_view.params)
+                {
+                    Type *hidden_ty = canonicalize_type_deep(sig_view.params[sig_index]);
+                    if (hidden_ty && hidden_ty->kind == TY_U64)
+                        sig_index++;
+                }
+            }
+
+            if (sig_index + 1 == sig_view.param_count && sig_view.params)
+            {
+                Type *ret_ty = canonicalize_type_deep(sig_view.ret);
+                Type *tail_ty = canonicalize_type_deep(sig_view.params[sig_index]);
+                Type *tail_pointee = tail_ty && tail_ty->kind == TY_PTR ? canonicalize_type_deep(tail_ty->pointee) : NULL;
+                if (ret_ty && ret_ty->kind == TY_ARRAY && ret_ty->array.is_unsized &&
+                    tail_ty && tail_ty->kind == TY_PTR && (!tail_pointee || tail_pointee->kind == TY_VOID))
+                    return 1;
+            }
+        }
+    }
     if (expr->managed_length_name && expr->managed_length_name[0] != '\0')
         return 1;
     Type *array_ty = node_array_source_type(expr);
@@ -4039,11 +4950,20 @@ static void check_expr(SemaContext *sc, Node *e)
             ImportedFunctionSet *auto_set = sema_find_imported_function_set(sc, orig_name);
             if (auto_set)
             {
-                if (auto_set->count == 1)
+                int non_extension_count = imported_function_set_non_extension_count(auto_set);
+                if (non_extension_count == 1)
                 {
-                    const Symbol *sym = symtab_get(sc->syms, orig_name);
+                    const Symbol *sym = NULL;
+                    for (int ci = 0; ci < auto_set->count; ++ci)
+                    {
+                        if (!auto_set->candidates[ci].symbol.is_extension_method)
+                        {
+                            sym = &auto_set->candidates[ci].symbol;
+                            break;
+                        }
+                    }
                     if (!sym)
-                        sym = &auto_set->candidates[0].symbol;
+                        goto unknown_var;
                     Type *fn_ty = make_function_type_from_sig(&sym->sig);
                     fn_ty = canonicalize_type_deep(fn_ty);
                     e->type = fn_ty;
@@ -4059,16 +4979,29 @@ static void check_expr(SemaContext *sc, Node *e)
                         e->var_ref = backend;
                     return;
                 }
-                else if (auto_set->count > 1)
+                else if (non_extension_count > 1)
                 {
-                    const char *mod_a = auto_set->candidates[0].module_full ? auto_set->candidates[0].module_full : "<unknown>";
-                    const char *mod_b = auto_set->candidates[1].module_full ? auto_set->candidates[1].module_full : "<unknown>";
+                    const char *mod_a = "<unknown>";
+                    const char *mod_b = "<unknown>";
+                    int found = 0;
+                    for (int ci = 0; ci < auto_set->count && found < 2; ++ci)
+                    {
+                        if (auto_set->candidates[ci].symbol.is_extension_method)
+                            continue;
+                        const char *mod = auto_set->candidates[ci].module_full ? auto_set->candidates[ci].module_full : "<unknown>";
+                        if (found == 0)
+                            mod_a = mod;
+                        else
+                            mod_b = mod;
+                        found++;
+                    }
                     diag_error_at(e->src, e->line, e->col,
                                   "ambiguous reference to '%s'; modules '%s' and '%s' both provide candidates",
                                   orig_name ? orig_name : "<unnamed>", mod_a, mod_b);
                     exit(1);
                 }
             }
+        unknown_var:
             int import_parts = 0;
             const ModulePath *imp = unit_find_import_for_ident(sc ? sc->unit : NULL, orig_name, &import_parts);
             if (imp)
@@ -4390,6 +5323,123 @@ static void check_expr(SemaContext *sc, Node *e)
                 exit(1);
             }
         }
+
+        if (e->arg_count > 0 && e->lhs)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "new array allocation does not support constructor arguments");
+            exit(1);
+        }
+
+        const Symbol *ctor_sym = NULL;
+        if (elem && elem->kind == TY_STRUCT && elem->is_bundle)
+        {
+            for (int i = 0; i < e->arg_count; ++i)
+            {
+                if (e->args && e->args[i])
+                    check_expr(sc, e->args[i]);
+            }
+            ctor_sym = sema_lookup_bundle_constructor_symbol(sc, elem, ptr_ty, e->args, e->arg_count);
+            if (!ctor_sym)
+            {
+                if (elem->bundle_ctor_declared)
+                {
+                    if (e->arg_count == 0 && elem->bundle_ctor_has_zero_arity && !elem->bundle_ctor_has_exposed_zero_arity)
+                    {
+                        diag_error_at(e->src, e->line, e->col,
+                                      "bundle '%s' constructor is hidden in another file; mark 'on new()' as 'expose' to use it here",
+                                      elem->struct_name ? elem->struct_name : "<anonymous>");
+                        exit(1);
+                    }
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle '%s' has no matching constructor for new-expression arguments",
+                                  elem->struct_name ? elem->struct_name : "<anonymous>");
+                    exit(1);
+                }
+                if (e->arg_count > 0)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle '%s' has no matching constructor for new-expression arguments",
+                                  elem->struct_name ? elem->struct_name : "<anonymous>");
+                    exit(1);
+                }
+            }
+        }
+        else if (e->arg_count > 0)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "constructor arguments are only supported when allocating bundle types");
+            exit(1);
+        }
+
+        if (ctor_sym)
+        {
+            int expected = ctor_sym->sig.param_count;
+            if (expected < 1)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "bundle constructor '%s' is missing implicit this parameter",
+                              ctor_sym->name ? ctor_sym->name : "<constructor>");
+                exit(1);
+            }
+
+            int provided = e->arg_count + 1;
+            if (!ctor_sym->sig.is_varargs)
+            {
+                if (provided != expected)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle constructor expects %d argument(s) but %d provided",
+                                  expected - 1, e->arg_count);
+                    exit(1);
+                }
+            }
+            else if (provided < expected)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "bundle constructor expects at least %d argument(s) before varargs",
+                              expected - 1);
+                exit(1);
+            }
+
+            Type *this_param = ctor_sym->sig.params ? ctor_sym->sig.params[0] : NULL;
+            if (!this_param || !type_equal(this_param, ptr_ty))
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "bundle constructor has incompatible implicit this parameter type");
+                exit(1);
+            }
+
+            int check_count = expected - 1;
+            if (ctor_sym->sig.is_varargs && e->arg_count < check_count)
+                check_count = e->arg_count;
+            for (int i = 0; i < e->arg_count; ++i)
+            {
+                check_expr(sc, e->args[i]);
+                if (i >= check_count)
+                    continue;
+                Type *want = ctor_sym->sig.params ? ctor_sym->sig.params[i + 1] : NULL;
+                if (!want)
+                    continue;
+                if (!can_assign(want, e->args[i]))
+                {
+                    char got[64];
+                    char expect[64];
+                    describe_type(e->args[i]->type, got, sizeof(got));
+                    describe_type(want, expect, sizeof(expect));
+                    diag_error_at(e->args[i]->src, e->args[i]->line, e->args[i]->col,
+                                  "bundle constructor argument %d type mismatch: expected %s, got %s",
+                                  i + 1, expect, got);
+                    exit(1);
+                }
+                e->args[i]->type = want;
+            }
+
+            e->call_name = ctor_sym->backend_name ? ctor_sym->backend_name : ctor_sym->name;
+            e->call_target = ctor_sym->ast_node;
+            e->call_is_varargs = ctor_sym->sig.is_varargs ? 1 : 0;
+        }
+
         e->type = ptr_ty;
         return;
     }
@@ -4400,6 +5450,137 @@ static void check_expr(SemaContext *sc, Node *e)
             diag_error_at(e->src, e->line, e->col, "member access missing base expression");
             exit(1);
         }
+
+        if (!e->is_pointer_deref && e->lhs->kind == ND_VAR && e->lhs->var_ref && e->field_name)
+        {
+            Type *bundle_ty = sema_lookup_bundle_type_by_name(sc, e->lhs->var_ref);
+            if (bundle_ty && bundle_ty->is_bundle)
+            {
+                const Symbol *static_method = sema_lookup_bundle_method_symbol(sc, bundle_ty, e->field_name, 1);
+                if (static_method)
+                {
+                    if (static_method->ast_node && !static_method->ast_node->is_exposed &&
+                        !sema_bundle_member_access_allowed(sc, bundle_ty))
+                    {
+                        char bundle_name[128];
+                        diag_error_at(e->src, e->line, e->col,
+                                      "bundle method '%s' on '%s' is private; mark it 'expose' to call outside the bundle",
+                                      e->field_name,
+                                      sema_pretty_bundle_name(bundle_ty->struct_name, bundle_name, sizeof(bundle_name)));
+                        exit(1);
+                    }
+                    Node *base = e->lhs;
+                    e->kind = ND_VAR;
+                    e->lhs = NULL;
+                    e->rhs = NULL;
+                    e->var_ref = static_method->backend_name ? static_method->backend_name : static_method->name;
+                    e->var_is_function = 1;
+                    e->var_is_const = 1;
+                    e->var_is_global = 0;
+                    Type *fn_ty = make_function_type_from_sig(&static_method->sig);
+                    e->var_type = canonicalize_type_deep(fn_ty);
+                    e->type = e->var_type;
+                    e->field_name = NULL;
+                    e->is_pointer_deref = 0;
+                    if (static_method->kind == SYM_FUNC)
+                        e->referenced_function = static_method->ast_node;
+                    ast_free(base);
+                    return;
+                }
+
+                char *field_symbol = sema_make_bundle_symbol_name("__bundle_static_field", bundle_ty->struct_name, e->field_name);
+                if (field_symbol)
+                {
+                    const Symbol *static_field = symtab_get(sc->syms, field_symbol);
+                    free(field_symbol);
+                    if (static_field && static_field->kind == SYM_GLOBAL)
+                    {
+                        Node *base = e->lhs;
+                        e->kind = ND_VAR;
+                        e->lhs = NULL;
+                        e->rhs = NULL;
+                        e->var_ref = static_field->backend_name ? static_field->backend_name : static_field->name;
+                        e->var_is_function = 0;
+                        e->var_is_const = static_field->is_const;
+                        e->var_is_global = 1;
+                        e->var_type = canonicalize_type_deep(static_field->var_type);
+                        e->type = e->var_type;
+                        e->field_name = NULL;
+                        e->is_pointer_deref = 0;
+                        sema_track_imported_global_usage(sc, static_field);
+                        ast_free(base);
+                        return;
+                    }
+                }
+            }
+
+            if (!bundle_ty)
+            {
+                const Symbol *static_method = NULL;
+                char *method_symbol = sema_make_bundle_symbol_name("__bundle_static", e->lhs->var_ref, e->field_name);
+                if (method_symbol)
+                {
+                    static_method = symtab_get(sc->syms, method_symbol);
+                    free(method_symbol);
+                }
+                if (static_method && static_method->kind == SYM_FUNC)
+                {
+                    if (static_method->ast_node && !static_method->ast_node->is_exposed &&
+                        !sema_function_is_bundle_method_owner(sc->current_function, e->lhs->var_ref))
+                    {
+                        char bundle_name[128];
+                        diag_error_at(e->src, e->line, e->col,
+                                      "bundle method '%s' on '%s' is private; mark it 'expose' to call outside the bundle",
+                                      e->field_name,
+                                      sema_pretty_bundle_name(e->lhs->var_ref, bundle_name, sizeof(bundle_name)));
+                        exit(1);
+                    }
+                    Node *base = e->lhs;
+                    e->kind = ND_VAR;
+                    e->lhs = NULL;
+                    e->rhs = NULL;
+                    e->var_ref = static_method->backend_name ? static_method->backend_name : static_method->name;
+                    e->var_is_function = 1;
+                    e->var_is_const = 1;
+                    e->var_is_global = 0;
+                    Type *fn_ty = make_function_type_from_sig(&static_method->sig);
+                    e->var_type = canonicalize_type_deep(fn_ty);
+                    e->type = e->var_type;
+                    e->field_name = NULL;
+                    e->is_pointer_deref = 0;
+                    if (static_method->kind == SYM_FUNC)
+                        e->referenced_function = static_method->ast_node;
+                    ast_free(base);
+                    return;
+                }
+
+                char *field_symbol = sema_make_bundle_symbol_name("__bundle_static_field", e->lhs->var_ref, e->field_name);
+                if (field_symbol)
+                {
+                    const Symbol *static_field = symtab_get(sc->syms, field_symbol);
+                    free(field_symbol);
+                    if (static_field && static_field->kind == SYM_GLOBAL)
+                    {
+                        Node *base = e->lhs;
+                        e->kind = ND_VAR;
+                        e->lhs = NULL;
+                        e->rhs = NULL;
+                        e->var_ref = static_field->backend_name ? static_field->backend_name : static_field->name;
+                        e->var_is_function = 0;
+                        e->var_is_const = static_field->is_const;
+                        e->var_is_global = 1;
+                        e->var_type = canonicalize_type_deep(static_field->var_type);
+                        e->type = e->var_type;
+                        e->field_name = NULL;
+                        e->is_pointer_deref = 0;
+                        sema_track_imported_global_usage(sc, static_field);
+                        ast_free(base);
+                        return;
+                    }
+                }
+            }
+        }
+
         check_expr(sc, e->lhs);
         Node *base_node = e->lhs;
 
@@ -4502,6 +5683,70 @@ static void check_expr(SemaContext *sc, Node *e)
                 e->module_type_is_enum = 1;
                 e->type = enum_ty;
                 return;
+            }
+
+            if (!e->is_pointer_deref && base_node->type)
+            {
+                Type *bundle_ty = canonicalize_type_deep(base_node->type);
+                if (bundle_ty && bundle_ty->kind == TY_STRUCT && bundle_ty->is_bundle)
+                {
+                    const Symbol *static_method = sema_lookup_bundle_method_symbol(sc, bundle_ty, field, 1);
+                    if (static_method)
+                    {
+                        if (static_method->ast_node && !static_method->ast_node->is_exposed &&
+                            !sema_bundle_member_access_allowed(sc, bundle_ty))
+                        {
+                            char bundle_name[128];
+                            diag_error_at(e->src, e->line, e->col,
+                                          "bundle method '%s' on '%s' is private; mark it 'expose' to call outside the bundle",
+                                          field,
+                                          sema_pretty_bundle_name(bundle_ty->struct_name, bundle_name, sizeof(bundle_name)));
+                            exit(1);
+                        }
+                        Node *base = e->lhs;
+                        e->kind = ND_VAR;
+                        e->lhs = NULL;
+                        e->rhs = NULL;
+                        e->var_ref = static_method->backend_name ? static_method->backend_name : static_method->name;
+                        e->var_is_function = 1;
+                        e->var_is_const = 1;
+                        e->var_is_global = 0;
+                        Type *fn_ty = make_function_type_from_sig(&static_method->sig);
+                        e->var_type = canonicalize_type_deep(fn_ty);
+                        e->type = e->var_type;
+                        e->field_name = NULL;
+                        e->is_pointer_deref = 0;
+                        if (static_method->kind == SYM_FUNC)
+                            e->referenced_function = static_method->ast_node;
+                        ast_free(base);
+                        return;
+                    }
+
+                    char *field_symbol = sema_make_bundle_symbol_name("__bundle_static_field", bundle_ty->struct_name, field);
+                    if (field_symbol)
+                    {
+                        const Symbol *static_field = symtab_get(sc->syms, field_symbol);
+                        free(field_symbol);
+                        if (static_field && static_field->kind == SYM_GLOBAL)
+                        {
+                            Node *base = e->lhs;
+                            e->kind = ND_VAR;
+                            e->lhs = NULL;
+                            e->rhs = NULL;
+                            e->var_ref = static_field->backend_name ? static_field->backend_name : static_field->name;
+                            e->var_is_function = 0;
+                            e->var_is_const = static_field->is_const;
+                            e->var_is_global = 1;
+                            e->var_type = canonicalize_type_deep(static_field->var_type);
+                            e->type = e->var_type;
+                            e->field_name = NULL;
+                            e->is_pointer_deref = 0;
+                            sema_track_imported_global_usage(sc, static_field);
+                            ast_free(base);
+                            return;
+                        }
+                    }
+                }
             }
 
             size_t module_len = module_full ? strlen(module_full) : 0;
@@ -4629,6 +5874,8 @@ static void check_expr(SemaContext *sc, Node *e)
         {
             if (base && base->kind == TY_REF && base->pointee)
                 base = sema_resolve_import_type(canonicalize_type_deep(base->pointee));
+            if (base && type_is_bundle_handle(base))
+                base = sema_resolve_import_type(canonicalize_type_deep(base->pointee));
             if (!base || base->kind != TY_STRUCT)
             {
                 diag_error_at(e->src, e->line, e->col,
@@ -4650,6 +5897,19 @@ static void check_expr(SemaContext *sc, Node *e)
                           e->field_name ? e->field_name : "<anon>",
                           base->struct_name ? base->struct_name : "<anon>");
             exit(1);
+        }
+        if (base->is_bundle && base->strct.field_exposed_flags && idx < base->strct.field_count)
+        {
+            int field_exposed = base->strct.field_exposed_flags[idx] ? 1 : 0;
+            if (!field_exposed && !sema_bundle_member_access_allowed(sc, base))
+            {
+                char bundle_name[128];
+                diag_error_at(e->src, e->line, e->col,
+                              "field '%s' on bundle '%s' is private; mark it 'expose' to access outside the bundle",
+                              e->field_name ? e->field_name : "<anon>",
+                              sema_pretty_bundle_name(base->struct_name, bundle_name, sizeof(bundle_name)));
+                exit(1);
+            }
         }
         e->field_index = idx;
         e->field_offset = base->strct.field_offsets ? base->strct.field_offsets[idx] : 0;
@@ -4774,8 +6034,8 @@ static void check_expr(SemaContext *sc, Node *e)
             return;
         }
 
-        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
-        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        Type *lhs_type = type_value_view(e->lhs->type);
+        Type *rhs_type = type_value_view(e->rhs->type);
         e->lhs->type = lhs_type;
         e->rhs->type = rhs_type;
         int lhs_is_ptr = type_is_pointer(lhs_type);
@@ -4826,8 +6086,8 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
-        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        Type *lhs_type = type_value_view(e->lhs->type);
+        Type *rhs_type = type_value_view(e->rhs->type);
         e->lhs->type = lhs_type;
         e->rhs->type = rhs_type;
         int lhs_is_ptr = type_is_pointer(lhs_type);
@@ -4882,20 +6142,22 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, e->lhs);
-        if (!(type_is_int(e->lhs->type) || type_is_float(e->lhs->type)))
+        Type *operand_type = type_value_view(e->lhs->type);
+        e->lhs->type = operand_type;
+        if (!(type_is_int(operand_type) || type_is_float(operand_type)))
         {
             diag_error_at(e->src, e->line, e->col, "unary '-' requires integer or floating-point operand");
             exit(1);
         }
-        e->type = e->lhs->type;
+        e->type = operand_type;
         return;
     }
     if (e->kind == ND_MUL || e->kind == ND_DIV || e->kind == ND_MOD)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        Type *lhs_type = canonicalize_type_deep(e->lhs->type);
-        Type *rhs_type = canonicalize_type_deep(e->rhs->type);
+        Type *lhs_type = type_value_view(e->lhs->type);
+        Type *rhs_type = type_value_view(e->rhs->type);
         e->lhs->type = lhs_type;
         e->rhs->type = rhs_type;
         if (!type_equal(lhs_type, rhs_type))
@@ -4942,14 +6204,18 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!(type_is_int(e->lhs->type) && type_is_int(e->rhs->type)))
+        Type *lhs_type = type_value_view(e->lhs->type);
+        Type *rhs_type = type_value_view(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        if (!(type_is_int(lhs_type) && type_is_int(rhs_type)))
         {
             diag_error_at(e->src, e->line, e->col,
                           "shift operands must be integers");
             exit(1);
         }
         
-        e->type = e->lhs->type;
+        e->type = lhs_type;
         return;
     }
     if (e->kind == ND_BITAND || e->kind == ND_BITOR || e->kind == ND_BITXOR)
@@ -4997,7 +6263,7 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, e->lhs);
-        Type *operand_type = canonicalize_type_deep(e->lhs->type);
+        Type *operand_type = type_value_view(e->lhs->type);
         e->lhs->type = operand_type;
         if (!type_is_int(operand_type))
         {
@@ -5017,7 +6283,9 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, e->lhs);
-        if (!type_is_int(e->lhs->type))
+        Type *operand_type = type_value_view(e->lhs->type);
+        e->lhs->type = operand_type;
+        if (!type_is_int(operand_type))
         {
             diag_error_at(e->src, e->line, e->col,
                           "logical '!' requires integer operand");
@@ -5030,13 +6298,17 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
+        Type *lhs_type = type_value_view(e->lhs->type);
+        Type *rhs_type = type_value_view(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
         
-        int lhs_is_int = type_is_int(e->lhs->type);
-        int rhs_is_int = type_is_int(e->rhs->type);
-        int lhs_is_float = type_is_float(e->lhs->type);
-        int rhs_is_float = type_is_float(e->rhs->type);
-        int lhs_is_ptr = type_is_pointer_like(e->lhs->type);
-        int rhs_is_ptr = type_is_pointer_like(e->rhs->type);
+        int lhs_is_int = type_is_int(lhs_type);
+        int rhs_is_int = type_is_int(rhs_type);
+        int lhs_is_float = type_is_float(lhs_type);
+        int rhs_is_float = type_is_float(rhs_type);
+        int lhs_is_ptr = type_is_pointer_like(lhs_type);
+        int rhs_is_ptr = type_is_pointer_like(rhs_type);
         if (!((lhs_is_int && rhs_is_int) || (lhs_is_float && rhs_is_float) || (lhs_is_ptr && rhs_is_ptr)))
         {
             diag_error_at(e->src, e->line, e->col, "relational operator requires integer, floating-point, or pointer operands of the same category");
@@ -5049,7 +6321,11 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
-        if (!(type_is_int(e->lhs->type) && type_is_int(e->rhs->type)))
+        Type *lhs_type = type_value_view(e->lhs->type);
+        Type *rhs_type = type_value_view(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+        if (!(type_is_int(lhs_type) && type_is_int(rhs_type)))
         {
             diag_error_at(e->src, e->line, e->col, "%s requires integer operands",
                           e->kind == ND_LAND ? "&&" : "||");
@@ -5062,13 +6338,29 @@ static void check_expr(SemaContext *sc, Node *e)
     {
         check_expr(sc, e->lhs);
         check_expr(sc, e->rhs);
+        Type *lhs_type = type_value_view(e->lhs->type);
+        Type *rhs_type = type_value_view(e->rhs->type);
+        e->lhs->type = lhs_type;
+        e->rhs->type = rhs_type;
+
+        /*
+         * Permit equality checks for unresolved template parameters when both
+         * operands are the same template type (e.g. T == T in generic code).
+         */
+        if (lhs_type && rhs_type &&
+            (lhs_type->kind == TY_TEMPLATE_PARAM || rhs_type->kind == TY_TEMPLATE_PARAM) &&
+            type_equal(lhs_type, rhs_type))
+        {
+            e->type = type_bool();
+            return;
+        }
         
-        int lhs_is_int = type_is_int(e->lhs->type);
-        int rhs_is_int = type_is_int(e->rhs->type);
-        int lhs_is_float = type_is_float(e->lhs->type);
-        int rhs_is_float = type_is_float(e->rhs->type);
-        int lhs_is_ptr = type_is_pointer_like(e->lhs->type);
-        int rhs_is_ptr = type_is_pointer_like(e->rhs->type);
+        int lhs_is_int = type_is_int(lhs_type);
+        int rhs_is_int = type_is_int(rhs_type);
+        int lhs_is_float = type_is_float(lhs_type);
+        int rhs_is_float = type_is_float(rhs_type);
+        int lhs_is_ptr = type_is_pointer_like(lhs_type);
+        int rhs_is_ptr = type_is_pointer_like(rhs_type);
         if (!((lhs_is_int && rhs_is_int) || (lhs_is_float && rhs_is_float) || (lhs_is_ptr && rhs_is_ptr)))
         {
             diag_error_at(e->src, e->line, e->col,
@@ -5181,6 +6473,69 @@ static void check_expr(SemaContext *sc, Node *e)
             diag_error_at(e->src, e->line, e->col, "array index is not an integer");
             exit(1);
         }
+
+        Node *this_arg = NULL;
+        Type *bundle_ty = sema_bundle_indexer_base_type(e->lhs, &this_arg);
+        if (bundle_ty)
+        {
+            const Symbol *indexer = sema_resolve_bundle_indexer_method(sc, bundle_ty, this_arg, e->rhs, NULL);
+            if (!indexer)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "bundle '%s' has no matching index getter overload '[](%s)'",
+                              bundle_ty->struct_name ? bundle_ty->struct_name : "<bundle>",
+                              node_kind_name(e->rhs->kind));
+                exit(1);
+            }
+
+            Type *ret_ty = canonicalize_type_deep(indexer->sig.ret);
+            if (indexer->sig.param_count != 2 || !ret_ty || ret_ty->kind == TY_VOID)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "bundle index getter '[]' must have exactly one key parameter and a non-void return type");
+                exit(1);
+            }
+
+            Node *base_expr = e->lhs;
+            Node *index_expr = e->rhs;
+            Node *fn_var = (Node *)xcalloc(1, sizeof(Node));
+            if (!fn_var)
+            {
+                diag_error("out of memory while rewriting bundle index getter call");
+                exit(1);
+            }
+
+            Node **new_args = (Node **)xcalloc(2, sizeof(Node *));
+            if (!new_args)
+            {
+                diag_error("out of memory while rewriting bundle index getter call arguments");
+                exit(1);
+            }
+            new_args[0] = this_arg;
+            new_args[1] = index_expr;
+
+            fn_var->kind = ND_VAR;
+            fn_var->var_ref = xstrdup(indexer->backend_name ? indexer->backend_name : indexer->name);
+            fn_var->var_is_const = 1;
+            fn_var->var_is_function = 1;
+            fn_var->line = e->line;
+            fn_var->col = e->col;
+            fn_var->src = e->src;
+
+            e->kind = ND_CALL;
+            e->lhs = fn_var;
+            e->rhs = NULL;
+            e->args = new_args;
+            e->arg_count = 2;
+            e->call_name = fn_var->var_ref;
+            e->call_target = indexer->ast_node;
+            e->call_is_indirect = 0;
+
+            (void)base_expr;
+            check_expr(sc, e);
+            return;
+        }
+
         Type *lhs_type = canonicalize_type_deep(e->lhs->type);
         if (!lhs_type)
         {
@@ -5218,6 +6573,90 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_ASSIGN)
     {
+        if (e->lhs && e->lhs->kind == ND_INDEX && e->lhs->lhs && e->lhs->rhs && e->rhs)
+        {
+            Node *index_expr = e->lhs;
+            check_expr(sc, index_expr->lhs);
+            check_expr(sc, index_expr->rhs);
+            check_expr(sc, e->rhs);
+
+            if (!type_is_int(index_expr->rhs->type))
+            {
+                diag_error_at(index_expr->src, index_expr->line, index_expr->col,
+                              "array index is not an integer");
+                exit(1);
+            }
+
+            Node *this_arg = NULL;
+            Type *bundle_ty = sema_bundle_indexer_base_type(index_expr->lhs, &this_arg);
+            if (bundle_ty)
+            {
+                const Symbol *indexer = sema_resolve_bundle_indexer_method(sc, bundle_ty, this_arg, index_expr->rhs, e->rhs);
+                if (!indexer)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle '%s' has no matching index setter overload '[](%s, value)'",
+                                  bundle_ty->struct_name ? bundle_ty->struct_name : "<bundle>",
+                                  node_kind_name(index_expr->rhs->kind));
+                    exit(1);
+                }
+
+                Type *ret_ty = canonicalize_type_deep(indexer->sig.ret);
+                if (indexer->sig.param_count != 3 || !ret_ty || ret_ty->kind != TY_VOID)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle index setter '[]' must have exactly two parameters (key, value) and return void");
+                    exit(1);
+                }
+
+                Node *base_expr = index_expr->lhs;
+                Node *idx_arg = index_expr->rhs;
+                Node *value_arg = e->rhs;
+
+                Node *fn_var = (Node *)xcalloc(1, sizeof(Node));
+                if (!fn_var)
+                {
+                    diag_error("out of memory while rewriting bundle index setter call");
+                    exit(1);
+                }
+
+                Node **new_args = (Node **)xcalloc(3, sizeof(Node *));
+                if (!new_args)
+                {
+                    diag_error("out of memory while rewriting bundle index setter call arguments");
+                    exit(1);
+                }
+                new_args[0] = this_arg;
+                new_args[1] = idx_arg;
+                new_args[2] = value_arg;
+
+                fn_var->kind = ND_VAR;
+                fn_var->var_ref = xstrdup(indexer->backend_name ? indexer->backend_name : indexer->name);
+                fn_var->var_is_const = 1;
+                fn_var->var_is_function = 1;
+                fn_var->line = e->line;
+                fn_var->col = e->col;
+                fn_var->src = e->src;
+
+                index_expr->lhs = NULL;
+                index_expr->rhs = NULL;
+                ast_free(index_expr);
+
+                e->kind = ND_CALL;
+                e->lhs = fn_var;
+                e->rhs = NULL;
+                e->args = new_args;
+                e->arg_count = 3;
+                e->call_name = fn_var->var_ref;
+                e->call_target = indexer->ast_node;
+                e->call_is_indirect = 0;
+
+                (void)base_expr;
+                check_expr(sc, e);
+                return;
+            }
+        }
+
         Node *lhs_base = NULL;
         Type *lhs_type = sema_prepare_assignment_lhs(sc, e, &lhs_base);
         check_expr(sc, e->rhs);
@@ -5262,7 +6701,8 @@ static void check_expr(SemaContext *sc, Node *e)
                               got, want);
                 exit(1);
             }
-            e->rhs->type = lhs_type;
+            if (!sema_new_struct_assignment_compatible(lhs_type, e->rhs))
+                e->rhs->type = lhs_type;
         }
         if (lhs_base && lhs_base->kind == ND_VAR && type_is_unsized_array(lhs_base->var_type) &&
             lhs_base->managed_length_name && lhs_base->managed_length_name[0] != '\0')
@@ -5289,7 +6729,48 @@ static void check_expr(SemaContext *sc, Node *e)
             exit(1);
         }
         check_expr(sc, e->lhs);
-        Type *ptr_ty = canonicalize_type_deep(e->lhs->type);
+        Type *operand_ty = canonicalize_type_deep(e->lhs->type);
+
+        if (operand_ty && operand_ty->kind == TY_STRUCT && operand_ty->is_bundle)
+        {
+            Type *this_ptr_ty = type_ptr(operand_ty);
+            const Symbol *dtor = sema_lookup_bundle_destructor_symbol(sc, operand_ty, this_ptr_ty);
+            if (dtor)
+            {
+                if (dtor->sig.param_count < 1)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle destructor '%s' is missing implicit this parameter",
+                                  dtor->name ? dtor->name : "<destructor>");
+                    exit(1);
+                }
+                Type *this_ty = dtor->sig.params ? dtor->sig.params[0] : NULL;
+                if (!this_ty || !type_equal(this_ty, this_ptr_ty))
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle destructor has incompatible implicit this parameter type");
+                    exit(1);
+                }
+                if (dtor->sig.param_count != 1)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle destructor must not declare explicit parameters");
+                    exit(1);
+                }
+                if (dtor->sig.ret && canonicalize_type_deep(dtor->sig.ret)->kind != TY_VOID)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle destructor must return void");
+                    exit(1);
+                }
+                e->call_name = dtor->backend_name ? dtor->backend_name : dtor->name;
+                e->call_target = dtor->ast_node;
+            }
+            e->type = &ty_i32;
+            return;
+        }
+
+        Type *ptr_ty = operand_ty;
         if (!ptr_ty || ptr_ty->kind != TY_PTR || !ptr_ty->pointee)
         {
             diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
@@ -5302,6 +6783,42 @@ static void check_expr(SemaContext *sc, Node *e)
             diag_error_at(e->lhs->src, e->lhs->line, e->lhs->col,
                           "cannot delete pointer to incomplete or void type");
             exit(1);
+        }
+
+        if (elem->kind == TY_STRUCT && elem->is_bundle)
+        {
+            const Symbol *dtor = sema_lookup_bundle_destructor_symbol(sc, elem, ptr_ty);
+            if (dtor)
+            {
+                if (dtor->sig.param_count < 1)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle destructor '%s' is missing implicit this parameter",
+                                  dtor->name ? dtor->name : "<destructor>");
+                    exit(1);
+                }
+                Type *this_ty = dtor->sig.params ? dtor->sig.params[0] : NULL;
+                if (!this_ty || !type_equal(this_ty, ptr_ty))
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle destructor has incompatible implicit this parameter type");
+                    exit(1);
+                }
+                if (dtor->sig.param_count != 1)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle destructor must not declare explicit parameters");
+                    exit(1);
+                }
+                if (dtor->sig.ret && canonicalize_type_deep(dtor->sig.ret)->kind != TY_VOID)
+                {
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle destructor must return void");
+                    exit(1);
+                }
+                e->call_name = dtor->backend_name ? dtor->backend_name : dtor->name;
+                e->call_target = dtor->ast_node;
+            }
         }
         e->type = &ty_i32; 
         return;
@@ -5467,6 +6984,175 @@ static void check_expr(SemaContext *sc, Node *e)
     if (e->kind == ND_CALL)
     {
         Node *target = e->lhs;
+        int args_checked = 0;
+        int resolved_via_extension_syntax = 0;
+
+        if (target && target->kind == ND_MEMBER && target->field_name)
+        {
+            Node *member = target;
+            const Symbol *method_sym = NULL;
+            ImportedFunctionCandidate *extension_method = NULL;
+            Type *method_bundle_ty = NULL;
+            int inject_this = 0;
+            Node *base_expr = NULL;
+
+            if (!member->is_pointer_deref && member->lhs && member->lhs->kind == ND_VAR && member->lhs->var_ref)
+            {
+                Type *bundle_ty = sema_lookup_bundle_type_by_name(sc, member->lhs->var_ref);
+                if (bundle_ty && bundle_ty->is_bundle)
+                {
+                    method_sym = sema_lookup_bundle_method_symbol(sc, bundle_ty, member->field_name, 1);
+                    method_bundle_ty = bundle_ty;
+                }
+            }
+
+            if (!method_sym && member->lhs)
+            {
+                check_expr(sc, member->lhs);
+                Type *base_ty = canonicalize_type_deep(member->lhs->type);
+                if (member->is_pointer_deref)
+                {
+                    if (base_ty && base_ty->kind == TY_PTR)
+                        base_ty = canonicalize_type_deep(base_ty->pointee);
+                    else
+                        base_ty = NULL;
+                }
+                else if (base_ty && base_ty->kind == TY_REF)
+                {
+                    base_ty = canonicalize_type_deep(base_ty->pointee);
+                }
+                else if (type_is_bundle_handle(base_ty))
+                {
+                    base_ty = canonicalize_type_deep(base_ty->pointee);
+                }
+
+                if (base_ty && base_ty->kind == TY_STRUCT && base_ty->is_bundle)
+                {
+                    int lhs_is_type_ref = member->lhs && member->lhs->module_ref;
+                    if (lhs_is_type_ref)
+                    {
+                        method_sym = sema_lookup_bundle_method_symbol(sc, base_ty, member->field_name, 1);
+                        method_bundle_ty = base_ty;
+                    }
+                    if (!method_sym && !lhs_is_type_ref)
+                    {
+                        method_sym = sema_lookup_bundle_method_symbol(sc, base_ty, member->field_name, 0);
+                        method_bundle_ty = base_ty;
+                    }
+                    if (method_sym && !lhs_is_type_ref)
+                    {
+                        inject_this = 1;
+                        base_expr = member->lhs;
+                        member->lhs = NULL;
+                    }
+                }
+            }
+
+            if (!method_sym && member->lhs && member->field_name)
+                extension_method = sema_resolve_imported_extension_call(sc, member, e, &args_checked);
+
+            if (method_sym)
+            {
+                if (method_bundle_ty && method_sym->ast_node && !method_sym->ast_node->is_exposed &&
+                    !sema_bundle_member_access_allowed(sc, method_bundle_ty))
+                {
+                    char bundle_name[128];
+                    diag_error_at(e->src, e->line, e->col,
+                                  "bundle method '%s' on '%s' is private; mark it 'expose' to call outside the bundle",
+                                  member->field_name ? member->field_name : "<anon>",
+                                  sema_pretty_bundle_name(method_bundle_ty->struct_name, bundle_name, sizeof(bundle_name)));
+                    exit(1);
+                }
+                if (inject_this)
+                {
+                    Node *this_arg = NULL;
+                    int base_is_bundle_handle = 0;
+                    if (!member->is_pointer_deref && base_expr && base_expr->type)
+                        base_is_bundle_handle = type_is_bundle_handle(base_expr->type);
+
+                    if (member->is_pointer_deref || base_is_bundle_handle)
+                    {
+                        this_arg = base_expr;
+                    }
+                    else
+                    {
+                        Node *addr = (Node *)xcalloc(1, sizeof(Node));
+                        addr->kind = ND_ADDR;
+                        addr->lhs = base_expr;
+                        addr->line = base_expr ? base_expr->line : e->line;
+                        addr->col = base_expr ? base_expr->col : e->col;
+                        addr->src = base_expr ? base_expr->src : e->src;
+                        this_arg = addr;
+                    }
+
+                    Node **new_args = (Node **)xcalloc((size_t)(e->arg_count + 1), sizeof(Node *));
+                    if (!new_args)
+                    {
+                        diag_error("out of memory while rewriting bundle method call arguments");
+                        exit(1);
+                    }
+                    new_args[0] = this_arg;
+                    for (int i = 0; i < e->arg_count; ++i)
+                        new_args[i + 1] = e->args[i];
+                    free(e->args);
+                    e->args = new_args;
+                    e->arg_count += 1;
+                }
+
+                Node *fn_var = (Node *)xcalloc(1, sizeof(Node));
+                fn_var->kind = ND_VAR;
+                fn_var->var_ref = xstrdup(method_sym->backend_name ? method_sym->backend_name : method_sym->name);
+                fn_var->var_is_const = 1;
+                fn_var->var_is_function = 1;
+                fn_var->line = e->line;
+                fn_var->col = e->col;
+                fn_var->src = e->src;
+
+                ast_free(target);
+                e->lhs = fn_var;
+                e->call_name = fn_var->var_ref;
+                e->call_target = method_sym->ast_node;
+                e->call_is_indirect = 0;
+                target = e->lhs;
+            }
+            else if (extension_method)
+            {
+                Node *receiver_arg = member->lhs;
+                member->lhs = NULL;
+
+                Node **new_args = (Node **)xcalloc((size_t)(e->arg_count + 1), sizeof(Node *));
+                if (!new_args)
+                {
+                    diag_error("out of memory while rewriting extension method call arguments");
+                    exit(1);
+                }
+                new_args[0] = receiver_arg;
+                for (int i = 0; i < e->arg_count; ++i)
+                    new_args[i + 1] = e->args[i];
+                free(e->args);
+                e->args = new_args;
+                e->arg_count += 1;
+
+                const Symbol *extension_sym = &extension_method->symbol;
+                Node *fn_var = (Node *)xcalloc(1, sizeof(Node));
+                fn_var->kind = ND_VAR;
+                fn_var->var_ref = xstrdup(extension_sym->backend_name ? extension_sym->backend_name : extension_sym->name);
+                fn_var->var_is_const = 1;
+                fn_var->var_is_function = 1;
+                fn_var->line = e->line;
+                fn_var->col = e->col;
+                fn_var->src = e->src;
+
+                ast_free(target);
+                e->lhs = fn_var;
+                e->call_name = fn_var->var_ref;
+                e->call_target = extension_sym->ast_node;
+                e->call_is_indirect = 0;
+                target = e->lhs;
+                resolved_via_extension_syntax = 1;
+            }
+        }
+
         const char *original_name = e->call_name;
         const char *resolved_name = original_name;
 
@@ -5482,7 +7168,6 @@ static void check_expr(SemaContext *sc, Node *e)
 
         const Symbol *sym_lookup = resolved_name ? symtab_get(sc->syms, resolved_name) : NULL;
         const Symbol *direct_sym = (sym_lookup && sym_lookup->kind == SYM_FUNC) ? sym_lookup : NULL;
-        int args_checked = 0;
 
         Type *func_sig = NULL;
         int call_is_indirect = 0;
@@ -5538,6 +7223,26 @@ static void check_expr(SemaContext *sc, Node *e)
         {
             func_sig = make_function_type_from_sig(&direct_sym->sig);
             call_is_indirect = 0;
+        }
+
+        if (!resolved_via_extension_syntax && direct_sym && direct_sym->is_extension_method)
+        {
+            diag_error_at(e->src, e->line, e->col,
+                          "unknown function '%s'",
+                          resolved_name ? resolved_name : (original_name ? original_name : "<unnamed>"));
+            exit(1);
+        }
+
+        if (!resolved_via_extension_syntax && resolved_name)
+        {
+            ImportedFunctionSet *auto_set = sema_find_imported_function_set(sc, resolved_name);
+            if (auto_set && imported_function_set_non_extension_count(auto_set) == 0)
+            {
+                diag_error_at(e->src, e->line, e->col,
+                              "unknown function '%s'",
+                              resolved_name);
+                exit(1);
+            }
         }
 
         if (target)
@@ -5602,7 +7307,8 @@ static void check_expr(SemaContext *sc, Node *e)
 
         if (!call_is_indirect && direct_sym && direct_sym->kind == SYM_FUNC)
         {
-            e->call_target = direct_sym->ast_node;
+            if (direct_sym->ast_node || !e->call_target)
+                e->call_target = direct_sym->ast_node;
             if (compiler_verbose_enabled())
             {
                 const char *target_name = direct_sym->name ? direct_sym->name : call_display_name;
@@ -5648,6 +7354,98 @@ static void check_expr(SemaContext *sc, Node *e)
         const char *diag_name = resolved_name ? resolved_name : (original_name ? original_name : "<call>");
 
         int expected = func_sig->func.param_count;
+        int *arg_sig_index = NULL;
+        if (!func_sig->func.is_varargs)
+        {
+            int sig_index = 0;
+            int match_ok = 1;
+            if (e->arg_count > 0)
+            {
+                arg_sig_index = (int *)xcalloc((size_t)e->arg_count, sizeof(int));
+                if (!arg_sig_index)
+                {
+                    diag_error("out of memory while validating call arguments");
+                    exit(1);
+                }
+            }
+
+            for (int ai = 0; ai < e->arg_count; ++ai)
+            {
+                if (sig_index >= func_sig->func.param_count || !func_sig->func.params)
+                {
+                    match_ok = 0;
+                    break;
+                }
+
+                int visible_sig_index = sig_index;
+                arg_sig_index[ai] = visible_sig_index;
+
+                Type *visible_ty = func_sig->func.params[visible_sig_index];
+                sig_index++;
+
+                Type *canon_visible = canonicalize_type_deep(visible_ty);
+                if (canon_visible && canon_visible->kind == TY_ARRAY && canon_visible->array.is_unsized &&
+                    sig_index < func_sig->func.param_count && func_sig->func.params)
+                {
+                    Type *hidden_ty = canonicalize_type_deep(func_sig->func.params[sig_index]);
+                    if (hidden_ty && hidden_ty->kind == TY_U64)
+                        sig_index++;
+                }
+            }
+
+            if (match_ok && sig_index < func_sig->func.param_count && func_sig->func.params)
+            {
+                if (sig_index + 1 == func_sig->func.param_count)
+                {
+                    Type *ret_ty = canonicalize_type_deep(func_sig->func.ret);
+                    Type *tail_ty = canonicalize_type_deep(func_sig->func.params[sig_index]);
+                    Type *tail_pointee = tail_ty && tail_ty->kind == TY_PTR ? canonicalize_type_deep(tail_ty->pointee) : NULL;
+                    if (ret_ty && ret_ty->kind == TY_ARRAY && ret_ty->array.is_unsized &&
+                        tail_ty && tail_ty->kind == TY_PTR && (!tail_pointee || tail_pointee->kind == TY_VOID))
+                    {
+                        sig_index++;
+                    }
+                }
+            }
+
+            if (!match_ok || sig_index != func_sig->func.param_count)
+            {
+                int visible_expected = 0;
+                for (int si = 0; si < func_sig->func.param_count; ++si)
+                {
+                    Type *visible_ty = (func_sig->func.params && si < func_sig->func.param_count)
+                                          ? func_sig->func.params[si]
+                                          : NULL;
+                    visible_expected++;
+                    Type *canon_visible = canonicalize_type_deep(visible_ty);
+                    if (canon_visible && canon_visible->kind == TY_ARRAY && canon_visible->array.is_unsized &&
+                        (si + 1) < func_sig->func.param_count && func_sig->func.params)
+                    {
+                        Type *hidden_ty = canonicalize_type_deep(func_sig->func.params[si + 1]);
+                        if (hidden_ty && hidden_ty->kind == TY_U64)
+                            si++;
+                    }
+                }
+                if (func_sig->func.param_count > e->arg_count && func_sig->func.params)
+                {
+                    Type *ret_ty = canonicalize_type_deep(func_sig->func.ret);
+                    Type *tail_ty = canonicalize_type_deep(func_sig->func.params[func_sig->func.param_count - 1]);
+                    Type *tail_pointee = tail_ty && tail_ty->kind == TY_PTR ? canonicalize_type_deep(tail_ty->pointee) : NULL;
+                    if (ret_ty && ret_ty->kind == TY_ARRAY && ret_ty->array.is_unsized &&
+                        tail_ty && tail_ty->kind == TY_PTR && (!tail_pointee || tail_pointee->kind == TY_VOID))
+                    {
+                        if (visible_expected > 0)
+                            visible_expected--;
+                    }
+                }
+                diag_error_at(e->src, e->line, e->col,
+                              "function call to '%s' expects %d argument(s) but %d provided",
+                              diag_name, visible_expected, e->arg_count);
+                exit(1);
+            }
+
+            expected = e->arg_count;
+        }
         if (!func_sig->func.is_varargs)
         {
             if (e->arg_count != expected)
@@ -5674,11 +7472,22 @@ static void check_expr(SemaContext *sc, Node *e)
 
         for (int i = 0; i < check_count; ++i)
         {
-            Type *expected_ty = (func_sig->func.params && i < expected) ? func_sig->func.params[i] : NULL;
+            int sig_param_index = i;
+            if (!func_sig->func.is_varargs && arg_sig_index && i < e->arg_count)
+                sig_param_index = arg_sig_index[i];
+
+            Type *expected_ty = (func_sig->func.params && sig_param_index < func_sig->func.param_count)
+                                    ? func_sig->func.params[sig_param_index]
+                                    : NULL;
             if (!expected_ty)
                 continue;
             if (!can_assign(expected_ty, e->args[i]))
             {
+                if (call_arg_can_use_ref_value(expected_ty, e->args[i]))
+                {
+                    e->args[i] = sema_make_ref_value_deref(e->args[i]);
+                    continue;
+                }
                 char want[64];
                 char got[64];
                 describe_type(expected_ty, want, sizeof(want));
@@ -5690,18 +7499,18 @@ static void check_expr(SemaContext *sc, Node *e)
             }
 
             int param_is_const = 0;
-            if (e->call_target && e->call_target->param_const_flags && i < e->call_target->param_count)
+            if (e->call_target && e->call_target->param_const_flags && sig_param_index < e->call_target->param_count)
             {
-                param_is_const = e->call_target->param_const_flags[i];
+                param_is_const = e->call_target->param_const_flags[sig_param_index];
             }
             else if (direct_sym && direct_sym->ast_node && direct_sym->ast_node->kind == ND_FUNC &&
-                     direct_sym->ast_node->param_const_flags && i < direct_sym->ast_node->param_count)
+                     direct_sym->ast_node->param_const_flags && sig_param_index < direct_sym->ast_node->param_count)
             {
-                param_is_const = direct_sym->ast_node->param_const_flags[i];
+                param_is_const = direct_sym->ast_node->param_const_flags[sig_param_index];
             }
-            else if (direct_sym && direct_sym->sig.param_const_flags && i < direct_sym->sig.param_count)
+            else if (direct_sym && direct_sym->sig.param_const_flags && sig_param_index < direct_sym->sig.param_count)
             {
-                param_is_const = direct_sym->sig.param_const_flags[i];
+                param_is_const = direct_sym->sig.param_const_flags[sig_param_index];
             }
             Type *canon_expected = canonicalize_type_deep(expected_ty);
             if (param_is_const)
@@ -5787,6 +7596,7 @@ static void check_expr(SemaContext *sc, Node *e)
 
         if (!call_is_indirect && !e->call_is_jump)
             inline_try_fold_call(e);
+        free(arg_sig_index);
         return;
     }
     if (e->kind == ND_VA_START)
@@ -5908,10 +7718,12 @@ static void check_expr(SemaContext *sc, Node *e)
 
         check_expr(sc, e->match_stmt.expr);
         Type *scrut_type = canonicalize_type_deep(e->match_stmt.expr->type);
-        if (!type_is_int(scrut_type))
+        int scrut_is_string = type_is_string_ptr(scrut_type);
+        int managed_string_match = (scrut_is_string && sc && sc->current_function && sc->current_function->is_managed);
+        if (!type_is_int(scrut_type) && !managed_string_match)
         {
             diag_error_at(e->match_stmt.expr->src, e->match_stmt.expr->line, e->match_stmt.expr->col,
-                          "match expression scrutinee must be integral");
+                          "match expression scrutinee must be integral, or a string in managed functions");
             exit(1);
         }
 
@@ -5919,7 +7731,7 @@ static void check_expr(SemaContext *sc, Node *e)
         MatchArm *arms = e->match_stmt.arms;
         int wildcard_index = -1;
         int value_count = 0;
-        int64_t *pattern_values = (int64_t *)xcalloc((size_t)arm_count, sizeof(int64_t));
+        int64_t *pattern_values = managed_string_match ? NULL : (int64_t *)xcalloc((size_t)arm_count, sizeof(int64_t));
         Type *result_type = NULL;
 
         for (int i = 0; i < arm_count; ++i)
@@ -5937,45 +7749,73 @@ static void check_expr(SemaContext *sc, Node *e)
             if (arm->pattern)
             {
                 check_expr(sc, arm->pattern);
-                if (!type_is_int(arm->pattern->type))
+                if (managed_string_match)
                 {
-                    if (!coerce_int_literal_to_type(arm->pattern, scrut_type, "match arm"))
+                    if (arm->pattern->kind != ND_STRING || !type_is_string_ptr(arm->pattern->type))
                     {
                         diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
-                                      "match patterns must be integer literals compatible with scrutinee");
+                                      "match patterns must be string literals when the scrutinee is a string");
                         if (pattern_values)
                             free(pattern_values);
                         exit(1);
                     }
-                }
-                if (!node_force_int_literal(arm->pattern))
-                {
-                    diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
-                                  "match patterns must be integer constants");
-                    if (pattern_values)
-                        free(pattern_values);
-                    exit(1);
-                }
-                if (arm->pattern->kind != ND_INT)
-                {
-                    diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
-                                  "match patterns must be integer constants");
-                    if (pattern_values)
-                        free(pattern_values);
-                    exit(1);
-                }
-                int64_t val = arm->pattern->int_val;
-                for (int j = 0; j < value_count; ++j)
-                {
-                    if (pattern_values[j] == val)
+                    for (int j = 0; j < i; ++j)
                     {
-                        diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
-                                      "duplicate match pattern value '%lld'", (long long)val);
-                        free(pattern_values);
-                        exit(1);
+                        MatchArm *prior = &arms[j];
+                        if (!prior->pattern)
+                            continue;
+                        if (string_literal_nodes_equal(prior->pattern, arm->pattern))
+                        {
+                            diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
+                                          "duplicate match pattern string literal");
+                            if (pattern_values)
+                                free(pattern_values);
+                            exit(1);
+                        }
                     }
                 }
-                pattern_values[value_count++] = val;
+                else
+                {
+                    if (!type_is_int(arm->pattern->type))
+                    {
+                        if (!coerce_int_literal_to_type(arm->pattern, scrut_type, "match arm"))
+                        {
+                            diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
+                                          "match patterns must be integer literals compatible with scrutinee");
+                            if (pattern_values)
+                                free(pattern_values);
+                            exit(1);
+                        }
+                    }
+                    if (!node_force_int_literal(arm->pattern))
+                    {
+                        diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
+                                      "match patterns must be integer constants");
+                        if (pattern_values)
+                            free(pattern_values);
+                        exit(1);
+                    }
+                    if (arm->pattern->kind != ND_INT)
+                    {
+                        diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
+                                      "match patterns must be integer constants");
+                        if (pattern_values)
+                            free(pattern_values);
+                        exit(1);
+                    }
+                    int64_t val = arm->pattern->int_val;
+                    for (int j = 0; j < value_count; ++j)
+                    {
+                        if (pattern_values[j] == val)
+                        {
+                            diag_error_at(arm->pattern->src, arm->pattern->line, arm->pattern->col,
+                                          "duplicate match pattern value '%lld'", (long long)val);
+                            free(pattern_values);
+                            exit(1);
+                        }
+                    }
+                    pattern_values[value_count++] = val;
+                }
             }
             else
             {
@@ -6130,6 +7970,8 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
             stmt->rhs->type = stmt->var_type;
         }
         stmt->var_type = sema_resolve_import_type(canonicalize_type_deep(stmt->var_type));
+        if (!stmt->var_is_inferred && stmt->var_type && stmt->var_type->kind == TY_STRUCT && stmt->var_type->is_bundle)
+            stmt->var_type = type_ptr(stmt->var_type);
         
         
         if (stmt->var_type && stmt->var_type->kind == TY_PTR && stmt->rhs && stmt->rhs->kind == ND_INIT_LIST && !stmt->rhs->init.is_zero)
@@ -6227,7 +8069,13 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
                     return 1;
                 }
                 if (stmt->var_type)
-                    stmt->rhs->type = stmt->var_type;
+                {
+                    if (!(stmt->rhs->kind == ND_NEW && stmt->var_type->kind == TY_ARRAY && stmt->var_type->array.is_unsized))
+                    {
+                        if (!sema_new_struct_assignment_compatible(stmt->var_type, stmt->rhs))
+                            stmt->rhs->type = stmt->var_type;
+                    }
+                }
             }
         }
 
@@ -6246,7 +8094,40 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
             return 1;
         }
         check_expr(sc, stmt->lhs);
-        Type *ptr_ty = canonicalize_type_deep(stmt->lhs->type);
+        Type *operand_ty = canonicalize_type_deep(stmt->lhs->type);
+
+        if (operand_ty && operand_ty->kind == TY_STRUCT && operand_ty->is_bundle)
+        {
+            Type *this_ptr_ty = type_ptr(operand_ty);
+            const Symbol *dtor = sema_lookup_bundle_destructor_symbol(sc, operand_ty, this_ptr_ty);
+            if (dtor)
+            {
+                if (dtor->sig.param_count != 1)
+                {
+                    diag_error_at(stmt->src, stmt->line, stmt->col,
+                                  "bundle destructor must only take implicit this parameter");
+                    return 1;
+                }
+                if (dtor->sig.ret && canonicalize_type_deep(dtor->sig.ret)->kind != TY_VOID)
+                {
+                    diag_error_at(stmt->src, stmt->line, stmt->col,
+                                  "bundle destructor must return void");
+                    return 1;
+                }
+                Type *this_ty = dtor->sig.params ? dtor->sig.params[0] : NULL;
+                if (!this_ty || !type_equal(this_ty, this_ptr_ty))
+                {
+                    diag_error_at(stmt->src, stmt->line, stmt->col,
+                                  "bundle destructor has incompatible implicit this parameter type");
+                    return 1;
+                }
+                stmt->call_name = dtor->backend_name ? dtor->backend_name : dtor->name;
+                stmt->call_target = dtor->ast_node;
+            }
+            return 0;
+        }
+
+        Type *ptr_ty = operand_ty;
         if (!ptr_ty || ptr_ty->kind != TY_PTR || !ptr_ty->pointee)
         {
             diag_error_at(stmt->lhs->src, stmt->lhs->line, stmt->lhs->col,
@@ -6259,6 +8140,35 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
             diag_error_at(stmt->lhs->src, stmt->lhs->line, stmt->lhs->col,
                           "cannot delete pointer to incomplete or void type");
             return 1;
+        }
+
+        if (elem->kind == TY_STRUCT && elem->is_bundle)
+        {
+            const Symbol *dtor = sema_lookup_bundle_destructor_symbol(sc, elem, ptr_ty);
+            if (dtor)
+            {
+                if (dtor->sig.param_count != 1)
+                {
+                    diag_error_at(stmt->src, stmt->line, stmt->col,
+                                  "bundle destructor must only take implicit this parameter");
+                    return 1;
+                }
+                if (dtor->sig.ret && canonicalize_type_deep(dtor->sig.ret)->kind != TY_VOID)
+                {
+                    diag_error_at(stmt->src, stmt->line, stmt->col,
+                                  "bundle destructor must return void");
+                    return 1;
+                }
+                Type *this_ty = dtor->sig.params ? dtor->sig.params[0] : NULL;
+                if (!this_ty || !type_equal(this_ty, ptr_ty))
+                {
+                    diag_error_at(stmt->src, stmt->line, stmt->col,
+                                  "bundle destructor has incompatible implicit this parameter type");
+                    return 1;
+                }
+                stmt->call_name = dtor->backend_name ? dtor->backend_name : dtor->name;
+                stmt->call_target = dtor->ast_node;
+            }
         }
         return 0;
     }
@@ -6376,10 +8286,12 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
         }
         check_expr(sc, stmt->switch_stmt.expr);
         Type *cond_type = canonicalize_type_deep(stmt->switch_stmt.expr->type);
-        if (!type_is_int(cond_type))
+        int cond_is_string = type_is_string_ptr(cond_type);
+        int managed_string_switch = (cond_is_string && fn && fn->is_managed);
+        if (!type_is_int(cond_type) && !managed_string_switch)
         {
             diag_error_at(stmt->switch_stmt.expr->src, stmt->switch_stmt.expr->line, stmt->switch_stmt.expr->col,
-                          "switch selector must be an integral type");
+                          "switch selector must be an integral type, or a string in managed functions");
             return 1;
         }
 
@@ -6387,7 +8299,7 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
         SwitchCase *cases = stmt->switch_stmt.cases;
         int has_default = 0;
         int value_used = 0;
-        int64_t *case_values = (case_count > 0) ? (int64_t *)xcalloc((size_t)case_count, sizeof(int64_t)) : NULL;
+        int64_t *case_values = (!managed_string_switch && case_count > 0) ? (int64_t *)xcalloc((size_t)case_count, sizeof(int64_t)) : NULL;
 
         for (int i = 0; i < case_count; ++i)
         {
@@ -6418,47 +8330,75 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
             }
 
             check_expr(sc, entry->value);
-            if (!type_is_int(entry->value->type))
+            if (managed_string_switch)
             {
-                if (!coerce_int_literal_to_type(entry->value, cond_type, "switch case"))
+                if (entry->value->kind != ND_STRING || !type_is_string_ptr(entry->value->type))
                 {
                     diag_error_at(entry->value->src, entry->value->line, entry->value->col,
-                                  "switch case labels must be integer constants");
+                                  "switch case labels must be string literals when the selector is a string");
                     if (case_values)
                         free(case_values);
                     return 1;
                 }
-            }
-            if (!node_force_int_literal(entry->value))
-            {
-                diag_error_at(entry->value->src, entry->value->line, entry->value->col,
-                              "switch case labels must be integral literals");
-                if (case_values)
-                    free(case_values);
-                return 1;
-            }
-            if (entry->value->kind != ND_INT)
-            {
-                diag_error_at(entry->value->src, entry->value->line, entry->value->col,
-                              "switch case labels must be integral literals");
-                if (case_values)
-                    free(case_values);
-                return 1;
-            }
-
-            int64_t val = entry->value->int_val;
-            for (int j = 0; j < value_used; ++j)
-            {
-                if (case_values && case_values[j] == val)
+                for (int j = 0; j < i; ++j)
                 {
-                    diag_error_at(entry->value->src, entry->value->line, entry->value->col,
-                                  "duplicate switch case label '%lld'", (long long)val);
-                    free(case_values);
-                    return 1;
+                    SwitchCase *prior = cases ? &cases[j] : NULL;
+                    if (!prior || prior->is_default || !prior->value)
+                        continue;
+                    if (string_literal_nodes_equal(prior->value, entry->value))
+                    {
+                        diag_error_at(entry->value->src, entry->value->line, entry->value->col,
+                                      "duplicate switch case string literal");
+                        if (case_values)
+                            free(case_values);
+                        return 1;
+                    }
                 }
             }
-            if (case_values)
-                case_values[value_used++] = val;
+            else
+            {
+                if (!type_is_int(entry->value->type))
+                {
+                    if (!coerce_int_literal_to_type(entry->value, cond_type, "switch case"))
+                    {
+                        diag_error_at(entry->value->src, entry->value->line, entry->value->col,
+                                      "switch case labels must be integer constants");
+                        if (case_values)
+                            free(case_values);
+                        return 1;
+                    }
+                }
+                if (!node_force_int_literal(entry->value))
+                {
+                    diag_error_at(entry->value->src, entry->value->line, entry->value->col,
+                                  "switch case labels must be integral literals");
+                    if (case_values)
+                        free(case_values);
+                    return 1;
+                }
+                if (entry->value->kind != ND_INT)
+                {
+                    diag_error_at(entry->value->src, entry->value->line, entry->value->col,
+                                  "switch case labels must be integral literals");
+                    if (case_values)
+                        free(case_values);
+                    return 1;
+                }
+
+                int64_t val = entry->value->int_val;
+                for (int j = 0; j < value_used; ++j)
+                {
+                    if (case_values && case_values[j] == val)
+                    {
+                        diag_error_at(entry->value->src, entry->value->line, entry->value->col,
+                                      "duplicate switch case label '%lld'", (long long)val);
+                        free(case_values);
+                        return 1;
+                    }
+                }
+                if (case_values)
+                    case_values[value_used++] = val;
+            }
         }
 
         sc->switch_depth++;
@@ -6513,15 +8453,22 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
                               "non-void function must return a value");
                 return 1;
             }
-            check_expr(sc, stmt->lhs);
             Type *decl = canonicalize_type_deep(fn->ret_type ? fn->ret_type : &ty_i32);
-            if (!can_assign(decl, stmt->lhs))
+            if (stmt->lhs->kind == ND_INIT_LIST)
             {
-                diag_error_at(stmt->src, stmt->line, stmt->col,
-                              "return type mismatch: returning %d but function returns %d",
-                              stmt->lhs->type ? stmt->lhs->type->kind : -1,
-                              decl ? decl->kind : -1);
-                return 1;
+                check_initializer_for_type(sc, stmt->lhs, decl);
+            }
+            else
+            {
+                check_expr(sc, stmt->lhs);
+                if (!can_assign(decl, stmt->lhs))
+                {
+                    diag_error_at(stmt->src, stmt->line, stmt->col,
+                                  "return type mismatch: returning %d but function returns %d",
+                                  stmt->lhs->type ? stmt->lhs->type->kind : -1,
+                                  decl ? decl->kind : -1);
+                    return 1;
+                }
             }
             stmt->type = decl;
         }
@@ -6584,6 +8531,8 @@ static int sema_check_global_decl(SemaContext *sc, Node *decl)
     }
 
     decl->var_type = canonicalize_type_deep(decl->var_type);
+    if (decl->var_type && decl->var_type->kind == TY_STRUCT && decl->var_type->is_bundle)
+        decl->var_type = type_ptr(decl->var_type);
     Type *ty = decl->var_type;
     if (!ty)
     {
@@ -6697,7 +8646,11 @@ static int sema_check_global_decl(SemaContext *sc, Node *decl)
                       decl->var_name);
         return 1;
     }
-    decl->rhs->type = ty;
+    if (!sema_new_struct_assignment_compatible(ty, decl->rhs))
+        decl->rhs->type = ty;
+
+    if (sema_global_uses_runtime_bundle_init(decl))
+        return 0;
 
     if (!sema_global_initializer_is_const(decl->rhs))
     {
@@ -6729,6 +8682,24 @@ static int sema_check_function(SemaContext *sc, Node *fn)
             return 1;
         }
     }
+    if (fn->is_extension_method)
+    {
+        if (fn->param_count < 1)
+        {
+            diag_error_at(fn->src, fn->line, fn->col,
+                          "extension function '%s' must declare a receiver parameter marked with 'this'",
+                          fn->name ? fn->name : "<unnamed>");
+            return 1;
+        }
+        Type *receiver_ty = canonicalize_type_deep(fn->param_types ? fn->param_types[0] : NULL);
+        if (!receiver_ty || receiver_ty->kind == TY_VOID)
+        {
+            diag_error_at(fn->src, fn->line, fn->col,
+                          "extension function '%s' receiver type cannot be void",
+                          fn->name ? fn->name : "<unnamed>");
+            return 1;
+        }
+    }
     if (fn->is_chancecode || fn->is_literal)
         return 0;
     Node *body = fn->body;
@@ -6737,6 +8708,8 @@ static int sema_check_function(SemaContext *sc, Node *fn)
         diag_error_at(fn->src, fn->line, fn->col, "missing function body");
         return 1;
     }
+    Node *previous_function = sc->current_function;
+    sc->current_function = fn;
     scope_push(sc);
     for (int i = 0; i < fn->param_count; i++)
     {
@@ -6752,6 +8725,7 @@ static int sema_check_function(SemaContext *sc, Node *fn)
     else
         rc = sema_check_statement(sc, body, fn, &has_return);
     scope_pop(sc);
+    sc->current_function = previous_function;
     if (rc)
         return rc;
     if ((!fn->ret_type || fn->ret_type->kind != TY_VOID) && !has_return)

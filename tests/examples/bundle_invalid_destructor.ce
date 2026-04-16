@@ -1,0 +1,13 @@
+bundle Bad {
+    i32 value;
+
+    -this(i32 code) {
+        ret;
+    }
+};
+
+entrypoint expose fun main() -> i32 {
+    Bad b = new Bad();
+    delete b;
+    ret 0;
+}

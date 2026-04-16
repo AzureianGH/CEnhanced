@@ -1,0 +1,13 @@
+module Tmp.IOSplitAliasFail;
+
+bring Std.IO as IO;
+bring Std.String.Extensions as StrExt;
+
+entrypoint expose fun main() -> i32
+{
+    string input = IO.ReadLine();
+    string[] parts = input.Split();
+    if (parts == null)
+        ret 1;
+    ret 0;
+}

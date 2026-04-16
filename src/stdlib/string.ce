@@ -2,7 +2,7 @@ module Std.String;
 
 bring Std.Memory as Mem;
 
-expose fun strcmp(char* str1, char* str2) -> i32
+expose fun StrCmp(char* str1, char* str2) -> i32
 {
     if (str1 == 0 as char* || str2 == 0 as char*)
         ret str1 == str2 ? 0 : (str1 == 0 as char* ? -1 : 1);
@@ -20,7 +20,7 @@ expose fun strcmp(char* str1, char* str2) -> i32
     ret (c1[idx] as i32) - (c2[idx] as i32);
 }
 
-expose fun strlen(char* str) -> i32
+expose fun StrLen(char* str) -> i32
 {
     if (str == 0 as char*)
         ret 0;
@@ -32,7 +32,7 @@ expose fun strlen(char* str) -> i32
     ret len;
 }
 
-expose fun strcpy(char* dest, char* src) -> char*
+expose fun StrCpy(char* dest, char* src) -> char*
 {
     if (dest == 0 as char*)
         ret 0 as char*;
@@ -47,28 +47,28 @@ expose fun strcpy(char* dest, char* src) -> char*
         dest[idx] = src[idx];
         idx++;
     }
-    dest[idx] = 0; // Null-terminate
+    dest[idx] = 0;
     ret dest;
 }
 
-expose fun strcat(char* dest, char* src) -> char*
+expose fun StrCat(char* dest, char* src) -> char*
 {
     if (dest == 0 as char*)
         ret 0 as char*;
     if (src == 0 as char*)
         ret dest;
-    i32 dest_len = strlen(dest);
+    i32 dest_len = StrLen(dest);
     i32 idx = 0;
     while (src[idx] != 0)
     {
         dest[dest_len + idx] = src[idx];
         idx++;
     }
-    dest[dest_len + idx] = 0; // Null-terminate
+    dest[dest_len + idx] = 0;
     ret dest;
 }
 
-expose fun strchr(char* str, char ch) -> char*
+expose fun StrChr(char* str, char ch) -> char*
 {
     if (str == 0 as char*)
         ret 0 as char*;
@@ -84,12 +84,12 @@ expose fun strchr(char* str, char ch) -> char*
     ret 0 as char*;
 }
 
-expose fun strstr(char* haystack, char* needle) -> char*
+expose fun StrStr(char* haystack, char* needle) -> char*
 {
     if (haystack == 0 as char* || needle == 0 as char*)
         ret 0 as char*;
-    i32 hlen = strlen(haystack);
-    i32 nlen = strlen(needle);
+    i32 hlen = StrLen(haystack);
+    i32 nlen = StrLen(needle);
     if (nlen == 0)
     {
         ret haystack;
@@ -113,12 +113,12 @@ expose fun strstr(char* haystack, char* needle) -> char*
     ret 0 as char*;
 }
 
-expose fun ends_with(char* str, char* suffix) -> i32
+expose fun EndsWith(char* str, char* suffix) -> i32
 {
     if (str == 0 as char* || suffix == 0 as char*)
         ret 0;
-    i32 str_len = strlen(str);
-    i32 suffix_len = strlen(suffix);
+    i32 str_len = StrLen(str);
+    i32 suffix_len = StrLen(suffix);
     if (suffix_len > str_len)
     {
         ret 0;
@@ -133,12 +133,12 @@ expose fun ends_with(char* str, char* suffix) -> i32
     ret 1;
 }
 
-expose fun strdup(char* str) -> char*
+expose fun StrDup(char* str) -> char*
 {
     if (str == 0 as char*)
         ret 0 as char*;
-    i32 len = strlen(str);
-    void* mem = Mem.alloc(len + 1);
+    i32 len = StrLen(str);
+    void* mem = Mem.Alloc(len + 1);
     if (mem == 0 as void*)
     {
         ret 0 as char*;
@@ -148,11 +148,11 @@ expose fun strdup(char* str) -> char*
     {
         dest[i] = str[i];
     }
-    dest[len] = 0; // Null-terminate
+    dest[len] = 0;
     ret dest;
 }
 
-expose fun strncmp(char* str1, char* str2, i32 n) -> i32
+expose fun StrNCmp(char* str1, char* str2, i32 n) -> i32
 {
     if (n <= 0)
         ret 0;
@@ -174,15 +174,15 @@ expose fun strncmp(char* str1, char* str2, i32 n) -> i32
     ret (str1[idx] as i32) - (str2[idx] as i32);
 }
 
-expose fun starts_with(char* str, char* prefix) -> i32
+expose fun StartsWith(char* str, char* prefix) -> i32
 {
     if (str == 0 as char* || prefix == 0 as char*)
         ret 0;
-    i32 pfx_len = strlen(prefix);
-    ret strncmp(str, prefix, pfx_len) == 0 ? 1 : 0;
+    i32 pfx_len = StrLen(prefix);
+    ret StrNCmp(str, prefix, pfx_len) == 0 ? 1 : 0;
 }
 
-expose fun contains(char* haystack, char* needle) -> i32
+expose fun Contains(char* haystack, char* needle) -> i32
 {
-    ret strstr(haystack, needle) != 0 as char* ? 1 : 0;
+    ret StrStr(haystack, needle) != 0 as char* ? 1 : 0;
 }

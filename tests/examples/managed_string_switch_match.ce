@@ -1,0 +1,62 @@
+managed module Test.ManagedStringSwitchMatch;
+
+entrypoint expose fun main(string[] args) -> i32
+{
+    i32 flag_hits = 0;
+
+    for (i32 i = 0; i < args.length; i++)
+    {
+        switch (args[i])
+        {
+            case "--version":
+            case "--v":
+            case "-v":
+                flag_hits += 1;
+                break;
+            default:
+                break;
+        }
+
+        i32 mapped = match (args[i])
+        {
+            "--version" => 1,
+            "--v" => 2,
+            "-v" => 3,
+            _ => 0,
+        };
+
+        if (mapped > 0 && flag_hits <= 0)
+            ret 10;
+    }
+
+    string probe = "--v";
+    i32 probe_match = match (probe)
+    {
+        "--version" => 1,
+        "--v" => 2,
+        "-v" => 3,
+        _ => 0,
+    };
+    if (probe_match != 2)
+        ret 11;
+
+    i32 probe_switch = -1;
+    switch (probe)
+    {
+        case "--version":
+            probe_switch = 1;
+            break;
+        case "--v":
+        case "-v":
+            probe_switch = 2;
+            break;
+        default:
+            probe_switch = 3;
+            break;
+    }
+
+    if (probe_switch != 2)
+        ret 12;
+
+    ret 0;
+}

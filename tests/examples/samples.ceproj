@@ -1,6 +1,6 @@
 # Chance sample project
 type=Console
-output=build/SampleTests.cclib
+output=build/SampleTests
 ce=call_printf.ce, test_chance.ce
 cclib=libtest.cclib
 #obj=test_mac.o

@@ -1,0 +1,28 @@
+module T;
+bring Std.Memory as Memory;
+bring Std.IO as IO;
+bring Std.Environment as Env;
+
+struct SmallTest {
+    i32 smallValue;
+    i32 testVar;
+};
+
+hide fun assert(bool c, char* msg) -> void {
+    if (c) { IO.print("PASS %s\n", msg); }
+    else { IO.print("FAIL %s\n", msg); Env.exit(1); }
+}
+
+entrypoint expose fun main() -> i32 {
+    SmallTest* addptr = Memory.alloc(sizeof(SmallTest) * 2) as SmallTest*;
+    addptr[0].smallValue = 5;
+    addptr[0].testVar = 10;
+    addptr[1].smallValue = 123;
+    addptr[1].testVar = 456;
+    assert(addptr[0].smallValue == 5, "a0.small");
+    assert(addptr[0].testVar == 10, "a0.test");
+    assert(addptr[1].smallValue == 123, "a1.small");
+    assert(addptr[1].testVar == 456, "a1.test");
+    Memory.dealloc(addptr as void*);
+    ret 0;
+}

@@ -1,0 +1,125 @@
+ccbytecode 3
+
+.extern Std_IO_print_ptr_to_char params=(ptr) returns=i32 varargs
+.extern Std_IO_printnl_ptr_to_char params=(ptr) returns=i32 varargs
+.extern Std_String_strcmp_ptr_to_char_ptr_to_char params=(ptr,ptr) returns=i32
+.extern Std_String_strlen_ptr_to_char params=(ptr) returns=i32
+.extern Std_String_strcpy_ptr_to_char_ptr_to_char params=(ptr,ptr) returns=ptr
+.extern Std_String_strcat_ptr_to_char_ptr_to_char params=(ptr,ptr) returns=ptr
+.extern Std_String_strchr_ptr_to_char_char params=(ptr,i8) returns=ptr
+.extern Std_String_strstr_ptr_to_char_ptr_to_char params=(ptr,ptr) returns=ptr
+.extern Std_String_ends_with_ptr_to_char_ptr_to_char params=(ptr,ptr) returns=i32
+.extern Std_String_strdup_ptr_to_char params=(ptr) returns=ptr
+.extern Std_String_strncmp_ptr_to_char_ptr_to_char_i32 params=(ptr,ptr,i32) returns=i32
+.extern Std_Memory_memcpy_ptr_to_void_ptr_to_void_i32 params=(ptr,ptr,i32) returns=ptr
+.extern Std_Memory_memset_ptr_to_void_u8_i32 params=(ptr,u8,i32) returns=ptr
+.extern Std_Memory_memcmp_ptr_to_void_ptr_to_void_i32 params=(ptr,ptr,i32) returns=i32
+.extern Std_Memory_memmove_ptr_to_void_ptr_to_void_i32 params=(ptr,ptr,i32) returns=ptr
+.extern Std_Memory_memchr_ptr_to_void_u8_i32 params=(ptr,u8,i32) returns=ptr
+.extern Std_Memory_memrchr_ptr_to_void_u8_i32 params=(ptr,u8,i32) returns=ptr
+.extern Std_Memory_bzero_ptr_to_void_i32 params=(ptr,i32) returns=ptr
+.extern Std_Memory_bcopy_ptr_to_void_ptr_to_void_i32 params=(ptr,ptr,i32) returns=ptr
+.extern Std_Memory_alloc_i32 params=(i32) returns=ptr
+.extern Std_Memory_dealloc_ptr_to_void params=(ptr) returns=void
+.extern Std_Memory_realloc_ptr_to_void_i32 params=(ptr,i32) returns=ptr
+.extern Std_Memory_cleanalloc_i32_i32 params=(i32,i32) returns=ptr
+.extern Std_Memory_swap_ptr_to_void_ptr_to_void_i32 params=(ptr,ptr,i32) returns=void
+.extern Std_IO_format_ptr_to_char params=(ptr) returns=i32 varargs
+.extern Std_IO_sprintf_ptr_to_char_i32_ptr_to_char params=(ptr,i32,ptr) returns=i32 varargs
+.extern Std_IO_readin params=() returns=ptr
+.extern Std_File_open_ptr_to_char_ptr_to_char params=(ptr,ptr) returns=ptr
+.extern Std_File_close_ptr_to_void params=(ptr) returns=i32
+.extern Std_File_read_ptr_to_void_ptr_to_void_i32 params=(ptr,ptr,i32) returns=i32
+.extern Std_File_write_ptr_to_void_ptr_to_void_i32 params=(ptr,ptr,i32) returns=i32
+.extern Std_File_flush_ptr_to_void params=(ptr) returns=i32
+.extern Std_File_seek_ptr_to_void_i64_i32 params=(ptr,i64,i32) returns=i32
+.extern Std_File_tell_ptr_to_void params=(ptr) returns=i64
+.extern Std_File_read_all_ptr_to_char_ptr_to_ptr_to_void_ptr_to_i32 params=(ptr,ptr,ptr) returns=i32
+.extern Std_File_write_all_ptr_to_char_ptr_to_void_i32 params=(ptr,ptr,i32) returns=i32
+.extern Std_File_exists_ptr_to_char params=(ptr) returns=i32
+.extern Std_File_remove_ptr_to_char params=(ptr) returns=i32
+.extern Std_File_getcwd params=() returns=ptr
+.extern Std_Net_last_error params=() returns=i32
+.extern Std_Net_init params=() returns=i32
+.extern Std_Net_cleanup params=() returns=void
+.extern Std_Net_tcp_listen_i32_i32 params=(i32,i32) returns=i32
+.extern Std_Net_tcp_accept_i32 params=(i32) returns=i32
+.extern Std_Net_tcp_connect_ptr_to_char_i32 params=(ptr,i32) returns=i32
+.extern Std_Net_tcp_send_all_i32_ptr_to_void_i32 params=(i32,ptr,i32) returns=i32
+.extern Std_Net_tcp_recv_i32_ptr_to_void_i32 params=(i32,ptr,i32) returns=i32
+.extern Std_Net_tcp_shutdown_i32_i32 params=(i32,i32) returns=i32
+.extern Std_Net_tcp_close_i32 params=(i32) returns=i32
+.extern Std_Net_htonl_u32 params=(u32) returns=u32
+.extern Std_Net_htons_u16 params=(u16) returns=u16
+.extern Std_Net_inetaddr_ptr_to_char params=(ptr) returns=u32
+.extern Std_Environment_exit_i32 params=(i32) returns=void
+.extern __cert__malloc params=(u64) returns=ptr
+.extern __cert__free params=(ptr) returns=void
+.extern __cert__realloc params=(ptr,u64) returns=ptr
+.extern __cert__memcpy params=(ptr,ptr,u64) returns=ptr
+.extern __cert__memset params=(ptr,i32,u64) returns=ptr
+.extern __cert__strlen params=(ptr,ptr,u64,ptr) returns=u64
+.extern __cert__strcmp params=(ptr,ptr) returns=i32
+.extern __cert__exception_enter_try params=() returns=void
+.extern __cert__exception_leave_try params=() returns=void
+.extern __cert__exception_has_pending params=() returns=i32
+.extern __cert__exception_clear params=() returns=void
+.extern __cert__exception_get_code params=() returns=i32
+.extern __cert__exception_get_category params=() returns=ptr
+.extern __cert__exception_get_message params=() returns=ptr
+.extern __cert__exception_get_file params=() returns=ptr
+.extern __cert__exception_get_line params=() returns=u64
+.extern __cert__exception_get_symbol params=() returns=ptr
+.extern __cert__exception_matches_type params=(ptr) returns=i32
+.extern __cert__exception_propagate params=() returns=void
+.no-return __cert__exception_propagate
+.extern __cert__runtime_error_ex params=(i32,ptr,ptr,ptr,u64,ptr) returns=void
+.no-return __cert__runtime_error_ex
+.extern __cert__runtime_error params=(ptr,ptr) returns=void
+.no-return __cert__runtime_error
+.extern __cert__panic params=(ptr) returns=void
+.no-return __cert__panic
+.extern __cert__GC__prep_exit params=() returns=void
+.extern __cert__GC__prep_enter params=() returns=void
+.extern __cert__GC__add_ptr params=(ptr) returns=void
+.extern __cert__GC__remove_ptr params=(ptr) returns=void
+.extern __cert__new params=(u64) returns=ptr
+.extern __cert__delete params=(ptr) returns=void
+.extern __cert__box_i64 params=(i64,ptr) returns=ptr
+.extern __cert__box_f64 params=(f64,ptr) returns=ptr
+.extern __cert__box_ptr params=(ptr,ptr) returns=ptr
+.extern __cert__unbox_i64 params=(ptr,ptr,ptr,u64,ptr) returns=i64
+.extern __cert__unbox_f64 params=(ptr,ptr,ptr,u64,ptr) returns=f64
+.extern __cert__unbox_ptr params=(ptr,ptr,ptr,u64,ptr) returns=ptr
+.extern __cert__object_is_type params=(ptr,ptr) returns=i32
+.extern __cert__null_deref params=(ptr,u64,ptr) returns=void
+.extern __cert__null_deref_fallback params=(ptr,u64,ptr) returns=ptr
+
+.func __cert__entry_main ret=i32 params=0 locals=4 hidden
+.locals ptr i32 ptr i32
+  const_str "X %d\x0A"
+  store_local 0
+  const i32 1
+  store_local 1
+  load_local 0
+  load_local 1
+  call Std_IO_print_ptr_to_char i32 (ptr,i32) varargs
+  drop i32
+  const_str "Y %d"
+  store_local 2
+  const i32 2
+  store_local 3
+  load_local 2
+  load_local 3
+  call Std_IO_printnl_ptr_to_char i32 (ptr,i32) varargs
+  drop i32
+  const i32 0
+  ret
+.endfunc
+.preserve __cert__entry_main
+.func main ret=i32 params=2 locals=0
+.params i32 ptr
+  call __cert__entry_main i32 ()
+  ret
+.endfunc
+.preserve main

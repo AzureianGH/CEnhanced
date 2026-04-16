@@ -50,7 +50,7 @@ int validate_driver_options(const DriverValidationState *state)
       if (*state->ce_count == 0)
     {
         fprintf(stderr,
-                "error: -Sccb without backend requires at least one .ce/.cin input\n");
+                "error: -Sccb without backend requires at least one source input (.ce/.cin/.c/.h)\n");
       return 2;
     }
   }
@@ -85,12 +85,12 @@ int validate_driver_options(const DriverValidationState *state)
     }
     if (*state->ccb_count > 0 || *state->obj_count > 0 || *state->asm_count > 0)
     {
-      fprintf(stderr, "error: --library currently accepts only .ce/.cin and .cclib inputs\n");
+      fprintf(stderr, "error: --library currently accepts source inputs and .cclib inputs only\n");
       return 2;
     }
     if (*state->ce_count == 0 && *state->cclib_count == 0)
     {
-      fprintf(stderr, "error: --library requires at least one .ce/.cin or .cclib input\n");
+      fprintf(stderr, "error: --library requires at least one source input or .cclib input\n");
       return 2;
     }
     if (!*state->export_executable)
@@ -136,7 +136,7 @@ int validate_driver_options(const DriverValidationState *state)
   if (*state->language_standard == CHANCE_STD_H26 && *state->implicit_void_function)
   {
     fprintf(stderr,
-            "error: --implicit-void-function is only available in H27 mode\n");
+            "error: --implicit-void-function is only available in H27+ mode\n");
     return 2;
   }
 

@@ -6,7 +6,7 @@
 
 void usage(const char *prog)
 {
-        fprintf(stderr, "Usage: %s [options] input.ce|input.cin [more.ce|more.cin ...]\n", prog);
+        fprintf(stderr, "Usage: %s [options] input.ce|input.cin|input.c|input.h [more sources ...]\n", prog);
   fprintf(stderr, "       %s [options] project.ceproj\n", prog);
   fprintf(stderr, "       %s new <template> [name]\n", prog);
   fprintf(stderr, "Options:\n");
@@ -17,6 +17,10 @@ void usage(const char *prog)
           "  -Sccb             Stop after emitting Chance bytecode (.ccb)\n");
   fprintf(stderr,
           "  -O0|-O1|-O2|-O3   Select optimization level (default -O0)\n");
+  fprintf(stderr,
+          "  -std=<dialect>    C frontend dialect: c23|gnu23 (default gnu23)\n");
+  fprintf(stderr,
+          "  --std <dialect>   Alias for -std=<dialect>\n");
   fprintf(stderr,
           "  -g                Emit debug symbols in assembler/link stages\n");
   fprintf(stderr,
@@ -72,7 +76,9 @@ void usage(const char *prog)
   fprintf(stderr,
           "  -H26             Compile in H26 language mode\n");
   fprintf(stderr,
-          "  -H27             Compile in H27 language mode (default)\n");
+          "  -H27             Compile in H27 language mode\n");
+  fprintf(stderr,
+          "  -H28             Compile in H28 language mode (default)\n");
   fprintf(stderr, "  --library         Emit a .cclib library instead of "
                   "compiling/linking\n");
         fprintf(stderr, "  --export-exe      Emit native launcher executable with embedded .cclib payload\n");
@@ -101,6 +107,8 @@ int ends_with_icase(const char *s, const char *suf)
 int is_ce_source_arg(const char *path)
 {
         return path && (ends_with_icase(path, ".ce") || ends_with_icase(path, ".cin") ||
+                                                                        ends_with_icase(path, ".c") ||
+                                                                        ends_with_icase(path, ".h") ||
                                                                         ends_with_icase(path, ".ceproj"));
 }
 

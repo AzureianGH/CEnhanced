@@ -34,6 +34,12 @@ static int locate_cclib_path(const char *exe_dir, const char *subdir,
                CHANCE_PATH_SEP, filename);
       if (is_regular_file(out))
         return 1;
+
+      snprintf(out, outsz, "%s%cshare%cchance%c%s%c%s", parent,
+               CHANCE_PATH_SEP, CHANCE_PATH_SEP, CHANCE_PATH_SEP, subdir,
+               CHANCE_PATH_SEP, filename);
+      if (is_regular_file(out))
+        return 1;
     }
   }
 
@@ -51,10 +57,37 @@ static int locate_cclib_path(const char *exe_dir, const char *subdir,
     home_env = getenv("CHANCE_ROOT");
   if (home_env && home_env[0])
   {
-    snprintf(out, outsz, "%s%c%s%c%s", home_env, CHANCE_PATH_SEP, subdir,
+    char home_base[1024];
+    snprintf(home_base, sizeof(home_base), "%s", home_env);
+
+    if (is_regular_file(home_base))
+    {
+      char parent[1024];
+      if (parent_directory(home_base, parent, sizeof(parent)) == 0 && parent[0])
+        snprintf(home_base, sizeof(home_base), "%s", parent);
+    }
+
+    snprintf(out, outsz, "%s%c%s%c%s", home_base, CHANCE_PATH_SEP, subdir,
              CHANCE_PATH_SEP, filename);
     if (is_regular_file(out))
       return 1;
+
+    snprintf(out, outsz, "%s%cshare%cchance%c%s%c%s", home_base,
+             CHANCE_PATH_SEP, CHANCE_PATH_SEP, CHANCE_PATH_SEP, subdir,
+             CHANCE_PATH_SEP, filename);
+    if (is_regular_file(out))
+      return 1;
+
+    char home_parent[1024];
+    if (parent_directory(home_base, home_parent, sizeof(home_parent)) == 0 &&
+        home_parent[0])
+    {
+      snprintf(out, outsz, "%s%cshare%cchance%c%s%c%s", home_parent,
+               CHANCE_PATH_SEP, CHANCE_PATH_SEP, CHANCE_PATH_SEP, subdir,
+               CHANCE_PATH_SEP, filename);
+      if (is_regular_file(out))
+        return 1;
+    }
   }
 
   const char *path_env = getenv("PATH");
@@ -72,6 +105,16 @@ static int locate_cclib_path(const char *exe_dir, const char *subdir,
         char candidate[1024];
         if (snprintf(candidate, sizeof(candidate), "%.*s/%s/%s", (int)seg_len,
                      s, subdir, filename) > 0)
+        {
+          if (is_regular_file(candidate))
+          {
+            snprintf(out, outsz, "%s", candidate);
+            return 1;
+          }
+        }
+
+        if (snprintf(candidate, sizeof(candidate), "%.*s/../share/chance/%s/%s",
+                     (int)seg_len, s, subdir, filename) > 0)
         {
           if (is_regular_file(candidate))
           {

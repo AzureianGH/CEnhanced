@@ -1233,6 +1233,7 @@ typedef struct LibraryStruct
   uint32_t field_count;
   uint32_t size_bytes;
   int is_exposed;
+  int is_bundle;
 } LibraryStruct;
 
 typedef struct LibraryEnum
@@ -1577,6 +1578,7 @@ static Type builtin_ty_f32 = {.kind = TY_F32};
 static Type builtin_ty_f64 = {.kind = TY_F64};
 static Type builtin_ty_f128 = {.kind = TY_F128};
 static Type builtin_ty_void = {.kind = TY_VOID};
+static Type builtin_ty_void_ptr = {.kind = TY_PTR, .pointee = &builtin_ty_void};
 static Type builtin_ty_char = {.kind = TY_CHAR};
 static Type builtin_ty_bool = {.kind = TY_BOOL};
 
@@ -1994,6 +1996,67 @@ static int library_module_has_function(const LibraryModuleData *mod,
   return 0;
 }
 
+static int library_specs_equal(const char *a, const char *b)
+{
+  if (!a)
+    a = "";
+  if (!b)
+    b = "";
+  return strcmp(a, b) == 0;
+}
+
+static int library_function_params_equal(const LibraryFunction *fn,
+                                         const char **param_specs,
+                                         int param_count)
+{
+  if (!fn)
+    return 0;
+  if (fn->param_count != param_count)
+    return 0;
+  for (int i = 0; i < param_count; ++i)
+  {
+    const char *lhs = (fn->param_specs && i < fn->param_count)
+                          ? fn->param_specs[i]
+                          : NULL;
+    const char *rhs = (param_specs && i < param_count)
+                          ? param_specs[i]
+                          : NULL;
+    if (!library_specs_equal(lhs, rhs))
+      return 0;
+  }
+  return 1;
+}
+
+static int library_module_has_function_signature(const LibraryModuleData *mod,
+                                                 const char *name,
+                                                 const char *backend_name,
+                                                 const char **param_specs,
+                                                 int param_count,
+                                                 int is_varargs)
+{
+  if (!mod)
+    return 0;
+  for (int i = 0; i < mod->function_count; ++i)
+  {
+    const LibraryFunction *fn = &mod->functions[i];
+    if (!fn)
+      continue;
+
+    if (backend_name && fn->backend_name && strcmp(fn->backend_name, backend_name) == 0)
+      return 1;
+
+    if (!name || !fn->name || strcmp(fn->name, name) != 0)
+      continue;
+    if ((fn->is_varargs ? 1 : 0) != (is_varargs ? 1 : 0))
+      continue;
+    if (!library_function_params_equal(fn, param_specs, param_count))
+      continue;
+
+    return 1;
+  }
+  return 0;
+}
+
 static int library_module_has_struct(const LibraryModuleData *mod,
                                      const char *name)
 {
@@ -2063,7 +2126,11 @@ static int merge_loaded_libraries_into_library_modules(
       for (uint32_t fi = 0; fi < src->function_count; ++fi)
       {
         const CclibFunction *cf = &src->functions[fi];
-        if (!cf->name || library_module_has_function(dst, cf->name))
+        if (!cf->name ||
+            library_module_has_function_signature(dst, cf->name, cf->backend_name,
+                                                  (const char **)cf->param_types,
+                                                  (int)cf->param_count,
+                                                  cf->is_varargs ? 1 : 0))
           continue;
 
         LibraryFunction lf = {0};
@@ -2129,6 +2196,7 @@ static int merge_loaded_libraries_into_library_modules(
         ls.field_count = cs->field_count;
         ls.size_bytes = cs->size_bytes;
         ls.is_exposed = cs->is_exposed ? 1 : 0;
+        ls.is_bundle = cs->is_bundle ? 1 : 0;
 
         if (ls.field_count > 0)
         {
@@ -2240,8 +2308,6 @@ static int collect_functions_from_unit(const Node *unit,
       continue;
     if ((!fn->is_exposed && !fn->is_entrypoint) || !fn->name)
       continue;
-    if (library_module_has_function(mod, fn->name))
-      continue;
     LibraryFunction out = {0};
     out.name = xstrdup(fn->name);
     const char *backend = NULL;
@@ -2254,7 +2320,20 @@ static int collect_functions_from_unit(const Node *unit,
     out.backend_name = backend ? xstrdup(backend) : NULL;
     Type *ret_ty = fn->ret_type ? fn->ret_type : type_i32();
     out.return_spec = type_to_spec(ret_ty);
-    out.param_count = fn->param_count;
+    int hidden_param_count = 0;
+    for (int pi = 0; pi < fn->param_count; ++pi)
+    {
+      Type *pt = (fn->param_types && pi < fn->param_count)
+                     ? module_registry_canonical_type(fn->param_types[pi])
+                     : NULL;
+      if (fn->is_managed && pt && pt->kind == TY_ARRAY && pt->array.is_unsized)
+        hidden_param_count++;
+    }
+    Type *canon_ret = module_registry_canonical_type(ret_ty);
+    if (fn->is_managed && canon_ret && canon_ret->kind == TY_ARRAY && canon_ret->array.is_unsized)
+      hidden_param_count++;
+
+    out.param_count = fn->param_count + hidden_param_count;
     if (out.param_count > 0)
     {
       out.param_specs =
@@ -2264,13 +2343,37 @@ static int collect_functions_from_unit(const Node *unit,
         free_library_function(&out);
         return 1;
       }
-      for (int pi = 0; pi < out.param_count; ++pi)
+      int out_pi = 0;
+      for (int pi = 0; pi < fn->param_count; ++pi)
       {
         Type *pt = (fn->param_types && pi < fn->param_count)
                        ? fn->param_types[pi]
                        : NULL;
-        out.param_specs[pi] = type_to_spec(pt);
-        if (!out.param_specs[pi])
+        out.param_specs[out_pi] = type_to_spec(pt);
+        if (!out.param_specs[out_pi])
+        {
+          free_library_function(&out);
+          return 1;
+        }
+        out_pi++;
+
+        Type *canon_pt = module_registry_canonical_type(pt);
+        if (fn->is_managed && canon_pt && canon_pt->kind == TY_ARRAY && canon_pt->array.is_unsized)
+        {
+          out.param_specs[out_pi] = type_to_spec(&builtin_ty_u64);
+          if (!out.param_specs[out_pi])
+          {
+            free_library_function(&out);
+            return 1;
+          }
+          out_pi++;
+        }
+      }
+
+      if (fn->is_managed && canon_ret && canon_ret->kind == TY_ARRAY && canon_ret->array.is_unsized)
+      {
+        out.param_specs[out_pi] = type_to_spec(&builtin_ty_void_ptr);
+        if (!out.param_specs[out_pi])
         {
           free_library_function(&out);
           return 1;
@@ -2280,6 +2383,16 @@ static int collect_functions_from_unit(const Node *unit,
     out.is_varargs = fn->is_varargs ? 1 : 0;
     out.is_noreturn = fn->is_noreturn;
     out.is_exposed = (fn->is_exposed || fn->is_entrypoint) ? 1 : 0;
+
+    if (library_module_has_function_signature(mod, out.name, out.backend_name,
+                                              (const char **)out.param_specs,
+                                              out.param_count,
+                                              out.is_varargs))
+    {
+      free_library_function(&out);
+      continue;
+    }
+
     if (append_library_function(mod, &out) != 0)
     {
       free_library_function(&out);
@@ -2350,6 +2463,7 @@ static int collect_structs_for_module(const char *module_name,
     st.size_bytes =
         ty->strct.size_bytes < 0 ? 0u : (uint32_t)ty->strct.size_bytes;
     st.is_exposed = ty->is_exposed != 0;
+    st.is_bundle = ty->is_bundle ? 1 : 0;
     if (append_library_struct(mod, &st) != 0)
     {
       free_library_struct(&st);
@@ -2735,6 +2849,7 @@ static int write_library_file(const char *path, LibraryModuleData *mods,
         cs->field_count = ls->field_count;
         cs->size_bytes = ls->size_bytes;
         cs->is_exposed = (uint8_t)(ls->is_exposed ? 1 : 0);
+        cs->is_bundle = (uint8_t)(ls->is_bundle ? 1 : 0);
       }
     }
     dst->struct_count =
@@ -2931,6 +3046,7 @@ static int register_structs_from_cclib_module(LoadedLibrary *lib,
     ty->kind = TY_STRUCT;
     ty->struct_name = xstrdup(st->name);
     ty->is_exposed = st->is_exposed;
+    ty->is_bundle = st->is_bundle ? 1 : 0;
     int field_count = (int)st->field_count;
     ty->strct.field_count = field_count;
     ty->strct.size_bytes = (int)st->size_bytes;
@@ -4104,6 +4220,7 @@ int main(int argc, char **argv)
   int implicit_void_function = 0;
   int implicit_sizeof = 0;
   int language_standard = CHANCEC_DEFAULT_STANDARD;
+  int c_dialect = CHANCE_C_DIALECT_GNU23;
   int request_ast = 0;
   int diagnostics_only = 0;
   int toolchain_debug_mode = 0;
@@ -4211,6 +4328,7 @@ int main(int argc, char **argv)
       .toolchain_debug_mode = &toolchain_debug_mode,
       .toolchain_debug_deep = &toolchain_debug_deep,
       .language_standard = &language_standard,
+      .c_dialect = &c_dialect,
       .verbose_use_ansi = &verbose_use_ansi,
       .asm_syntax = &asm_syntax,
       .target_arch = &target_arch,
@@ -4524,7 +4642,8 @@ int main(int argc, char **argv)
       }
       int pre_len = 0;
       char *preprocessed = chance_preprocess_source(
-          input, src, len, &pre_len, target_arch_to_macro(target_arch));
+          input, src, len, &pre_len, target_arch_to_macro(target_arch),
+          freestanding);
       const ChanceFrontend *frontend = chance_frontend_for_input_path(input);
       if (!frontend)
       {
@@ -4543,6 +4662,7 @@ int main(int argc, char **argv)
           .source = sb,
           .include_dirs = include_dirs,
           .include_dir_count = include_dir_count,
+            .c_dialect = (ChanceCDialect)c_dialect,
       };
       FrontendUnit *frontend_unit =
           chance_frontend_load_unit(frontend, &req, 1);
@@ -4604,7 +4724,8 @@ int main(int argc, char **argv)
     }
     int pre_len = 0;
     char *preprocessed = chance_preprocess_source(
-        input, src, len, &pre_len, target_arch_to_macro(target_arch));
+      input, src, len, &pre_len, target_arch_to_macro(target_arch),
+      freestanding);
     if (getenv("DUMP_PREPROC") && input && strstr(input, "aemu/cpu8086.ce"))
     {
       printf("%s", preprocessed ? preprocessed : src);
@@ -4629,6 +4750,7 @@ int main(int argc, char **argv)
         .source = sb,
         .include_dirs = include_dirs,
         .include_dir_count = include_dir_count,
+        .c_dialect = (ChanceCDialect)c_dialect,
     };
     FrontendUnit *frontend_unit = chance_frontend_load_unit(frontend, &req, 1);
     if (!frontend_unit)

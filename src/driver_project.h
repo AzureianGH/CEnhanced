@@ -34,6 +34,7 @@ int parse_ceproj_file(
     const char **entry_symbol,
     const char **obj_override, int *implicit_voidp, int *implicit_void_function,
     int *implicit_sizeof, int *request_ast, int *language_standard,
+    int *c_dialect,
     int *diagnostics_only, int *toolchain_debug_mode,
     int *toolchain_debug_deep, int *verbose_use_ansi,
     OverrideFile **override_files, int *override_file_count,

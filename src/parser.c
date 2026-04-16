@@ -9,7 +9,7 @@
 #include <limits.h>
 
 static int parser_disable_formatting_notes = 0;
-static ChanceLanguageStandard parser_language_standard = CHANCE_STD_H27;
+static ChanceLanguageStandard parser_language_standard = CHANCE_STD_H28;
 
 #define RAW_EXPORT_PREFIX "__cc_raw_export__"
 
@@ -20,8 +20,8 @@ void parser_set_disable_formatting_notes(int disable)
 
 void parser_set_language_standard(ChanceLanguageStandard standard)
 {
-    if (standard != CHANCE_STD_H26 && standard != CHANCE_STD_H27)
-        standard = CHANCE_STD_H27;
+    if (standard != CHANCE_STD_H26 && standard != CHANCE_STD_H27 && standard != CHANCE_STD_H28)
+        standard = CHANCE_STD_H28;
     parser_language_standard = standard;
 }
 
@@ -35,6 +35,11 @@ static int parser_is_h27_enabled(void)
     return parser_language_standard >= CHANCE_STD_H27;
 }
 
+static int parser_is_h28_enabled(void)
+{
+    return parser_language_standard >= CHANCE_STD_H28;
+}
+
 static void parser_require_h27(Parser *ps, Token tok, const char *feature_name)
 {
     (void)ps;
@@ -46,12 +51,64 @@ static void parser_require_h27(Parser *ps, Token tok, const char *feature_name)
     exit(1);
 }
 
+static void parser_require_h28(Parser *ps, Token tok, const char *feature_name)
+{
+    (void)ps;
+    if (parser_is_h28_enabled())
+        return;
+    diag_error_at(NULL, tok.line, tok.col,
+                  "'%s' requires H28 mode (use -H28)",
+                  feature_name ? feature_name : "feature");
+    exit(1);
+}
+
 struct ModuleImport
 {
     char **parts;
     int part_count;
     char *full_name;
     char *alias;
+};
+
+struct BundleStaticMember
+{
+    char *bundle_name;
+    int bundle_name_len;
+    char *member_name;
+    int member_name_len;
+    char *symbol_name;
+    int is_function;
+    int is_const;
+};
+
+struct BundleTemplateInstance
+{
+    Type **type_args;
+    int type_arg_count;
+    Type *inst_type;
+    char *inst_name;
+};
+
+struct BundleTemplate
+{
+    char *name;
+    int name_len;
+    int is_exposed;
+    Type *bundle_type;
+    const char **generic_param_names;
+    Type **generic_param_types;
+    int generic_param_count;
+    const char **field_names;
+    Type **field_types;
+    const char **field_default_values;
+    unsigned char *field_exposed_flags;
+    int field_count;
+    Node **method_templates;
+    int method_template_count;
+    int method_template_cap;
+    struct BundleTemplateInstance *instances;
+    int instance_count;
+    int instance_cap;
 };
 
 struct Parser
@@ -141,6 +198,19 @@ struct Parser
     int module_is_managed;
     int managed_scope_depth;
     int unmanaged_scope_depth;
+
+    struct BundleStaticMember *bundle_static_members;
+    int bundle_static_member_count;
+    int bundle_static_member_cap;
+
+    struct BundleTemplate *bundle_templates;
+    int bundle_template_count;
+    int bundle_template_cap;
+
+    Node **pending_instantiated_decls;
+    int pending_instantiated_decl_count;
+    int pending_instantiated_decl_cap;
+    int foreach_temp_counter;
 };
 
 static void parser_push_access_suppression(Parser *ps)
@@ -220,6 +290,1380 @@ static int parser_module_tokens_match_current(Parser *ps, const Token *parts, in
     return 1;
 }
 
+static void parser_unit_append_decl(Node ***decls, int *decl_count, int *decl_cap, Node *decl, int *fn_count)
+{
+    if (!decls || !decl_count || !decl_cap || !decl)
+        return;
+    if (*decl_count == *decl_cap)
+    {
+        *decl_cap = *decl_cap ? (*decl_cap * 2) : 4;
+        *decls = (Node **)realloc(*decls, sizeof(Node *) * (size_t)(*decl_cap));
+        if (!*decls)
+        {
+            diag_error("out of memory while appending declaration");
+            exit(1);
+        }
+    }
+    (*decls)[(*decl_count)++] = decl;
+    if (fn_count && decl->kind == ND_FUNC)
+        (*fn_count)++;
+}
+
+static void parser_queue_instantiated_decl(Parser *ps, Node *decl)
+{
+    if (!ps || !decl)
+        return;
+    if (ps->pending_instantiated_decl_count == ps->pending_instantiated_decl_cap)
+    {
+        int new_cap = ps->pending_instantiated_decl_cap ? ps->pending_instantiated_decl_cap * 2 : 8;
+        Node **grown = (Node **)realloc(ps->pending_instantiated_decls,
+                                        (size_t)new_cap * sizeof(Node *));
+        if (!grown)
+        {
+            diag_error("out of memory while queuing instantiated bundle methods");
+            exit(1);
+        }
+        ps->pending_instantiated_decls = grown;
+        ps->pending_instantiated_decl_cap = new_cap;
+    }
+    ps->pending_instantiated_decls[ps->pending_instantiated_decl_count++] = decl;
+}
+
+static int parser_token_is_index_overrider_name(const char *name)
+{
+    return name && name[0] == '[' && name[1] == ']' && name[2] == '\0';
+}
+
+static void parser_validate_bundle_index_overrider_signature(Parser *ps,
+                                                             const Node *method,
+                                                             int is_static)
+{
+    if (!method || method->kind != ND_FUNC || !parser_token_is_index_overrider_name(method->name))
+        return;
+
+    if (is_static)
+    {
+        diag_error_at(lexer_source(ps->lx), method->line, method->col,
+                      "bundle index overrider '[]' cannot be declared static");
+        exit(1);
+    }
+
+    Type *ret_ty = method->ret_type;
+    int is_void_ret = (ret_ty && ret_ty->kind == TY_VOID) ? 1 : 0;
+    int user_param_count = method->param_count;
+
+    if (is_void_ret)
+    {
+        if (user_param_count != 2)
+        {
+            diag_error_at(lexer_source(ps->lx), method->line, method->col,
+                          "bundle index setter '[]' must declare exactly 2 parameters: key and value");
+            exit(1);
+        }
+    }
+    else
+    {
+        if (user_param_count != 1)
+        {
+            diag_error_at(lexer_source(ps->lx), method->line, method->col,
+                          "bundle index getter '[]' must declare exactly 1 key parameter");
+            exit(1);
+        }
+    }
+}
+
+static char *parser_make_bundle_symbol_name(const char *prefix, const char *bundle_name, const char *member_name)
+{
+    if (!prefix || !bundle_name || !member_name)
+        return NULL;
+    const char *member_segment = parser_token_is_index_overrider_name(member_name) ? "__index" : member_name;
+    size_t need = strlen(prefix) + strlen(bundle_name) + strlen(member_segment) + 3;
+    char *out = (char *)xmalloc(need);
+    snprintf(out, need, "%s_%s_%s", prefix, bundle_name, member_segment);
+    return out;
+}
+
+static char *parser_make_bundle_instance_method_symbol(const char *bundle_name, const char *method_name)
+{
+    return parser_make_bundle_symbol_name("__bundle_inst", bundle_name, method_name);
+}
+
+static char *parser_make_bundle_static_method_symbol(const char *bundle_name, const char *method_name)
+{
+    return parser_make_bundle_symbol_name("__bundle_static", bundle_name, method_name);
+}
+
+static char *parser_make_bundle_static_field_symbol(const char *bundle_name, const char *field_name)
+{
+    return parser_make_bundle_symbol_name("__bundle_static_field", bundle_name, field_name);
+}
+
+static void parser_record_bundle_static_member(Parser *ps,
+                                               const char *bundle_name,
+                                               const char *member_name,
+                                               const char *symbol_name,
+                                               int is_function,
+                                               int is_const)
+{
+    if (!ps || !bundle_name || !member_name || !symbol_name)
+        return;
+    if (ps->bundle_static_member_count == ps->bundle_static_member_cap)
+    {
+        int new_cap = ps->bundle_static_member_cap ? ps->bundle_static_member_cap * 2 : 8;
+        struct BundleStaticMember *grown = (struct BundleStaticMember *)realloc(
+            ps->bundle_static_members, (size_t)new_cap * sizeof(struct BundleStaticMember));
+        if (!grown)
+        {
+            diag_error("out of memory while recording bundle static member");
+            exit(1);
+        }
+        ps->bundle_static_members = grown;
+        ps->bundle_static_member_cap = new_cap;
+    }
+
+    struct BundleStaticMember *entry = &ps->bundle_static_members[ps->bundle_static_member_count++];
+    entry->bundle_name = xstrdup(bundle_name);
+    entry->bundle_name_len = (int)strlen(bundle_name);
+    entry->member_name = xstrdup(member_name);
+    entry->member_name_len = (int)strlen(member_name);
+    entry->symbol_name = xstrdup(symbol_name);
+    entry->is_function = is_function ? 1 : 0;
+    entry->is_const = is_const ? 1 : 0;
+}
+
+static const struct BundleStaticMember *parser_find_bundle_static_member(Parser *ps,
+                                                                          const char *bundle_name,
+                                                                          int bundle_name_len,
+                                                                          const char *member_name,
+                                                                          int member_name_len)
+{
+    if (!ps || !bundle_name || !member_name || bundle_name_len <= 0 || member_name_len <= 0)
+        return NULL;
+    for (int i = 0; i < ps->bundle_static_member_count; ++i)
+    {
+        const struct BundleStaticMember *entry = &ps->bundle_static_members[i];
+        if (!entry->bundle_name || !entry->member_name)
+            continue;
+        if (entry->bundle_name_len != bundle_name_len || entry->member_name_len != member_name_len)
+            continue;
+        if (strncmp(entry->bundle_name, bundle_name, (size_t)bundle_name_len) != 0)
+            continue;
+        if (strncmp(entry->member_name, member_name, (size_t)member_name_len) != 0)
+            continue;
+        return entry;
+    }
+    return NULL;
+}
+
+static Type *parse_type_spec(Parser *ps);
+static Type *named_type_get(Parser *ps, const char *name, int len);
+static void named_type_add(Parser *ps, const char *name, int len, Type *ty, int is_exposed);
+static int type_sizeof_simple(Type *ty);
+static int type_align_simple(Type *ty);
+static int align_up(int value, int alignment);
+
+static struct BundleTemplate *parser_find_bundle_template(Parser *ps, const char *name, int name_len)
+{
+    if (!ps || !name || name_len <= 0)
+        return NULL;
+    for (int i = 0; i < ps->bundle_template_count; ++i)
+    {
+        struct BundleTemplate *templ = &ps->bundle_templates[i];
+        if (templ->name_len != name_len)
+            continue;
+        if (strncmp(templ->name, name, (size_t)name_len) == 0)
+            return templ;
+    }
+    return NULL;
+}
+
+static int parser_struct_name_has_template_instance_prefix(const char *struct_name,
+                                                           const char *base_name,
+                                                           int base_name_len)
+{
+    if (!struct_name || !base_name || base_name_len <= 0)
+        return 0;
+    if (strncmp(struct_name, base_name, (size_t)base_name_len) != 0)
+        return 0;
+    return strncmp(struct_name + base_name_len, "__inst", 6) == 0;
+}
+
+static int parser_module_is_current_or_imported(Parser *ps, const char *module_full)
+{
+    if (!ps || !module_full || !*module_full)
+        return 0;
+    if (ps->module_full_name && strcmp(ps->module_full_name, module_full) == 0)
+        return 1;
+    for (int i = 0; i < ps->import_count; ++i)
+    {
+        const struct ModuleImport *imp = &ps->imports[i];
+        if (!imp || !imp->full_name)
+            continue;
+        if (strcmp(imp->full_name, module_full) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int parser_type_contains_template_param_recur(Type *ty, Type **seen, int seen_count)
+{
+    ty = module_registry_canonical_type(ty);
+    if (!ty)
+        return 0;
+
+    if (ty->kind == TY_TEMPLATE_PARAM)
+        return 1;
+
+    for (int i = 0; i < seen_count; ++i)
+    {
+        if (seen[i] == ty)
+            return 0;
+    }
+
+    if (seen_count >= 64)
+        return 0;
+    seen[seen_count++] = ty;
+
+    switch (ty->kind)
+    {
+    case TY_PTR:
+    case TY_REF:
+        return parser_type_contains_template_param_recur(ty->pointee, seen, seen_count);
+    case TY_ARRAY:
+        return parser_type_contains_template_param_recur(ty->array.elem, seen, seen_count);
+    case TY_FUNC:
+        if (parser_type_contains_template_param_recur(ty->func.ret, seen, seen_count))
+            return 1;
+        for (int i = 0; i < ty->func.param_count; ++i)
+        {
+            Type *param = ty->func.params ? ty->func.params[i] : NULL;
+            if (parser_type_contains_template_param_recur(param, seen, seen_count))
+                return 1;
+        }
+        return 0;
+    case TY_STRUCT:
+        for (int i = 0; i < ty->strct.field_count; ++i)
+        {
+            Type *field_ty = ty->strct.field_types ? ty->strct.field_types[i] : NULL;
+            if (parser_type_contains_template_param_recur(field_ty, seen, seen_count))
+                return 1;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int parser_type_contains_template_param(Type *ty)
+{
+    Type *seen[64];
+    memset(seen, 0, sizeof(seen));
+    return parser_type_contains_template_param_recur(ty, seen, 0);
+}
+
+static int parser_type_tree_match_score_recur(Type *haystack,
+                                              Type *needle,
+                                              Type **seen,
+                                              int seen_count,
+                                              int through_container)
+{
+    haystack = module_registry_canonical_type(haystack);
+    needle = module_registry_canonical_type(needle);
+    if (!haystack || !needle)
+        return 0;
+
+    int best = 0;
+    if (type_equals(haystack, needle))
+        best = through_container ? 2 : 1;
+
+    for (int i = 0; i < seen_count; ++i)
+    {
+        if (seen[i] == haystack)
+            return best;
+    }
+    if (seen_count >= 64)
+        return best;
+    seen[seen_count++] = haystack;
+
+    int child_score = 0;
+    switch (haystack->kind)
+    {
+    case TY_PTR:
+    case TY_REF:
+        child_score = parser_type_tree_match_score_recur(haystack->pointee, needle, seen, seen_count, 1);
+        break;
+    case TY_ARRAY:
+        child_score = parser_type_tree_match_score_recur(haystack->array.elem, needle, seen, seen_count, 1);
+        break;
+    case TY_FUNC:
+        child_score = parser_type_tree_match_score_recur(haystack->func.ret, needle, seen, seen_count, 1);
+        for (int i = 0; i < haystack->func.param_count; ++i)
+        {
+            Type *param = haystack->func.params ? haystack->func.params[i] : NULL;
+            int param_score = parser_type_tree_match_score_recur(param, needle, seen, seen_count, 1);
+            if (param_score > child_score)
+                child_score = param_score;
+        }
+        break;
+    case TY_STRUCT:
+        for (int i = 0; i < haystack->strct.field_count; ++i)
+        {
+            Type *field_ty = haystack->strct.field_types ? haystack->strct.field_types[i] : NULL;
+            int field_score = parser_type_tree_match_score_recur(field_ty, needle, seen, seen_count, through_container);
+            if (field_score > child_score)
+                child_score = field_score;
+        }
+        break;
+    default:
+        break;
+    }
+
+    return (child_score > best) ? child_score : best;
+}
+
+static int parser_type_tree_match_score(Type *haystack, Type *needle)
+{
+    Type *seen[64];
+    memset(seen, 0, sizeof(seen));
+    return parser_type_tree_match_score_recur(haystack, needle, seen, 0, 0);
+}
+
+static Type *parser_lookup_preinstantiated_template_instance(Parser *ps,
+                                                             const char *module_full,
+                                                             const char *base_name,
+                                                             int base_name_len,
+                                                             Type **template_type_args,
+                                                             int template_type_arg_count,
+                                                             int *out_match_count)
+{
+    int matches = 0;
+    Type *resolved = NULL;
+    int best_score = INT_MIN;
+    int best_count = 0;
+    if (!base_name || base_name_len <= 0)
+    {
+        if (out_match_count)
+            *out_match_count = 0;
+        return NULL;
+    }
+
+    int total = module_registry_struct_entry_count();
+    for (int i = 0; i < total; ++i)
+    {
+        const char *entry_module = module_registry_struct_entry_module(i);
+        const char *entry_name = module_registry_struct_entry_name(i);
+        Type *entry_type = module_registry_struct_entry_type(i);
+        if (!entry_name || !entry_type || !entry_type->is_bundle)
+            continue;
+        if (!parser_struct_name_has_template_instance_prefix(entry_name, base_name, base_name_len))
+            continue;
+
+        if (module_full && *module_full)
+        {
+            if (!entry_module || strcmp(entry_module, module_full) != 0)
+                continue;
+        }
+        else
+        {
+            if (!parser_module_is_current_or_imported(ps, entry_module))
+                continue;
+        }
+
+        if (parser_type_contains_template_param(entry_type))
+            continue;
+
+        if (template_type_arg_count > 0)
+        {
+            int candidate_score = 0;
+            int arg_match = 1;
+            for (int ai = 0; ai < template_type_arg_count; ++ai)
+            {
+                Type *want = template_type_args ? template_type_args[ai] : NULL;
+                want = module_registry_canonical_type(want);
+                if (!want)
+                    continue;
+
+                int score = parser_type_tree_match_score(entry_type, want);
+                if (score <= 0)
+                {
+                    arg_match = 0;
+                    break;
+                }
+                candidate_score += score;
+            }
+            if (!arg_match)
+                continue;
+
+            if (candidate_score > best_score)
+            {
+                best_score = candidate_score;
+                best_count = 1;
+                resolved = entry_type;
+            }
+            else if (candidate_score == best_score)
+            {
+                best_count++;
+            }
+            continue;
+        }
+
+        resolved = entry_type;
+        matches++;
+    }
+
+    if (template_type_arg_count > 0)
+    {
+        if (out_match_count)
+            *out_match_count = best_count;
+        return best_count == 1 ? resolved : NULL;
+    }
+
+    if (out_match_count)
+        *out_match_count = matches;
+    return matches == 1 ? resolved : NULL;
+}
+
+static Type **parser_parse_type_arg_list(Parser *ps, int *out_count)
+{
+    if (!ps)
+        return NULL;
+    Token lt = lexer_next(ps->lx);
+    if (lt.kind != TK_LT)
+    {
+        diag_error_at(lexer_source(ps->lx), lt.line, lt.col,
+                      "internal parser error: expected '<' before type arguments");
+        exit(1);
+    }
+    Token next = lexer_peek(ps->lx);
+    if (next.kind == TK_GT)
+    {
+        diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                      "type argument list cannot be empty");
+        exit(1);
+    }
+    Type **args = NULL;
+    int count = 0;
+    int cap = 0;
+    while (1)
+    {
+        Type *arg_ty = parse_type_spec(ps);
+        if (count == cap)
+        {
+            cap = cap ? cap * 2 : 4;
+            Type **grown = (Type **)realloc(args, (size_t)cap * sizeof(Type *));
+            if (!grown)
+            {
+                diag_error("out of memory while parsing type arguments");
+                exit(1);
+            }
+            args = grown;
+        }
+        args[count++] = arg_ty;
+        Token sep = lexer_peek(ps->lx);
+        if (sep.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        if (sep.kind == TK_GT)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
+        diag_error_at(lexer_source(ps->lx), sep.line, sep.col,
+                      "expected ',' or '>' in type argument list");
+        exit(1);
+    }
+    if (out_count)
+        *out_count = count;
+    return args;
+}
+
+static Type *parser_substitute_template_type(Type *orig, Type **bindings, int binding_count)
+{
+    if (!orig)
+        return NULL;
+    orig = module_registry_canonical_type(orig);
+    if (!orig)
+        return NULL;
+
+    if (orig->kind == TY_TEMPLATE_PARAM)
+    {
+        int idx = orig->template_param_index;
+        if (idx >= 0 && idx < binding_count && bindings && bindings[idx])
+            return bindings[idx];
+        if (orig->template_default_type)
+            return parser_substitute_template_type(orig->template_default_type, bindings, binding_count);
+        return orig;
+    }
+
+    if (!bindings || binding_count <= 0)
+        return orig;
+
+    switch (orig->kind)
+    {
+    case TY_PTR:
+    {
+        Type *pointee = parser_substitute_template_type(orig->pointee, bindings, binding_count);
+        if (pointee == orig->pointee)
+            return orig;
+        return type_ptr(pointee);
+    }
+    case TY_REF:
+    {
+        Type *pointee = parser_substitute_template_type(orig->pointee, bindings, binding_count);
+        if (pointee == orig->pointee)
+            return orig;
+        return type_ref(pointee, orig->ref_nullability);
+    }
+    case TY_ARRAY:
+    {
+        Type *elem = parser_substitute_template_type(orig->array.elem, bindings, binding_count);
+        if (elem == orig->array.elem)
+            return orig;
+        Type *arr = type_array(elem, orig->array.length);
+        arr->array.is_unsized = orig->array.is_unsized;
+        return arr;
+    }
+    case TY_FUNC:
+    {
+        Type *ret = parser_substitute_template_type(orig->func.ret, bindings, binding_count);
+        int changed = (ret != orig->func.ret);
+        Type **params = NULL;
+        if (orig->func.param_count > 0)
+        {
+            params = (Type **)xcalloc((size_t)orig->func.param_count, sizeof(Type *));
+            for (int i = 0; i < orig->func.param_count; ++i)
+            {
+                Type *sub = parser_substitute_template_type(orig->func.params ? orig->func.params[i] : NULL,
+                                                            bindings, binding_count);
+                params[i] = sub;
+                if (sub != (orig->func.params ? orig->func.params[i] : NULL))
+                    changed = 1;
+            }
+        }
+        if (!changed)
+        {
+            free(params);
+            return orig;
+        }
+        Type *fn = type_func();
+        fn->func.param_count = orig->func.param_count;
+        fn->func.params = params;
+        fn->func.ret = ret;
+        fn->func.is_varargs = orig->func.is_varargs;
+        fn->func.has_signature = orig->func.has_signature;
+        return fn;
+    }
+    default:
+        return orig;
+    }
+}
+
+static Type *parser_substitute_bundle_method_type(Type *orig,
+                                                  Type **bindings,
+                                                  int binding_count,
+                                                  Type *template_bundle_type,
+                                                  Type *inst_bundle_type)
+{
+    if (!orig)
+        return NULL;
+    orig = module_registry_canonical_type(orig);
+    if (!orig)
+        return NULL;
+
+    Type *canonical_template = module_registry_canonical_type(template_bundle_type);
+    if (canonical_template && inst_bundle_type && orig == canonical_template)
+        return inst_bundle_type;
+
+    if (orig->kind == TY_TEMPLATE_PARAM)
+    {
+        int idx = orig->template_param_index;
+        if (idx >= 0 && idx < binding_count && bindings && bindings[idx])
+            return bindings[idx];
+        if (orig->template_default_type)
+            return parser_substitute_bundle_method_type(orig->template_default_type,
+                                                        bindings,
+                                                        binding_count,
+                                                        template_bundle_type,
+                                                        inst_bundle_type);
+        return orig;
+    }
+
+    if (!bindings || binding_count <= 0)
+        return orig;
+
+    switch (orig->kind)
+    {
+    case TY_PTR:
+    {
+        Type *pointee = parser_substitute_bundle_method_type(orig->pointee,
+                                                             bindings,
+                                                             binding_count,
+                                                             template_bundle_type,
+                                                             inst_bundle_type);
+        if (pointee == orig->pointee)
+            return orig;
+        return type_ptr(pointee);
+    }
+    case TY_REF:
+    {
+        Type *pointee = parser_substitute_bundle_method_type(orig->pointee,
+                                                             bindings,
+                                                             binding_count,
+                                                             template_bundle_type,
+                                                             inst_bundle_type);
+        if (pointee == orig->pointee)
+            return orig;
+        return type_ref(pointee, orig->ref_nullability);
+    }
+    case TY_ARRAY:
+    {
+        Type *elem = parser_substitute_bundle_method_type(orig->array.elem,
+                                                          bindings,
+                                                          binding_count,
+                                                          template_bundle_type,
+                                                          inst_bundle_type);
+        if (elem == orig->array.elem)
+            return orig;
+        Type *arr = type_array(elem, orig->array.length);
+        arr->array.is_unsized = orig->array.is_unsized;
+        return arr;
+    }
+    case TY_FUNC:
+    {
+        Type *ret = parser_substitute_bundle_method_type(orig->func.ret,
+                                                         bindings,
+                                                         binding_count,
+                                                         template_bundle_type,
+                                                         inst_bundle_type);
+        int changed = (ret != orig->func.ret);
+        Type **params = NULL;
+        if (orig->func.param_count > 0)
+        {
+            params = (Type **)xcalloc((size_t)orig->func.param_count, sizeof(Type *));
+            for (int i = 0; i < orig->func.param_count; ++i)
+            {
+                Type *sub = parser_substitute_bundle_method_type(orig->func.params ? orig->func.params[i] : NULL,
+                                                                 bindings,
+                                                                 binding_count,
+                                                                 template_bundle_type,
+                                                                 inst_bundle_type);
+                params[i] = sub;
+                if (sub != (orig->func.params ? orig->func.params[i] : NULL))
+                    changed = 1;
+            }
+        }
+        if (!changed)
+        {
+            free(params);
+            return orig;
+        }
+        Type *fn = type_func();
+        fn->func.param_count = orig->func.param_count;
+        fn->func.params = params;
+        fn->func.ret = ret;
+        fn->func.is_varargs = orig->func.is_varargs;
+        fn->func.has_signature = orig->func.has_signature;
+        return fn;
+    }
+    default:
+        return orig;
+    }
+}
+
+static Node *parser_clone_node_tree_for_bundle_method(const Node *src,
+                                                      Type **bindings,
+                                                      int binding_count,
+                                                      Type *template_bundle_type,
+                                                      Type *inst_bundle_type)
+{
+    if (!src)
+        return NULL;
+    Node *dst = (Node *)xcalloc(1, sizeof(Node));
+    memcpy(dst, src, sizeof(Node));
+
+    dst->lhs = parser_clone_node_tree_for_bundle_method(src->lhs,
+                                                        bindings,
+                                                        binding_count,
+                                                        template_bundle_type,
+                                                        inst_bundle_type);
+    dst->rhs = parser_clone_node_tree_for_bundle_method(src->rhs,
+                                                        bindings,
+                                                        binding_count,
+                                                        template_bundle_type,
+                                                        inst_bundle_type);
+    dst->body = parser_clone_node_tree_for_bundle_method(src->body,
+                                                         bindings,
+                                                         binding_count,
+                                                         template_bundle_type,
+                                                         inst_bundle_type);
+
+    if (src->arg_count > 0 && src->args)
+    {
+        dst->args = (Node **)xcalloc((size_t)src->arg_count, sizeof(Node *));
+        for (int i = 0; i < src->arg_count; ++i)
+            dst->args[i] = parser_clone_node_tree_for_bundle_method(src->args[i],
+                                                                    bindings,
+                                                                    binding_count,
+                                                                    template_bundle_type,
+                                                                    inst_bundle_type);
+    }
+    else
+    {
+        dst->args = NULL;
+        dst->arg_count = src->arg_count;
+    }
+
+    if (src->call_type_arg_count > 0 && src->call_type_args)
+    {
+        dst->call_type_args = (Type **)xcalloc((size_t)src->call_type_arg_count, sizeof(Type *));
+        for (int i = 0; i < src->call_type_arg_count; ++i)
+            dst->call_type_args[i] = parser_substitute_bundle_method_type(src->call_type_args[i],
+                                                                           bindings,
+                                                                           binding_count,
+                                                                           template_bundle_type,
+                                                                           inst_bundle_type);
+    }
+    else
+    {
+        dst->call_type_args = NULL;
+        dst->call_type_arg_count = 0;
+    }
+
+    if (src->stmt_count > 0 && src->stmts)
+    {
+        dst->stmts = (Node **)xcalloc((size_t)src->stmt_count, sizeof(Node *));
+        for (int i = 0; i < src->stmt_count; ++i)
+            dst->stmts[i] = parser_clone_node_tree_for_bundle_method(src->stmts[i],
+                                                                     bindings,
+                                                                     binding_count,
+                                                                     template_bundle_type,
+                                                                     inst_bundle_type);
+    }
+    else
+    {
+        dst->stmts = NULL;
+        dst->stmt_count = src->stmt_count;
+    }
+
+    if (src->init.count > 0)
+    {
+        if (src->init.elems)
+        {
+            dst->init.elems = (Node **)xcalloc((size_t)src->init.count, sizeof(Node *));
+            for (int i = 0; i < src->init.count; ++i)
+                dst->init.elems[i] = parser_clone_node_tree_for_bundle_method(src->init.elems[i],
+                                                                               bindings,
+                                                                               binding_count,
+                                                                               template_bundle_type,
+                                                                               inst_bundle_type);
+        }
+        if (src->init.designators)
+        {
+            dst->init.designators = (const char **)xcalloc((size_t)src->init.count, sizeof(const char *));
+            for (int i = 0; i < src->init.count; ++i)
+                dst->init.designators[i] = src->init.designators[i];
+        }
+        if (src->init.field_indices)
+        {
+            dst->init.field_indices = (int *)xcalloc((size_t)src->init.count, sizeof(int));
+            memcpy(dst->init.field_indices,
+                   src->init.field_indices,
+                   (size_t)src->init.count * sizeof(int));
+        }
+    }
+
+    dst->managed_length_expr = parser_clone_node_tree_for_bundle_method(src->managed_length_expr,
+                                                                         bindings,
+                                                                         binding_count,
+                                                                         template_bundle_type,
+                                                                         inst_bundle_type);
+
+    dst->type = parser_substitute_bundle_method_type(src->type,
+                                                     bindings,
+                                                     binding_count,
+                                                     template_bundle_type,
+                                                     inst_bundle_type);
+    dst->var_type = parser_substitute_bundle_method_type(src->var_type,
+                                                         bindings,
+                                                         binding_count,
+                                                         template_bundle_type,
+                                                         inst_bundle_type);
+    dst->ret_type = parser_substitute_bundle_method_type(src->ret_type,
+                                                         bindings,
+                                                         binding_count,
+                                                         template_bundle_type,
+                                                         inst_bundle_type);
+
+    dst->call_func_type = NULL;
+    dst->call_target = NULL;
+    dst->referenced_function = NULL;
+    dst->inline_expr = NULL;
+
+    return dst;
+}
+
+static Node *parser_instantiate_bundle_method_template(const Node *fn,
+                                                       char *inst_name,
+                                                       Type **bindings,
+                                                       int binding_count,
+                                                       Type *template_bundle_type,
+                                                       Type *inst_bundle_type)
+{
+    if (!fn || fn->kind != ND_FUNC || !inst_name)
+        return NULL;
+
+    Node *clone = (Node *)xcalloc(1, sizeof(Node));
+    memcpy(clone, fn, sizeof(Node));
+    clone->name = inst_name;
+    clone->metadata = fn->metadata;
+    clone->metadata.backend_name = NULL;
+    clone->generic_param_count = 0;
+    clone->generic_param_names = NULL;
+    clone->generic_param_types = NULL;
+
+    clone->body = parser_clone_node_tree_for_bundle_method(fn->body,
+                                                           bindings,
+                                                           binding_count,
+                                                           template_bundle_type,
+                                                           inst_bundle_type);
+    clone->ret_type = parser_substitute_bundle_method_type(fn->ret_type,
+                                                           bindings,
+                                                           binding_count,
+                                                           template_bundle_type,
+                                                           inst_bundle_type);
+
+    if (fn->param_count > 0 && fn->param_types)
+    {
+        clone->param_types = (Type **)xcalloc((size_t)fn->param_count, sizeof(Type *));
+        for (int i = 0; i < fn->param_count; ++i)
+        {
+            clone->param_types[i] = parser_substitute_bundle_method_type(fn->param_types[i],
+                                                                          bindings,
+                                                                          binding_count,
+                                                                          template_bundle_type,
+                                                                          inst_bundle_type);
+        }
+    }
+    else
+    {
+        clone->param_types = NULL;
+        clone->param_count = fn->param_count;
+    }
+
+    if (fn->param_names && fn->param_count > 0)
+    {
+        clone->param_names = (const char **)xcalloc((size_t)fn->param_count, sizeof(char *));
+        for (int i = 0; i < fn->param_count; ++i)
+            clone->param_names[i] = fn->param_names[i];
+    }
+    else
+    {
+        clone->param_names = NULL;
+    }
+
+    if (fn->param_const_flags && fn->param_count > 0)
+    {
+        clone->param_const_flags = (unsigned char *)xmalloc((size_t)fn->param_count);
+        memcpy(clone->param_const_flags, fn->param_const_flags, (size_t)fn->param_count);
+    }
+    else
+    {
+        clone->param_const_flags = NULL;
+    }
+
+    clone->call_target = NULL;
+    clone->call_func_type = NULL;
+    clone->referenced_function = NULL;
+    clone->inline_expr = NULL;
+    clone->is_entrypoint = 0;
+
+    return clone;
+}
+
+static Type *parser_instantiate_bundle_template(Parser *ps,
+                                                struct BundleTemplate *templ,
+                                                Type **type_args,
+                                                int type_arg_count,
+                                                int line,
+                                                int col);
+static struct BundleTemplateInstance *parser_find_bundle_template_instance_by_type(Parser *ps,
+                                                                                   Type *inst_type,
+                                                                                   struct BundleTemplate **out_template);
+
+static void parser_specialize_instantiated_method_new_types(Parser *ps,
+                                                            Node *node,
+                                                            Type **bindings,
+                                                            int binding_count,
+                                                            int line,
+                                                            int col)
+{
+    if (!ps || !node)
+        return;
+
+    if (node->kind == ND_NEW && node->type)
+    {
+        Type *new_ty = module_registry_canonical_type(node->type);
+        if (new_ty && new_ty->kind == TY_PTR && new_ty->pointee)
+        {
+            Type *pointee = module_registry_canonical_type(new_ty->pointee);
+            if (pointee && pointee->kind == TY_STRUCT)
+            {
+                struct BundleTemplate *nested_template = NULL;
+                struct BundleTemplateInstance *nested_inst =
+                    parser_find_bundle_template_instance_by_type(ps, pointee, &nested_template);
+                if (nested_inst && nested_template && nested_inst->type_arg_count > 0)
+                {
+                    int nested_count = nested_inst->type_arg_count;
+                    Type **nested_args = (Type **)xcalloc((size_t)nested_count, sizeof(Type *));
+                    int nested_changed = 0;
+                    for (int ai = 0; ai < nested_count; ++ai)
+                    {
+                        Type *orig_arg = nested_inst->type_args ? nested_inst->type_args[ai] : NULL;
+                        Type *sub_arg = parser_substitute_template_type(orig_arg, bindings, binding_count);
+                        nested_args[ai] = sub_arg;
+                        if (sub_arg != orig_arg)
+                            nested_changed = 1;
+                    }
+
+                    if (nested_changed)
+                    {
+                        Type *specialized = parser_instantiate_bundle_template(ps,
+                                                                               nested_template,
+                                                                               nested_args,
+                                                                               nested_count,
+                                                                               line,
+                                                                               col);
+                        if (specialized)
+                            node->type = type_ptr(specialized);
+                    }
+                    free(nested_args);
+                }
+            }
+        }
+    }
+
+    parser_specialize_instantiated_method_new_types(ps, node->lhs, bindings, binding_count, line, col);
+    parser_specialize_instantiated_method_new_types(ps, node->rhs, bindings, binding_count, line, col);
+    parser_specialize_instantiated_method_new_types(ps, node->body, bindings, binding_count, line, col);
+
+    for (int i = 0; i < node->arg_count; ++i)
+        parser_specialize_instantiated_method_new_types(ps, node->args ? node->args[i] : NULL, bindings, binding_count, line, col);
+    for (int i = 0; i < node->stmt_count; ++i)
+        parser_specialize_instantiated_method_new_types(ps, node->stmts ? node->stmts[i] : NULL, bindings, binding_count, line, col);
+
+    if (node->init.count > 0 && node->init.elems)
+    {
+        for (int i = 0; i < node->init.count; ++i)
+            parser_specialize_instantiated_method_new_types(ps, node->init.elems[i], bindings, binding_count, line, col);
+    }
+
+    parser_specialize_instantiated_method_new_types(ps, node->managed_length_expr, bindings, binding_count, line, col);
+}
+
+static void parser_emit_template_bundle_methods(Parser *ps,
+                                                struct BundleTemplate *templ,
+                                                Type *inst_type,
+                                                Type **bindings,
+                                                int binding_count,
+                                                int line,
+                                                int col)
+{
+    if (!ps || !templ || !inst_type || !inst_type->struct_name)
+        return;
+
+    for (int i = 0; i < templ->method_template_count; ++i)
+    {
+        Node *method_template = templ->method_templates ? templ->method_templates[i] : NULL;
+        if (!method_template || method_template->kind != ND_FUNC || !method_template->name)
+            continue;
+
+        int is_static_method = method_template->var_is_static ? 1 : 0;
+
+        char *inst_symbol = is_static_method
+                                ? parser_make_bundle_static_method_symbol(inst_type->struct_name,
+                                                                          method_template->name)
+                                : parser_make_bundle_instance_method_symbol(inst_type->struct_name,
+                                                                            method_template->name);
+        if (!inst_symbol)
+        {
+            diag_error_at(lexer_source(ps->lx), line, col,
+                          "failed to build instantiated template bundle method symbol");
+            exit(1);
+        }
+
+        Node *inst_method = parser_instantiate_bundle_method_template(method_template,
+                                                                       inst_symbol,
+                                                                       bindings,
+                                                                       binding_count,
+                                                                       templ->bundle_type,
+                                                                       inst_type);
+        if (!inst_method)
+        {
+            diag_error_at(lexer_source(ps->lx), line, col,
+                          "failed to instantiate template bundle method '%s'",
+                          method_template->name ? method_template->name : "<unnamed>");
+            exit(1);
+        }
+
+        parser_specialize_instantiated_method_new_types(ps,
+                                                        inst_method->body,
+                                                        bindings,
+                                                        binding_count,
+                                                        line,
+                                                        col);
+
+        inst_method->var_is_static = is_static_method;
+        inst_method->is_bundle_global_init = 0;
+        if (is_static_method)
+            parser_record_bundle_static_member(ps, inst_type->struct_name, method_template->name, inst_symbol, 1, 1);
+        parser_queue_instantiated_decl(ps, inst_method);
+    }
+}
+
+static Type *parser_instantiate_bundle_template(Parser *ps,
+                                                struct BundleTemplate *templ,
+                                                Type **type_args,
+                                                int type_arg_count,
+                                                int line,
+                                                int col);
+
+static Type *parser_default_type_for_template_param(Type *placeholder)
+{
+    if (!placeholder)
+        return NULL;
+
+    if (placeholder->template_default_type)
+        return module_registry_canonical_type(placeholder->template_default_type);
+
+    switch (placeholder->template_constraint_kind)
+    {
+    case TEMPLATE_CONSTRAINT_FLOATING:
+        return type_f64();
+    case TEMPLATE_CONSTRAINT_POINTER:
+        return type_ptr(type_void());
+    case TEMPLATE_CONSTRAINT_INTEGRAL:
+    case TEMPLATE_CONSTRAINT_NUMERIC:
+    case TEMPLATE_CONSTRAINT_NONE:
+    default:
+        return type_i32();
+    }
+}
+
+static void parser_auto_seed_template_bundle(Parser *ps,
+                                             struct BundleTemplate *templ,
+                                             int line,
+                                             int col)
+{
+    if (!ps || !templ)
+        return;
+    if (!templ->is_exposed)
+        return;
+    if (templ->instance_count > 0)
+        return;
+    if (templ->generic_param_count <= 0)
+        return;
+
+    int arg_count = templ->generic_param_count;
+    Type **seed_args = (Type **)xcalloc((size_t)arg_count, sizeof(Type *));
+    if (!seed_args)
+    {
+        diag_error("out of memory while seeding template bundle instantiation");
+        exit(1);
+    }
+
+    for (int i = 0; i < arg_count; ++i)
+    {
+        Type *placeholder = templ->generic_param_types ? templ->generic_param_types[i] : NULL;
+        seed_args[i] = parser_default_type_for_template_param(placeholder);
+        if (!seed_args[i])
+        {
+            free(seed_args);
+            return;
+        }
+    }
+
+    (void)parser_instantiate_bundle_template(ps, templ, seed_args, arg_count, line, col);
+    free(seed_args);
+}
+
+static struct BundleTemplateInstance *parser_find_bundle_template_instance_by_type(Parser *ps,
+                                                                                   Type *inst_type,
+                                                                                   struct BundleTemplate **out_template)
+{
+    if (out_template)
+        *out_template = NULL;
+    if (!ps || !inst_type)
+        return NULL;
+
+    for (int ti = 0; ti < ps->bundle_template_count; ++ti)
+    {
+        struct BundleTemplate *templ = &ps->bundle_templates[ti];
+        if (!templ || !templ->instances)
+            continue;
+        for (int ii = 0; ii < templ->instance_count; ++ii)
+        {
+            struct BundleTemplateInstance *inst = &templ->instances[ii];
+            if (inst->inst_type != inst_type)
+                continue;
+            if (out_template)
+                *out_template = templ;
+            return inst;
+        }
+    }
+    return NULL;
+}
+
+static Type *parser_instantiate_bundle_template(Parser *ps,
+                                                struct BundleTemplate *templ,
+                                                Type **type_args,
+                                                int type_arg_count,
+                                                int line,
+                                                int col)
+{
+    if (!ps || !templ)
+        return NULL;
+
+    if (type_arg_count > templ->generic_param_count)
+    {
+        diag_error_at(lexer_source(ps->lx), line, col,
+                      "bundle '%s' expects %d type argument(s) but %d provided",
+                      templ->name, templ->generic_param_count, type_arg_count);
+        exit(1);
+    }
+
+    int arg_count = templ->generic_param_count;
+    Type **resolved_args = (Type **)xcalloc((size_t)arg_count, sizeof(Type *));
+    for (int i = 0; i < type_arg_count; ++i)
+        resolved_args[i] = module_registry_canonical_type(type_args ? type_args[i] : NULL);
+
+    for (int i = type_arg_count; i < arg_count; ++i)
+    {
+        Type *placeholder = templ->generic_param_types ? templ->generic_param_types[i] : NULL;
+        Type *default_type = placeholder ? placeholder->template_default_type : NULL;
+        if (!default_type)
+        {
+            const char *pname = (templ->generic_param_names && templ->generic_param_names[i])
+                                    ? templ->generic_param_names[i]
+                                    : "T";
+            diag_error_at(lexer_source(ps->lx), line, col,
+                          "missing type argument for template parameter '%s' of bundle '%s'",
+                          pname, templ->name);
+            exit(1);
+        }
+        resolved_args[i] = module_registry_canonical_type(default_type);
+    }
+
+    for (int i = 0; i < templ->instance_count; ++i)
+    {
+        struct BundleTemplateInstance *inst = &templ->instances[i];
+        if (inst->type_arg_count != arg_count)
+            continue;
+        int match = 1;
+        for (int j = 0; j < arg_count; ++j)
+        {
+            if (!type_equals(inst->type_args[j], resolved_args[j]))
+            {
+                match = 0;
+                break;
+            }
+        }
+        if (match)
+        {
+            free(resolved_args);
+            return inst->inst_type;
+        }
+    }
+
+    int inst_index = templ->instance_count;
+    char name_buf[256];
+    for (;;)
+    {
+        snprintf(name_buf, sizeof(name_buf), "%s__inst%d", templ->name, inst_index);
+        if (!named_type_get(ps, name_buf, (int)strlen(name_buf)))
+            break;
+        inst_index++;
+    }
+    char *inst_name = xstrdup(name_buf);
+
+    Type *inst_type = (Type *)xcalloc(1, sizeof(Type));
+    inst_type->kind = TY_STRUCT;
+    inst_type->is_bundle = 1;
+    inst_type->is_exposed = templ->is_exposed ? 1 : 0;
+    inst_type->struct_name = inst_name;
+    inst_type->bundle_ctor_declared = (templ->bundle_type && templ->bundle_type->bundle_ctor_declared) ? 1 : 0;
+    inst_type->bundle_ctor_declared_exposed = (templ->bundle_type && templ->bundle_type->bundle_ctor_declared_exposed) ? 1 : 0;
+    inst_type->bundle_ctor_has_zero_arity = (templ->bundle_type && templ->bundle_type->bundle_ctor_has_zero_arity) ? 1 : 0;
+    inst_type->bundle_ctor_has_exposed_zero_arity = (templ->bundle_type && templ->bundle_type->bundle_ctor_has_exposed_zero_arity) ? 1 : 0;
+
+    int field_count = templ->field_count;
+    const char **field_names = (const char **)xcalloc((size_t)field_count, sizeof(const char *));
+    Type **field_types = (Type **)xcalloc((size_t)field_count, sizeof(Type *));
+    const char **field_defaults = (const char **)xcalloc((size_t)field_count, sizeof(const char *));
+    unsigned char *field_exposed = (unsigned char *)xcalloc((size_t)field_count, sizeof(unsigned char));
+    int *field_offsets = (int *)xcalloc((size_t)field_count, sizeof(int));
+
+    int offset = 0;
+    int max_align = 1;
+    for (int i = 0; i < field_count; ++i)
+    {
+        const char *src_name = templ->field_names ? templ->field_names[i] : NULL;
+        Type *src_type = templ->field_types ? templ->field_types[i] : NULL;
+        Type *inst_field_type = parser_substitute_template_type(src_type, resolved_args, arg_count);
+
+        if (inst_field_type && inst_field_type->kind == TY_STRUCT)
+        {
+            struct BundleTemplate *nested_template = NULL;
+            struct BundleTemplateInstance *nested_inst =
+                parser_find_bundle_template_instance_by_type(ps, inst_field_type, &nested_template);
+            if (nested_inst && nested_template && nested_inst->type_arg_count > 0)
+            {
+                int nested_count = nested_inst->type_arg_count;
+                Type **nested_args = (Type **)xcalloc((size_t)nested_count, sizeof(Type *));
+                int nested_changed = 0;
+                for (int ai = 0; ai < nested_count; ++ai)
+                {
+                    Type *orig_arg = nested_inst->type_args ? nested_inst->type_args[ai] : NULL;
+                    Type *sub_arg = parser_substitute_template_type(orig_arg, resolved_args, arg_count);
+                    nested_args[ai] = sub_arg;
+                    if (sub_arg != orig_arg)
+                        nested_changed = 1;
+                }
+
+                if (nested_changed)
+                {
+                    Type *specialized = parser_instantiate_bundle_template(ps,
+                                                                           nested_template,
+                                                                           nested_args,
+                                                                           nested_count,
+                                                                           line,
+                                                                           col);
+                    if (specialized)
+                        inst_field_type = specialized;
+                }
+                free(nested_args);
+            }
+        }
+
+        if (!inst_field_type)
+        {
+            diag_error_at(lexer_source(ps->lx), line, col,
+                          "failed to instantiate field type for bundle '%s'",
+                          templ->name);
+            exit(1);
+        }
+
+        field_names[i] = src_name ? xstrdup(src_name) : xstrdup("<unnamed>");
+        field_types[i] = inst_field_type;
+        field_defaults[i] = (templ->field_default_values && templ->field_default_values[i])
+                                ? xstrdup(templ->field_default_values[i])
+                                : NULL;
+        field_exposed[i] = (templ->field_exposed_flags && templ->field_exposed_flags[i]) ? 1 : 0;
+
+        int field_align = type_align_simple(inst_field_type);
+        if (field_align <= 0)
+            field_align = 1;
+        int field_size = type_sizeof_simple(inst_field_type);
+        if (inst_field_type->kind == TY_STRUCT && field_size == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), line, col,
+                          "template bundle '%s' field '%s' has incomplete instantiated type",
+                          templ->name, field_names[i]);
+            exit(1);
+        }
+
+        offset = align_up(offset, field_align);
+        field_offsets[i] = offset;
+        offset += field_size;
+        if (field_align > max_align)
+            max_align = field_align;
+    }
+
+    inst_type->strct.field_names = field_names;
+    inst_type->strct.field_types = field_types;
+    inst_type->strct.field_default_values = field_defaults;
+    inst_type->strct.field_exposed_flags = field_exposed;
+    inst_type->strct.field_offsets = field_offsets;
+    inst_type->strct.field_count = field_count;
+    inst_type->strct.size_bytes = align_up(offset, max_align > 0 ? max_align : 1);
+
+    named_type_add(ps, inst_name, (int)strlen(inst_name), inst_type, inst_type->is_exposed);
+    if (inst_type->is_exposed && ps->module_full_name)
+        module_registry_register_struct(ps->module_full_name, inst_type);
+
+    if (templ->instance_count == templ->instance_cap)
+    {
+        int new_cap = templ->instance_cap ? templ->instance_cap * 2 : 4;
+        struct BundleTemplateInstance *grown =
+            (struct BundleTemplateInstance *)realloc(templ->instances,
+                                                     (size_t)new_cap * sizeof(struct BundleTemplateInstance));
+        if (!grown)
+        {
+            diag_error("out of memory while storing bundle template instantiation");
+            exit(1);
+        }
+        templ->instances = grown;
+        templ->instance_cap = new_cap;
+    }
+
+    struct BundleTemplateInstance *slot = &templ->instances[templ->instance_count++];
+    memset(slot, 0, sizeof(*slot));
+    slot->type_arg_count = arg_count;
+    slot->type_args = resolved_args;
+    slot->inst_type = inst_type;
+    slot->inst_name = inst_name;
+
+    parser_emit_template_bundle_methods(ps,
+                                        templ,
+                                        inst_type,
+                                        resolved_args,
+                                        arg_count,
+                                        line,
+                                        col);
+
+    return inst_type;
+}
+
+static void parser_prepend_bundle_this_param(Parser *ps, Node *fn, Type *bundle_type)
+{
+    (void)ps;
+    if (!fn || fn->kind != ND_FUNC || !bundle_type)
+        return;
+
+    int old_count = fn->param_count;
+    int new_count = old_count + 1;
+
+    Type **new_param_types = (Type **)xcalloc((size_t)new_count, sizeof(Type *));
+    const char **new_param_names = (const char **)xcalloc((size_t)new_count, sizeof(char *));
+    unsigned char *new_param_const = (unsigned char *)xcalloc((size_t)new_count, sizeof(unsigned char));
+    if (!new_param_types || !new_param_names || !new_param_const)
+    {
+        diag_error("out of memory while adding implicit 'this' parameter");
+        exit(1);
+    }
+
+    new_param_types[0] = type_ptr(bundle_type);
+    new_param_names[0] = xstrdup("this");
+    new_param_const[0] = 0;
+
+    for (int i = 0; i < old_count; ++i)
+    {
+        new_param_types[i + 1] = fn->param_types ? fn->param_types[i] : NULL;
+        new_param_names[i + 1] = fn->param_names ? fn->param_names[i] : NULL;
+        new_param_const[i + 1] = fn->param_const_flags ? fn->param_const_flags[i] : 0;
+    }
+
+    free(fn->param_types);
+    free(fn->param_names);
+    free(fn->param_const_flags);
+
+    fn->param_types = new_param_types;
+    fn->param_names = new_param_names;
+    fn->param_const_flags = new_param_const;
+    fn->param_count = new_count;
+}
+
 struct PendingAttr
 {
     char *name;
@@ -241,7 +1685,49 @@ static Node *parse_expr(Parser *ps);
 static Node *parse_postfix_suffixes(Parser *ps, Node *expr);
 static Node *parse_lambda_expr(Parser *ps, Token fun_tok);
 static Type *parse_type_spec(Parser *ps);
+static Type **parser_parse_type_arg_list(Parser *ps, int *out_count);
+static struct BundleTemplate *parser_find_bundle_template(Parser *ps, const char *name, int name_len);
+static Type *parser_substitute_template_type(Type *orig, Type **bindings, int binding_count);
+static Type *parser_substitute_bundle_method_type(Type *orig,
+                                                  Type **bindings,
+                                                  int binding_count,
+                                                  Type *template_bundle_type,
+                                                  Type *inst_bundle_type);
+static Node *parser_clone_node_tree_for_bundle_method(const Node *src,
+                                                      Type **bindings,
+                                                      int binding_count,
+                                                      Type *template_bundle_type,
+                                                      Type *inst_bundle_type);
+static Node *parser_instantiate_bundle_method_template(const Node *fn,
+                                                       char *inst_name,
+                                                       Type **bindings,
+                                                       int binding_count,
+                                                       Type *template_bundle_type,
+                                                       Type *inst_bundle_type);
+static void parser_emit_template_bundle_methods(Parser *ps,
+                                                struct BundleTemplate *templ,
+                                                Type *inst_type,
+                                                Type **bindings,
+                                                int binding_count,
+                                                int line,
+                                                int col);
+static Type *parser_instantiate_bundle_template(Parser *ps,
+                                                struct BundleTemplate *templ,
+                                                Type **type_args,
+                                                int type_arg_count,
+                                                int line,
+                                                int col);
+static struct BundleTemplateInstance *parser_find_bundle_template_instance_by_type(Parser *ps,
+                                                                                   Type *inst_type,
+                                                                                   struct BundleTemplate **out_template);
+static Type *named_type_get(Parser *ps, const char *name, int len);
+static void named_type_add(Parser *ps, const char *name, int len, Type *ty, int is_exposed);
+static int type_sizeof_simple(Type *ty);
+static int type_align_simple(Type *ty);
+static int align_up(int value, int alignment);
 static Node *parse_inferred_var_decl(Parser *ps, int expect_semicolon);
+static Node *parse_bundle_this_method(Parser *ps, Token sign_tok, int is_noreturn, int is_exposed, int is_managed);
+static Node *parse_bundle_on_method(Parser *ps, Token on_tok, int is_noreturn, int is_exposed, int is_managed);
 static char *dup_token_text(Token t);
 static int parser_call_type_args_ahead(Parser *ps);
 static Type **parser_parse_call_type_args(Parser *ps, int *out_count);
@@ -275,6 +1761,16 @@ static int token_is_varargs(Token tok)
     if (tok.kind == TK_IDENT && tok.length == 8 && strncmp(tok.lexeme, "_vaargs_", 8) == 0)
         return 1;
     return 0;
+}
+
+static int token_is_ident_text(Token tok, const char *text)
+{
+    if (tok.kind != TK_IDENT || !text)
+        return 0;
+    size_t len = strlen(text);
+    if ((size_t)tok.length != len)
+        return 0;
+    return strncmp(tok.lexeme, text, len) == 0;
 }
 
 static char *dup_trimmed(const char *text)
@@ -1401,6 +2897,7 @@ static Node *parse_block(Parser *ps);
 static Node *parse_try_stmt(Parser *ps);
 static Node *parse_while(Parser *ps);
 static Node *parse_for(Parser *ps);
+static Node *parse_foreach(Parser *ps);
 static Node *parse_switch(Parser *ps);
 static Node *parse_match_expr(Parser *ps, Token match_tok);
 static void parse_alias_decl(Parser *ps, int is_exposed);
@@ -1415,12 +2912,15 @@ static int parser_peek_struct_literal(Parser *ps, Token look);
 
 static Node *parse_initializer(Parser *ps);
 static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_packed);
+static void parse_bundle_decl(Parser *ps, int is_exposed, Node ***decls, int *decl_count, int *decl_cap, int *fn_count);
 static void parse_enum_decl(Parser *ps, int is_exposed);
 static void parse_module_decl(Parser *ps, int managed_mode);
 static int parse_bring_decl(Parser *ps);
 static int parse_extend_decl(Parser *ps, int leading_noreturn);
 static Type *parse_inline_union_type(Parser *ps);
 static int struct_packed_from_attributes(Parser *ps, struct PendingAttr *attrs, int attr_count, int is_union);
+static const struct BundleStaticMember *parser_find_bundle_static_member(Parser *ps, const char *bundle_name, int bundle_name_len, const char *member_name, int member_name_len);
+static char *parser_serialize_struct_field_default(Parser *ps, const Type *field_type, Node *expr);
 
 static int struct_packed_from_attributes(Parser *ps, struct PendingAttr *attrs, int attr_count, int is_union)
 {
@@ -1563,6 +3063,17 @@ static Node *parser_make_bool_lit(Parser *ps, int value, int line, int col)
     n->col = col;
     n->src = lexer_source(ps->lx);
     return n;
+}
+
+static char *parser_make_foreach_temp_name(Parser *ps, const char *role)
+{
+    const char *safe_role = (role && *role) ? role : "tmp";
+    int next_id = 1;
+    if (ps)
+        next_id = ++ps->foreach_temp_counter;
+    char buf[96];
+    snprintf(buf, sizeof(buf), "__chance_foreach_%s_%d", safe_role, next_id);
+    return xstrdup(buf);
 }
 
 static Node *parser_make_string_lit(Parser *ps, const char *text, int line, int col)
@@ -2397,6 +3908,28 @@ static void parser_pop_generic_params(Parser *ps, int count)
     }
 }
 
+static Type *parser_make_deferred_import_type(Parser *ps, const Token *tok)
+{
+    if (!tok || tok->kind != TK_IDENT || tok->length <= 0)
+        return NULL;
+
+    char *type_name = (char *)xmalloc((size_t)tok->length + 1);
+    memcpy(type_name, tok->lexeme, (size_t)tok->length);
+    type_name[tok->length] = '\0';
+
+    Type *imp_type = (Type *)xcalloc(1, sizeof(Type));
+    imp_type->kind = TY_IMPORT;
+    imp_type->struct_name = type_name;
+    imp_type->import_type_name = type_name;
+
+    if (ps && ps->module_full_name && ps->module_full_name[0] != '\0')
+        imp_type->import_module = xstrdup(ps->module_full_name);
+    else
+        imp_type->import_module = xstrdup("");
+
+    return imp_type;
+}
+
 static int is_type_start(Parser *ps, Token t)
 {
     switch (t.kind)
@@ -2442,6 +3975,8 @@ static int is_type_start(Parser *ps, Token t)
     }
     case TK_KW_STRUCT:
         return 1;
+    case TK_KW_BUNDLE:
+        return parser_is_h28_enabled();
     case TK_KW_UNION:
         return parser_is_h27_enabled();
     default:
@@ -2469,6 +4004,132 @@ static int is_type_start(Parser *ps, Token t)
         }
     }
     return 0;
+}
+
+static int parser_is_implicit_ident_decl_start(Parser *ps, Token t)
+{
+    if (!ps || t.kind != TK_IDENT)
+        return 0;
+    if (lexer_peek_n(ps->lx, 1).kind == TK_IDENT)
+        return 1;
+
+    if (lexer_peek_n(ps->lx, 1).kind != TK_LT)
+        return 0;
+
+    int depth = 0;
+    int paren_depth = 0;
+    int bracket_depth = 0;
+    int offset = 1;
+    while (1)
+    {
+        Token tok = lexer_peek_n(ps->lx, offset);
+        if (offset == 1)
+        {
+            depth = 1;
+            offset++;
+            continue;
+        }
+        switch (tok.kind)
+        {
+        case TK_LT:
+            depth++;
+            break;
+        case TK_GT:
+            depth--;
+            break;
+        case TK_SHR:
+            depth -= 2;
+            break;
+        case TK_LPAREN:
+            paren_depth++;
+            break;
+        case TK_RPAREN:
+            if (paren_depth > 0)
+                paren_depth--;
+            else if (depth > 0 && bracket_depth == 0)
+                return 0;
+            break;
+        case TK_LBRACKET:
+            bracket_depth++;
+            break;
+        case TK_RBRACKET:
+            if (bracket_depth > 0)
+                bracket_depth--;
+            else if (depth > 0 && paren_depth == 0)
+                return 0;
+            break;
+        case TK_EOF:
+        case TK_SEMI:
+        case TK_ASSIGN:
+            return 0;
+        case TK_LBRACE:
+        case TK_RBRACE:
+            if (depth > 0 && paren_depth == 0 && bracket_depth == 0)
+                return 0;
+            break;
+        default:
+            break;
+        }
+
+        if (depth <= 0)
+        {
+            if (depth < 0)
+                return 0;
+            Token maybe_name = lexer_peek_n(ps->lx, offset + 1);
+            if (maybe_name.kind != TK_IDENT)
+                return 0;
+            Token after_name = lexer_peek_n(ps->lx, offset + 2);
+            return after_name.kind == TK_ASSIGN || after_name.kind == TK_SEMI;
+        }
+        offset++;
+    }
+}
+
+static Type *parser_decl_canonicalize_bundle_reference(Type *ty)
+{
+    if (!ty)
+        return ty;
+    Type *resolved = module_registry_canonical_type(ty);
+    if (resolved)
+        ty = resolved;
+    if (ty->kind == TY_STRUCT && ty->is_bundle)
+        return type_ptr(ty);
+    return ty;
+}
+
+static int stmt_starts_with_qualified_member_expr(Parser *ps)
+{
+    if (!ps)
+        return 0;
+
+    Token first = lexer_peek(ps->lx);
+    if (first.kind != TK_IDENT)
+        return 0;
+
+    if (lexer_peek_n(ps->lx, 1).kind != TK_DOT)
+        return 0;
+
+    int idx = 1;
+    while (lexer_peek_n(ps->lx, idx).kind == TK_DOT)
+    {
+        if (lexer_peek_n(ps->lx, idx + 1).kind != TK_IDENT)
+            return 0;
+        idx += 2;
+    }
+
+    int decl_idx = idx;
+    Token look = lexer_peek_n(ps->lx, decl_idx);
+    while (look.kind == TK_STAR)
+    {
+        decl_idx++;
+        look = lexer_peek_n(ps->lx, decl_idx);
+    }
+
+    /*
+     * A declaration must provide a declarator name after the type path.
+     * If no identifier follows, treat it as an expression (e.g. Type.member = ...).
+     */
+    return look.kind != TK_IDENT;
 }
 
 static int type_is_function_pointer(const Type *ty)
@@ -2645,6 +4306,7 @@ static Type *parse_type_base(Parser *ps)
         break;
     }
     Type *base = NULL;
+    Token p;
     Token b = lexer_next(ps->lx);
     if (b.kind == TK_KW_REF)
     {
@@ -2867,6 +4529,50 @@ static Type *parse_type_base(Parser *ps)
             memcpy(type_name, type_tok.lexeme, (size_t)type_tok.length);
             type_name[type_tok.length] = '\0';
 
+            Type **template_type_args = NULL;
+            int template_type_arg_count = 0;
+            Token maybe_lt = lexer_peek(ps->lx);
+            if (maybe_lt.kind == TK_LT)
+                template_type_args = parser_parse_type_arg_list(ps, &template_type_arg_count);
+
+            if (template_type_args)
+            {
+                int inst_matches = 0;
+                Type *inst = parser_lookup_preinstantiated_template_instance(ps,
+                                                                             module_full,
+                                                                             type_name,
+                                                                             (int)strlen(type_name),
+                                                                             template_type_args,
+                                                                             template_type_arg_count,
+                                                                             &inst_matches);
+                if (inst_matches > 1)
+                {
+                    diag_error_at(lexer_source(ps->lx), type_tok.line, type_tok.col,
+                                  "ambiguous template bundle '%s' in module '%s'; multiple pre-instantiated variants are available",
+                                  type_name, module_full);
+                    free(type_name);
+                    if (tokens != local_buf)
+                        free(tokens);
+                    exit(1);
+                }
+                if (!inst)
+                {
+                    diag_error_at(lexer_source(ps->lx), type_tok.line, type_tok.col,
+                                  "type '%s.%s' does not accept type arguments",
+                                  module_full, type_name);
+                    free(type_name);
+                    if (tokens != local_buf)
+                        free(tokens);
+                    exit(1);
+                }
+
+                base = inst;
+                free(type_name);
+                if (tokens != local_buf)
+                    free(tokens);
+                return base;
+            }
+
             Type *resolved = module_registry_lookup_struct(module_full, type_name);
             if (!resolved)
                 resolved = module_registry_lookup_enum(module_full, type_name);
@@ -2904,16 +4610,85 @@ static Type *parse_type_base(Parser *ps)
                 else
                 {
                     int ai = alias_find(ps, b.lexeme, b.length);
-                    if (ai < 0)
+                    struct BundleTemplate *templ = parser_find_bundle_template(ps, b.lexeme, b.length);
+                    Type **template_type_args = NULL;
+                    int template_type_arg_count = 0;
+
+                    Token maybe_lt = lexer_peek(ps->lx);
+                    if (maybe_lt.kind == TK_LT)
+                    {
+                        if (ai >= 0 && ps->aliases[ai].is_generic)
+                        {
+                            // Parsed below in generic alias path.
+                        }
+                        else
+                        {
+                            template_type_args = parser_parse_type_arg_list(ps, &template_type_arg_count);
+                        }
+                    }
+
+                    if (template_type_args)
+                    {
+                        if (!templ)
+                        {
+                            int inst_matches = 0;
+                            Type *inst = parser_lookup_preinstantiated_template_instance(ps,
+                                                                                         NULL,
+                                                                                         b.lexeme,
+                                                                                         b.length,
+                                                                                         template_type_args,
+                                                                                         template_type_arg_count,
+                                                                                         &inst_matches);
+                            if (inst_matches > 1)
+                            {
+                                diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                                              "ambiguous template bundle '%.*s'; multiple imported pre-instantiated variants are available",
+                                              b.length, b.lexeme);
+                                exit(1);
+                            }
+                            if (!inst)
+                            {
+                                diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                                              "type '%.*s' does not accept type arguments (found %d pre-instantiated variant(s))",
+                                              b.length, b.lexeme, inst_matches);
+                                exit(1);
+                            }
+                            base = inst;
+                        }
+                        else
+                        {
+                            base = parser_instantiate_bundle_template(ps,
+                                                                       templ,
+                                                                       template_type_args,
+                                                                       template_type_arg_count,
+                                                                       b.line,
+                                                                       b.col);
+                        }
+                    }
+                    else if (ai < 0)
                     {
                         Type *nt = named_type_get(ps, b.lexeme, b.length);
                         if (nt)
+                        {
+                            if (templ)
+                            {
+                                diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                                              "template bundle '%.*s' requires explicit type arguments",
+                                              b.length, b.lexeme);
+                                exit(1);
+                            }
                             base = nt;
+                        }
                         else
                         {
-                            diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
-                                          b.length, b.lexeme);
-                            exit(1);
+                            Type *deferred = parser_make_deferred_import_type(ps, &b);
+                            if (!deferred)
+                            {
+                                diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
+                                              b.length, b.lexeme);
+                                exit(1);
+                            }
+                            base = deferred;
                         }
                     }
                     if (ai >= 0)
@@ -3001,8 +4776,10 @@ static Type *parse_type_base(Parser *ps)
             }
         }
     }
-    else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_UNION)
+    else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_BUNDLE || b.kind == TK_KW_UNION)
     {
+        if (b.kind == TK_KW_BUNDLE)
+            parser_require_h28(ps, b, "bundle type");
         if (b.kind == TK_KW_UNION)
             parser_require_h27(ps, b, "union type");
         int want_union = (b.kind == TK_KW_UNION);
@@ -3014,11 +4791,39 @@ static Type *parse_type_base(Parser *ps)
         }
         
         Token nm = expect(ps, TK_IDENT, want_union ? "union name" : "struct name");
+        if (!want_union)
+        {
+            Token maybe_lt = lexer_peek(ps->lx);
+            if (maybe_lt.kind == TK_LT)
+            {
+                struct BundleTemplate *templ = parser_find_bundle_template(ps, nm.lexeme, nm.length);
+                if (!templ)
+                {
+                    diag_error_at(lexer_source(ps->lx), maybe_lt.line, maybe_lt.col,
+                                  "type '%.*s' does not accept type arguments",
+                                  nm.length, nm.lexeme);
+                    exit(1);
+                }
+                Type **type_args = NULL;
+                int type_arg_count = 0;
+                type_args = parser_parse_type_arg_list(ps, &type_arg_count);
+                base = parser_instantiate_bundle_template(ps, templ, type_args, type_arg_count,
+                                                          nm.line, nm.col);
+                return base;
+            }
+        }
         Type *nt = named_type_get(ps, nm.lexeme, nm.length);
         if (!nt)
         {
             diag_error_at(lexer_source(ps->lx), nm.line, nm.col,
                           "unknown %s '%.*s'", want_union ? "union" : "struct",
+                          nm.length, nm.lexeme);
+            exit(1);
+        }
+        if (!want_union && parser_find_bundle_template(ps, nm.lexeme, nm.length))
+        {
+            diag_error_at(lexer_source(ps->lx), nm.line, nm.col,
+                          "template bundle '%.*s' requires explicit type arguments",
                           nm.length, nm.lexeme);
             exit(1);
         }
@@ -3064,6 +4869,7 @@ static Type *parse_type_spec(Parser *ps)
         break;
     }
     Type *base = NULL;
+    Token p;
     Token b = lexer_next(ps->lx);
     if (b.kind == TK_KW_REF)
     {
@@ -3267,6 +5073,50 @@ static Type *parse_type_spec(Parser *ps)
             memcpy(type_name, type_tok.lexeme, (size_t)type_tok.length);
             type_name[type_tok.length] = '\0';
 
+            Type **template_type_args = NULL;
+            int template_type_arg_count = 0;
+            Token maybe_lt = lexer_peek(ps->lx);
+            if (maybe_lt.kind == TK_LT)
+                template_type_args = parser_parse_type_arg_list(ps, &template_type_arg_count);
+
+            if (template_type_args)
+            {
+                int inst_matches = 0;
+                Type *inst = parser_lookup_preinstantiated_template_instance(ps,
+                                                                             module_full,
+                                                                             type_name,
+                                                                             (int)strlen(type_name),
+                                                                             template_type_args,
+                                                                             template_type_arg_count,
+                                                                             &inst_matches);
+                if (inst_matches > 1)
+                {
+                    diag_error_at(lexer_source(ps->lx), type_tok.line, type_tok.col,
+                                  "ambiguous template bundle '%s' in module '%s'; multiple pre-instantiated variants are available",
+                                  type_name, module_full);
+                    free(type_name);
+                    if (tokens != local_buf)
+                        free(tokens);
+                    exit(1);
+                }
+                if (!inst)
+                {
+                    diag_error_at(lexer_source(ps->lx), type_tok.line, type_tok.col,
+                                  "type '%s.%s' does not accept type arguments",
+                                  module_full, type_name);
+                    free(type_name);
+                    if (tokens != local_buf)
+                        free(tokens);
+                    exit(1);
+                }
+
+                base = inst;
+                free(type_name);
+                if (tokens != local_buf)
+                    free(tokens);
+                goto parse_type_spec_post_base;
+            }
+
             Type *resolved = module_registry_lookup_struct(module_full, type_name);
             if (!resolved)
                 resolved = module_registry_lookup_enum(module_full, type_name);
@@ -3304,16 +5154,85 @@ static Type *parse_type_spec(Parser *ps)
                 else
                 {
                     int ai = alias_find(ps, b.lexeme, b.length);
-                    if (ai < 0)
+                    struct BundleTemplate *templ = parser_find_bundle_template(ps, b.lexeme, b.length);
+                    Type **template_type_args = NULL;
+                    int template_type_arg_count = 0;
+
+                    Token maybe_lt = lexer_peek(ps->lx);
+                    if (maybe_lt.kind == TK_LT)
+                    {
+                        if (ai >= 0 && ps->aliases[ai].is_generic)
+                        {
+                            // Parsed below in generic alias path.
+                        }
+                        else
+                        {
+                            template_type_args = parser_parse_type_arg_list(ps, &template_type_arg_count);
+                        }
+                    }
+
+                    if (template_type_args)
+                    {
+                        if (!templ)
+                        {
+                            int inst_matches = 0;
+                            Type *inst = parser_lookup_preinstantiated_template_instance(ps,
+                                                                                         NULL,
+                                                                                         b.lexeme,
+                                                                                         b.length,
+                                                                                         template_type_args,
+                                                                                         template_type_arg_count,
+                                                                                         &inst_matches);
+                            if (inst_matches > 1)
+                            {
+                                diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                                              "ambiguous template bundle '%.*s'; multiple imported pre-instantiated variants are available",
+                                              b.length, b.lexeme);
+                                exit(1);
+                            }
+                            if (!inst)
+                            {
+                                diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                                              "type '%.*s' does not accept type arguments (found %d pre-instantiated variant(s))",
+                                              b.length, b.lexeme, inst_matches);
+                                exit(1);
+                            }
+                            base = inst;
+                        }
+                        else
+                        {
+                            base = parser_instantiate_bundle_template(ps,
+                                                                       templ,
+                                                                       template_type_args,
+                                                                       template_type_arg_count,
+                                                                       b.line,
+                                                                       b.col);
+                        }
+                    }
+                    else if (ai < 0)
                     {
                         Type *nt = named_type_get(ps, b.lexeme, b.length);
                         if (nt)
+                        {
+                            if (templ)
+                            {
+                                diag_error_at(lexer_source(ps->lx), b.line, b.col,
+                                              "template bundle '%.*s' requires explicit type arguments",
+                                              b.length, b.lexeme);
+                                exit(1);
+                            }
                             base = nt;
+                        }
                         else
                         {
-                            diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
-                                          b.length, b.lexeme);
-                            exit(1);
+                            Type *deferred = parser_make_deferred_import_type(ps, &b);
+                            if (!deferred)
+                            {
+                                diag_error_at(lexer_source(ps->lx), b.line, b.col, "unknown type '%.*s'",
+                                              b.length, b.lexeme);
+                                exit(1);
+                            }
+                            base = deferred;
                         }
                     }
                     if (ai >= 0)
@@ -3401,8 +5320,10 @@ static Type *parse_type_spec(Parser *ps)
             }
         }
     }
-    else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_UNION)
+    else if (b.kind == TK_KW_STRUCT || b.kind == TK_KW_BUNDLE || b.kind == TK_KW_UNION)
     {
+        if (b.kind == TK_KW_BUNDLE)
+            parser_require_h28(ps, b, "bundle type");
         if (b.kind == TK_KW_UNION)
             parser_require_h27(ps, b, "union type");
         int want_union = (b.kind == TK_KW_UNION);
@@ -3415,11 +5336,39 @@ static Type *parse_type_spec(Parser *ps)
         {
             
             Token nm = expect(ps, TK_IDENT, want_union ? "union name" : "struct name");
+            if (!want_union)
+            {
+                Token maybe_lt = lexer_peek(ps->lx);
+                if (maybe_lt.kind == TK_LT)
+                {
+                    struct BundleTemplate *templ = parser_find_bundle_template(ps, nm.lexeme, nm.length);
+                    if (!templ)
+                    {
+                        diag_error_at(lexer_source(ps->lx), maybe_lt.line, maybe_lt.col,
+                                      "type '%.*s' does not accept type arguments",
+                                      nm.length, nm.lexeme);
+                        exit(1);
+                    }
+                    Type **type_args = NULL;
+                    int type_arg_count = 0;
+                    type_args = parser_parse_type_arg_list(ps, &type_arg_count);
+                    base = parser_instantiate_bundle_template(ps, templ, type_args, type_arg_count,
+                                                              nm.line, nm.col);
+                    goto parse_type_spec_post_base;
+                }
+            }
             Type *nt = named_type_get(ps, nm.lexeme, nm.length);
             if (!nt)
             {
                 diag_error_at(lexer_source(ps->lx), nm.line, nm.col,
                               "unknown %s '%.*s'", want_union ? "union" : "struct",
+                              nm.length, nm.lexeme);
+                exit(1);
+            }
+            if (!want_union && parser_find_bundle_template(ps, nm.lexeme, nm.length))
+            {
+                diag_error_at(lexer_source(ps->lx), nm.line, nm.col,
+                              "template bundle '%.*s' requires explicit type arguments",
                               nm.length, nm.lexeme);
                 exit(1);
             }
@@ -3440,8 +5389,8 @@ static Type *parse_type_spec(Parser *ps)
                       "expected type specifier");
         exit(1);
     }
-    
-    Token p = lexer_peek(ps->lx);
+parse_type_spec_post_base:
+    p = lexer_peek(ps->lx);
     while (p.kind == TK_LBRACKET)
     {
         lexer_next(ps->lx);
@@ -3739,6 +5688,7 @@ static Node *parse_lambda_expr(Parser *ps, Token fun_tok)
         }
 
         Type *pty = parse_type_spec(ps);
+        pty = parser_decl_canonicalize_bundle_reference(pty);
         Token pn = expect(ps, TK_IDENT, "parameter name");
 
         if (param_count == param_cap)
@@ -4025,6 +5975,21 @@ static Node *parse_primary(Parser *ps)
     }
     if (t.kind == TK_LBRACKET)
     {
+        Token next = lexer_peek(ps->lx);
+        if (next.kind == TK_RBRACKET)
+        {
+            lexer_next(ps->lx);
+            Node *init = new_node(ND_INIT_LIST);
+            init->line = t.line;
+            init->col = t.col;
+            init->src = lexer_source(ps->lx);
+            init->init.is_zero = 1;
+            init->init.is_array_literal = 1;
+            init->init.count = 0;
+            init->init.elems = NULL;
+            init->init.designators = NULL;
+            return init;
+        }
         return parse_metadata_call(ps, t);
     }
     if (t.kind == TK_IDENT)
@@ -4372,6 +6337,31 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
             pending_type_args = parser_parse_call_type_args(ps, &pending_type_arg_count);
             continue;
         }
+        if (p.kind == TK_LT && e && e->kind == ND_VAR && e->var_ref)
+        {
+            int name_len = (int)strlen(e->var_ref);
+            struct BundleTemplate *templ = parser_find_bundle_template(ps, e->var_ref, name_len);
+            if (templ)
+            {
+                int type_arg_count = 0;
+                Type **type_args = parser_parse_type_arg_list(ps, &type_arg_count);
+                Type *inst_type = parser_instantiate_bundle_template(ps,
+                                                                     templ,
+                                                                     type_args,
+                                                                     type_arg_count,
+                                                                     p.line,
+                                                                     p.col);
+                if (!inst_type || !inst_type->struct_name)
+                {
+                    diag_error_at(lexer_source(ps->lx), p.line, p.col,
+                                  "failed to resolve template bundle type arguments");
+                    exit(1);
+                }
+                free((void *)e->var_ref);
+                e->var_ref = xstrdup(inst_type->struct_name);
+                continue;
+            }
+        }
         if (p.kind == TK_PLUSPLUS)
         {
             lexer_next(ps->lx);
@@ -4428,6 +6418,7 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
             else
             {
                 Type *ty = parse_type_spec(ps);
+                ty = parser_decl_canonicalize_bundle_reference(ty);
                 Node *cs = new_node(ND_CAST);
                 cs->lhs = e;
                 cs->type = ty;
@@ -4446,6 +6437,27 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
                 break;
             Token op = lexer_next(ps->lx);
             Token field = expect(ps, TK_IDENT, "member name");
+
+            if (op.kind == TK_DOT && e && e->kind == ND_VAR && e->var_ref)
+            {
+                int bundle_name_len = (int)strlen(e->var_ref);
+                const struct BundleStaticMember *static_member =
+                    parser_find_bundle_static_member(ps, e->var_ref, bundle_name_len,
+                                                     field.lexeme, field.length);
+                if (static_member && static_member->symbol_name)
+                {
+                    Node *sv = new_node(ND_VAR);
+                    sv->var_ref = xstrdup(static_member->symbol_name);
+                    sv->var_is_global = 1;
+                    sv->var_is_function = static_member->is_function ? 1 : 0;
+                    sv->var_is_const = static_member->is_function ? 1 : (static_member->is_const ? 1 : 0);
+                    sv->line = field.line;
+                    sv->col = field.col;
+                    sv->src = lexer_source(ps->lx);
+                    e = sv;
+                    continue;
+                }
+            }
             
             if (op.kind == TK_ACCESS && e->kind == ND_VAR)
             {
@@ -4602,6 +6614,7 @@ static Node *parse_unary(Parser *ps)
         {
             lexer_next(ps->lx); 
             Type *ty = parse_type_spec(ps);
+            ty = parser_decl_canonicalize_bundle_reference(ty);
             expect(ps, TK_RPAREN, ")");
             Node *operand = parse_unary(ps);
             Node *cs = new_node(ND_CAST);
@@ -4741,6 +6754,51 @@ static Node *parse_unary(Parser *ps)
             Node *count = parse_expr(ps);
             expect(ps, TK_RBRACKET, "]");
             n->lhs = count; 
+            nxt = lexer_peek(ps->lx);
+            if (nxt.kind == TK_LPAREN)
+            {
+                diag_error_at(lexer_source(ps->lx), nxt.line, nxt.col,
+                              "new array allocation cannot also include constructor arguments");
+                exit(1);
+            }
+        }
+
+        if (nxt.kind == TK_LPAREN)
+        {
+            lexer_next(ps->lx);
+            Node **args = NULL;
+            int argc = 0;
+            int cap = 0;
+            Token arg_start = lexer_peek(ps->lx);
+            if (arg_start.kind != TK_RPAREN)
+            {
+                for (;;)
+                {
+                    Node *arg = parse_expr(ps);
+                    if (argc == cap)
+                    {
+                        cap = cap ? cap * 2 : 4;
+                        Node **grown = (Node **)realloc(args, sizeof(Node *) * (size_t)cap);
+                        if (!grown)
+                        {
+                            diag_error("out of memory while parsing new-expression arguments");
+                            exit(1);
+                        }
+                        args = grown;
+                    }
+                    args[argc++] = arg;
+                    Token comma = lexer_peek(ps->lx);
+                    if (comma.kind == TK_COMMA)
+                    {
+                        lexer_next(ps->lx);
+                        continue;
+                    }
+                    break;
+                }
+            }
+            expect(ps, TK_RPAREN, ")");
+            n->args = args;
+            n->arg_count = argc;
         }
         n->line = p.line;
         n->col = p.col;
@@ -4872,6 +6930,7 @@ static Node *parse_rel(Parser *ps)
             parser_require_h27(ps, p, "'is' type-test operator");
             Token op = lexer_next(ps->lx);
             Type *rhs_ty = parse_type_spec(ps);
+            rhs_ty = parser_decl_canonicalize_bundle_reference(rhs_ty);
             Node *n = new_node(ND_IS);
             n->lhs = lhs;
             n->is_type = rhs_ty;
@@ -5267,6 +7326,7 @@ static Node *parse_inferred_var_decl(Parser *ps, int expect_semicolon)
 static Node *parse_stmt(Parser *ps)
 {
     Token t = lexer_peek(ps->lx);
+    int starts_with_member_expr = stmt_starts_with_qualified_member_expr(ps);
     if (t.kind == TK_KW_MANAGED)
     {
         parser_require_h27(ps, t, "managed block");
@@ -5334,9 +7394,36 @@ static Node *parse_stmt(Parser *ps)
     {
         return parse_for(ps);
     }
-    if (t.kind == TK_KW_FOR)
+    if (token_is_ident_text(t, "foreach"))
     {
-        return parse_for(ps);
+        parser_require_h28(ps, t, "foreach loop");
+        return parse_foreach(ps);
+    }
+    if (token_is_ident_text(t, "yield"))
+    {
+        parser_require_h28(ps, t, "yield statement");
+        if (!ps->current_function_name || strcmp(ps->current_function_name, "iterate") != 0)
+        {
+            diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                          "'yield' is currently only supported inside 'iterate' functions/methods");
+            exit(1);
+        }
+        lexer_next(ps->lx);
+        Token nxt = lexer_peek(ps->lx);
+        if (nxt.kind == TK_SEMI)
+        {
+            diag_error_at(lexer_source(ps->lx), nxt.line, nxt.col,
+                          "'yield' requires a value expression");
+            exit(1);
+        }
+        Node *expr = parse_expr(ps);
+        expect(ps, TK_SEMI, ";");
+        Node *y = new_node(ND_RET);
+        y->lhs = expr;
+        y->line = t.line;
+        y->col = t.col;
+        y->src = lexer_source(ps->lx);
+        return y;
     }
     if (t.kind == TK_KW_SWITCH)
     {
@@ -5458,7 +7545,8 @@ static Node *parse_stmt(Parser *ps)
     {
         return parse_inferred_var_decl(ps, 1);
     }
-    if (t.kind == TK_KW_STATIC || t.kind == TK_KW_CONSTANT || is_type_start(ps, t))
+    if ((t.kind == TK_KW_STATIC || t.kind == TK_KW_CONSTANT || is_type_start(ps, t) || parser_is_implicit_ident_decl_start(ps, t)) &&
+        !starts_with_member_expr)
     {
         int is_const = 0;
         int is_static = 0;
@@ -5481,7 +7569,7 @@ static Node *parse_stmt(Parser *ps)
             break;
         }
 
-        if (!is_type_start(ps, t))
+        if (!is_type_start(ps, t) && !parser_is_implicit_ident_decl_start(ps, t))
         {
             diag_error_at(lexer_source(ps->lx), t.line, t.col,
                           "expected a type after storage qualifiers");
@@ -5489,6 +7577,7 @@ static Node *parse_stmt(Parser *ps)
         }
         
         Type *ty = parse_type_spec(ps);
+        ty = parser_decl_canonicalize_bundle_reference(ty);
         Token name = expect(ps, TK_IDENT, "identifier");
         Node *decl = new_node(ND_VAR_DECL);
         char *nm = (char *)xmalloc((size_t)name.length + 1);
@@ -5898,7 +7987,7 @@ static Node *parse_for(Parser *ps)
     {
         
         
-        if (next.kind == TK_KW_STATIC || next.kind == TK_KW_CONSTANT || is_type_start(ps, next))
+        if (next.kind == TK_KW_STATIC || next.kind == TK_KW_CONSTANT || is_type_start(ps, next) || parser_is_implicit_ident_decl_start(ps, next))
         {
             
             int is_const = 0;
@@ -5922,13 +8011,14 @@ static Node *parse_for(Parser *ps)
                 break;
             }
 
-            if (!is_type_start(ps, next))
+            if (!is_type_start(ps, next) && !parser_is_implicit_ident_decl_start(ps, next))
             {
                 diag_error_at(lexer_source(ps->lx), next.line, next.col,
                               "expected a type after storage qualifiers");
                 exit(1);
             }
             Type *ty = parse_type_spec(ps);
+            ty = parser_decl_canonicalize_bundle_reference(ty);
             Token name = expect(ps, TK_IDENT, "identifier");
             Node *decl = new_node(ND_VAR_DECL);
             char *nm = (char *)xmalloc((size_t)name.length + 1);
@@ -6027,10 +8117,186 @@ static Node *parse_for(Parser *ps)
     return wh;
 }
 
-static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_managed, FunctionBodyKind body_kind, struct PendingAttr *attrs, int attr_count)
+static Node *parse_foreach(Parser *ps)
+{
+    Token foreach_tok = lexer_next(ps->lx);
+    if (!token_is_ident_text(foreach_tok, "foreach"))
+    {
+        diag_error_at(lexer_source(ps->lx), foreach_tok.line, foreach_tok.col,
+                      "expected 'foreach'");
+        exit(1);
+    }
+
+    expect(ps, TK_LPAREN, "(");
+
+    Type *elem_ty = parse_type_spec(ps);
+    elem_ty = parser_decl_canonicalize_bundle_reference(elem_ty);
+    Token elem_name = expect(ps, TK_IDENT, "identifier");
+
+    Token in_tok = expect(ps, TK_IDENT, "'in'");
+    if (!token_is_ident_text(in_tok, "in"))
+    {
+        diag_error_at(lexer_source(ps->lx), in_tok.line, in_tok.col,
+                      "expected 'in' in foreach loop");
+        exit(1);
+    }
+
+    Node *iter_expr = parse_expr(ps);
+    expect(ps, TK_RPAREN, ")");
+
+    Node *user_body = parse_stmt(ps);
+
+    char *iter_name = parser_make_foreach_temp_name(ps, "source");
+    char *idx_name = parser_make_foreach_temp_name(ps, "index");
+
+    Node *iter_decl = new_node(ND_VAR_DECL);
+    iter_decl->var_name = iter_name;
+    iter_decl->var_is_const = 0;
+    iter_decl->var_is_static = 0;
+    iter_decl->var_is_global = 0;
+    iter_decl->var_is_array = 0;
+    iter_decl->var_is_function = 0;
+    iter_decl->var_is_inferred = 1;
+    iter_decl->rhs = iter_expr;
+    iter_decl->line = foreach_tok.line;
+    iter_decl->col = foreach_tok.col;
+    iter_decl->src = lexer_source(ps->lx);
+
+    Node *idx_decl = new_node(ND_VAR_DECL);
+    idx_decl->var_name = idx_name;
+    idx_decl->var_type = type_i32();
+    idx_decl->var_is_const = 0;
+    idx_decl->var_is_static = 0;
+    idx_decl->var_is_global = 0;
+    idx_decl->var_is_array = 0;
+    idx_decl->var_is_function = 0;
+    idx_decl->var_is_inferred = 0;
+    idx_decl->rhs = parser_make_bool_lit(ps, 0, foreach_tok.line, foreach_tok.col);
+    idx_decl->line = foreach_tok.line;
+    idx_decl->col = foreach_tok.col;
+    idx_decl->src = lexer_source(ps->lx);
+
+    Node *count_member = parser_make_member(
+        ps,
+        parser_make_var_ref(ps, xstrdup(iter_name), foreach_tok.line, foreach_tok.col),
+        xstrdup("Count"),
+        foreach_tok.line,
+        foreach_tok.col);
+    Node *count_call = new_node(ND_CALL);
+    count_call->lhs = count_member;
+    count_call->args = NULL;
+    count_call->arg_count = 0;
+    count_call->call_name = call_name_from_expr(count_member);
+    count_call->line = foreach_tok.line;
+    count_call->col = foreach_tok.col;
+    count_call->src = lexer_source(ps->lx);
+
+    Node *cond = new_node(ND_LT);
+    cond->lhs = parser_make_var_ref(ps, xstrdup(idx_name), foreach_tok.line, foreach_tok.col);
+    cond->rhs = count_call;
+    cond->line = foreach_tok.line;
+    cond->col = foreach_tok.col;
+    cond->src = lexer_source(ps->lx);
+
+    Node *index_expr = new_node(ND_INDEX);
+    index_expr->lhs = parser_make_var_ref(ps, xstrdup(iter_name), elem_name.line, elem_name.col);
+    index_expr->rhs = parser_make_var_ref(ps, xstrdup(idx_name), elem_name.line, elem_name.col);
+    index_expr->line = elem_name.line;
+    index_expr->col = elem_name.col;
+    index_expr->src = lexer_source(ps->lx);
+
+    Node *elem_decl = new_node(ND_VAR_DECL);
+    elem_decl->var_name = dup_token_text(elem_name);
+    elem_decl->var_type = elem_ty;
+    elem_decl->var_is_const = 0;
+    elem_decl->var_is_static = 0;
+    elem_decl->var_is_global = 0;
+    elem_decl->var_is_array = (elem_ty && elem_ty->kind == TY_ARRAY);
+    elem_decl->var_is_function = (elem_ty && elem_ty->kind == TY_PTR && elem_ty->pointee && elem_ty->pointee->kind == TY_FUNC);
+    elem_decl->var_is_inferred = 0;
+    elem_decl->rhs = index_expr;
+    elem_decl->line = elem_name.line;
+    elem_decl->col = elem_name.col;
+    elem_decl->src = lexer_source(ps->lx);
+
+    Node *loop_body = new_node(ND_BLOCK);
+    Node **loop_stmts = (Node **)xcalloc(2, sizeof(Node *));
+    loop_stmts[0] = elem_decl;
+    loop_stmts[1] = user_body;
+    loop_body->stmts = loop_stmts;
+    loop_body->stmt_count = 2;
+    loop_body->line = foreach_tok.line;
+    loop_body->col = foreach_tok.col;
+    loop_body->src = lexer_source(ps->lx);
+
+    Node *idx_inc_rhs = new_node(ND_ADD);
+    idx_inc_rhs->lhs = parser_make_var_ref(ps, xstrdup(idx_name), foreach_tok.line, foreach_tok.col);
+    idx_inc_rhs->rhs = parser_make_bool_lit(ps, 1, foreach_tok.line, foreach_tok.col);
+    idx_inc_rhs->line = foreach_tok.line;
+    idx_inc_rhs->col = foreach_tok.col;
+    idx_inc_rhs->src = lexer_source(ps->lx);
+
+    Node *idx_inc_stmt = parser_make_assign_stmt(
+        ps,
+        parser_make_var_ref(ps, xstrdup(idx_name), foreach_tok.line, foreach_tok.col),
+        idx_inc_rhs,
+        foreach_tok.line,
+        foreach_tok.col);
+
+    Node *wh = new_node(ND_WHILE);
+    wh->lhs = cond;
+    wh->rhs = loop_body;
+    wh->body = idx_inc_stmt;
+    wh->line = foreach_tok.line;
+    wh->col = foreach_tok.col;
+    wh->src = lexer_source(ps->lx);
+
+    Node *outer = new_node(ND_BLOCK);
+    Node **outer_stmts = (Node **)xcalloc(3, sizeof(Node *));
+    outer_stmts[0] = iter_decl;
+    outer_stmts[1] = idx_decl;
+    outer_stmts[2] = wh;
+    outer->stmts = outer_stmts;
+    outer->stmt_count = 3;
+    outer->line = foreach_tok.line;
+    outer->col = foreach_tok.col;
+    outer->src = lexer_source(ps->lx);
+    return outer;
+}
+
+static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_managed, int allow_extension_receiver, FunctionBodyKind body_kind, struct PendingAttr *attrs, int attr_count)
 {
     expect(ps, TK_KW_FUN, "fun");
-    Token name = expect(ps, TK_IDENT, "identifier");
+    Token name_tok = lexer_peek(ps->lx);
+    const char *name_lexeme = NULL;
+    int name_length = 0;
+    int name_line = 0;
+    int name_col = 0;
+
+    if (name_tok.kind == TK_IDENT)
+    {
+        name_tok = lexer_next(ps->lx);
+        name_lexeme = name_tok.lexeme;
+        name_length = name_tok.length;
+        name_line = name_tok.line;
+        name_col = name_tok.col;
+    }
+    else if (name_tok.kind == TK_LBRACKET)
+    {
+        Token open = lexer_next(ps->lx);
+        expect(ps, TK_RBRACKET, "]");
+        name_lexeme = "[]";
+        name_length = 2;
+        name_line = open.line;
+        name_col = open.col;
+    }
+    else
+    {
+        diag_error_at(lexer_source(ps->lx), name_tok.line, name_tok.col,
+                      "expected function name");
+        exit(1);
+    }
+
     int generic_scope_start = ps->generic_param_count;
     int local_generic_count = 0;
     Token maybe_lt = lexer_peek(ps->lx);
@@ -6048,7 +8314,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
                 {
                     diag_error_at(lexer_source(ps->lx), param_tok.line, param_tok.col,
                                   "duplicate generic parameter '%.*s' on function '%.*s'",
-                                  param_tok.length, param_tok.lexeme, name.length, name.lexeme);
+                                  param_tok.length, param_tok.lexeme, name_length, name_lexeme);
                     exit(1);
                 }
             }
@@ -6087,6 +8353,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     unsigned char *param_const_flags = NULL;
     int param_count = 0, param_cap = 0;
     int saw_varargs = 0;
+    int saw_extension_receiver = 0;
     while (1)
     {
         Token next = lexer_peek(ps->lx);
@@ -6106,6 +8373,24 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
             break;
         }
 
+        if (token_is_ident_text(next, "this"))
+        {
+            if (!allow_extension_receiver)
+            {
+                diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                              "'this' receiver syntax is only allowed on top-level function declarations");
+                exit(1);
+            }
+            if (param_count != 0)
+            {
+                diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                              "extension receiver marked with 'this' must be the first parameter");
+                exit(1);
+            }
+            lexer_next(ps->lx);
+            saw_extension_receiver = 1;
+        }
+
         int param_is_const = 0;
         Token maybe_const = lexer_peek(ps->lx);
         if (maybe_const.kind == TK_KW_CONSTANT)
@@ -6114,6 +8399,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
             param_is_const = 1;
         }
         Type *pty = parse_type_spec(ps);
+        pty = parser_decl_canonicalize_bundle_reference(pty);
         Token pn = expect(ps, TK_IDENT, "parameter name");
         if (param_count == param_cap)
         {
@@ -6152,9 +8438,9 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
         }
         if (param_count == 0)
         {
-            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+            diag_error_at(lexer_source(ps->lx), name_line, name_col,
                           "variadic function '%.*s' must have at least one explicit parameter before '...'",
-                          (int)name.length, name.lexeme);
+                          name_length, name_lexeme);
             exit(1);
         }
     }
@@ -6180,6 +8466,7 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
         lexer_next(ps->lx);
         
         rtype = parse_type_spec(ps);
+        rtype = parser_decl_canonicalize_bundle_reference(rtype);
     }
     else if (allow_implicit_for_this || sema_get_allow_implicit_void_function())
     {
@@ -6192,15 +8479,15 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     }
     if (is_noreturn && rtype && rtype->kind != TY_VOID)
     {
-        diag_error_at(lexer_source(ps->lx), name.line, name.col,
+        diag_error_at(lexer_source(ps->lx), name_line, name_col,
                       "noreturn functions must return void");
         exit(1);
     }
     Node *fn = new_node(ND_FUNC);
     
-    char *nm = (char *)xmalloc((size_t)name.length + 1);
-    memcpy(nm, name.lexeme, (size_t)name.length);
-    nm[name.length] = '\0';
+    char *nm = (char *)xmalloc((size_t)name_length + 1);
+    memcpy(nm, name_lexeme, (size_t)name_length);
+    nm[name_length] = '\0';
     fn->name = nm;
     fn->ret_type = rtype;
     fn->param_types = param_types;
@@ -6209,12 +8496,13 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     fn->param_count = param_count;
     fn->generic_param_count = local_generic_count;
     fn->is_varargs = saw_varargs;
-    fn->line = name.line;
-    fn->col = name.col;
+    fn->line = name_line;
+    fn->col = name_col;
     fn->src = lexer_source(ps->lx);
     fn->is_noreturn = is_noreturn;
     fn->is_exposed = is_exposed;
     fn->is_managed = is_managed ? 1 : 0;
+    fn->is_extension_method = saw_extension_receiver ? 1 : 0;
     fn->metadata.declared_param_count = -1;
     fn->metadata.declared_local_count = -1;
     fn->metadata.ret_token = NULL;
@@ -6248,6 +8536,296 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
         }
     }
     parser_pop_generic_params(ps, local_generic_count);
+    return fn;
+}
+
+static Node *parse_bundle_this_method(Parser *ps, Token sign_tok, int is_noreturn, int is_exposed, int is_managed)
+{
+    Token this_tok = expect(ps, TK_IDENT, "this");
+    if (!(this_tok.length == 4 && strncmp(this_tok.lexeme, "this", 4) == 0))
+    {
+        diag_error_at(lexer_source(ps->lx), this_tok.line, this_tok.col,
+                      "expected 'this' after '%c' in bundle constructor/destructor",
+                      sign_tok.kind == TK_PLUS ? '+' : '-');
+        exit(1);
+    }
+
+    expect(ps, TK_LPAREN, "(");
+    Type **param_types = NULL;
+    const char **param_names = NULL;
+    unsigned char *param_const_flags = NULL;
+    int param_count = 0, param_cap = 0;
+    int saw_varargs = 0;
+
+    while (1)
+    {
+        Token next = lexer_peek(ps->lx);
+        if (next.kind == TK_RPAREN)
+            break;
+
+        if (token_is_varargs(next))
+        {
+            if (saw_varargs)
+            {
+                diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                              "varargs ('...') may only appear once in a parameter list");
+                exit(1);
+            }
+            lexer_next(ps->lx);
+            saw_varargs = 1;
+            break;
+        }
+
+        int param_is_const = 0;
+        Token maybe_const = lexer_peek(ps->lx);
+        if (maybe_const.kind == TK_KW_CONSTANT)
+        {
+            lexer_next(ps->lx);
+            param_is_const = 1;
+        }
+
+        Type *pty = parse_type_spec(ps);
+        pty = parser_decl_canonicalize_bundle_reference(pty);
+        Token pn = expect(ps, TK_IDENT, "parameter name");
+        if (param_count == param_cap)
+        {
+            param_cap = param_cap ? param_cap * 2 : 4;
+            param_types = (Type **)realloc(param_types, sizeof(Type *) * (size_t)param_cap);
+            param_names = (const char **)realloc(param_names, sizeof(char *) * (size_t)param_cap);
+            param_const_flags = (unsigned char *)realloc(param_const_flags, sizeof(unsigned char) * (size_t)param_cap);
+        }
+        param_types[param_count] = pty;
+        char *nm = (char *)xmalloc((size_t)pn.length + 1);
+        memcpy(nm, pn.lexeme, (size_t)pn.length);
+        nm[pn.length] = '\0';
+        param_names[param_count] = nm;
+        if (param_const_flags)
+            param_const_flags[param_count] = (unsigned char)param_is_const;
+        parse_trailing_funptr_signature(ps, pty);
+        param_count++;
+
+        Token delim = lexer_peek(ps->lx);
+        if (delim.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        break;
+    }
+
+    if (saw_varargs)
+    {
+        Token after = lexer_peek(ps->lx);
+        if (after.kind != TK_RPAREN)
+        {
+            diag_error_at(lexer_source(ps->lx), after.line, after.col,
+                          "varargs ('...') must be the final parameter");
+            exit(1);
+        }
+        if (param_count == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), sign_tok.line, sign_tok.col,
+                          "variadic constructor/destructor must have at least one explicit parameter before '...'");
+            exit(1);
+        }
+    }
+
+    expect(ps, TK_RPAREN, ")");
+
+    Type *rtype = NULL;
+    Token arrow_peek = lexer_peek(ps->lx);
+    if (arrow_peek.kind == TK_ARROW)
+    {
+        lexer_next(ps->lx);
+        rtype = parse_type_spec(ps);
+        rtype = parser_decl_canonicalize_bundle_reference(rtype);
+    }
+    else
+    {
+        rtype = type_void();
+    }
+
+    if (is_noreturn && rtype && rtype->kind != TY_VOID)
+    {
+        diag_error_at(lexer_source(ps->lx), sign_tok.line, sign_tok.col,
+                      "noreturn constructors/destructors must return void");
+        exit(1);
+    }
+
+    Node *fn = new_node(ND_FUNC);
+    fn->name = xstrdup(sign_tok.kind == TK_PLUS ? "init" : "deinit");
+    fn->ret_type = rtype;
+    fn->param_types = param_types;
+    fn->param_names = param_names;
+    fn->param_const_flags = param_const_flags;
+    fn->param_count = param_count;
+    fn->generic_param_count = 0;
+    fn->is_varargs = saw_varargs;
+    fn->line = sign_tok.line;
+    fn->col = sign_tok.col;
+    fn->src = lexer_source(ps->lx);
+    fn->is_noreturn = is_noreturn;
+    fn->is_exposed = is_exposed;
+    fn->is_managed = is_managed ? 1 : 0;
+    fn->metadata.declared_param_count = -1;
+    fn->metadata.declared_local_count = -1;
+    fn->metadata.ret_token = NULL;
+
+    const char *prev_fn = ps->current_function_name;
+    ps->current_function_name = fn->name;
+    fn->body = parse_block(ps);
+    ps->current_function_name = prev_fn;
+
+    return fn;
+}
+
+static Node *parse_bundle_on_method(Parser *ps, Token on_tok, int is_noreturn, int is_exposed, int is_managed)
+{
+    Token lifecycle = lexer_next(ps->lx);
+    int is_ctor = (lifecycle.kind == TK_KW_NEW) || token_is_ident_text(lifecycle, "new");
+    int is_dtor = (lifecycle.kind == TK_KW_DELETE) || token_is_ident_text(lifecycle, "delete");
+    int is_named_on_method = (lifecycle.kind == TK_IDENT);
+    if (!is_ctor && !is_dtor && !is_named_on_method)
+    {
+        diag_error_at(lexer_source(ps->lx), lifecycle.line, lifecycle.col,
+                      "expected 'new', 'delete', or method identifier after 'on' in bundle declaration");
+        exit(1);
+    }
+
+    char *on_method_name = NULL;
+    if (is_ctor)
+        on_method_name = xstrdup("init");
+    else if (is_dtor)
+        on_method_name = xstrdup("deinit");
+    else
+        on_method_name = dup_token_text(lifecycle);
+
+    expect(ps, TK_LPAREN, "(");
+    Type **param_types = NULL;
+    const char **param_names = NULL;
+    unsigned char *param_const_flags = NULL;
+    int param_count = 0, param_cap = 0;
+    int saw_varargs = 0;
+
+    while (1)
+    {
+        Token next = lexer_peek(ps->lx);
+        if (next.kind == TK_RPAREN)
+            break;
+
+        if (token_is_varargs(next))
+        {
+            if (saw_varargs)
+            {
+                diag_error_at(lexer_source(ps->lx), next.line, next.col,
+                              "varargs ('...') may only appear once in a parameter list");
+                exit(1);
+            }
+            lexer_next(ps->lx);
+            saw_varargs = 1;
+            break;
+        }
+
+        int param_is_const = 0;
+        Token maybe_const = lexer_peek(ps->lx);
+        if (maybe_const.kind == TK_KW_CONSTANT)
+        {
+            lexer_next(ps->lx);
+            param_is_const = 1;
+        }
+
+        Type *pty = parse_type_spec(ps);
+        pty = parser_decl_canonicalize_bundle_reference(pty);
+        Token pn = expect(ps, TK_IDENT, "parameter name");
+        if (param_count == param_cap)
+        {
+            param_cap = param_cap ? param_cap * 2 : 4;
+            param_types = (Type **)realloc(param_types, sizeof(Type *) * (size_t)param_cap);
+            param_names = (const char **)realloc(param_names, sizeof(char *) * (size_t)param_cap);
+            param_const_flags = (unsigned char *)realloc(param_const_flags, sizeof(unsigned char) * (size_t)param_cap);
+        }
+        param_types[param_count] = pty;
+        char *nm = (char *)xmalloc((size_t)pn.length + 1);
+        memcpy(nm, pn.lexeme, (size_t)pn.length);
+        nm[pn.length] = '\0';
+        param_names[param_count] = nm;
+        if (param_const_flags)
+            param_const_flags[param_count] = (unsigned char)param_is_const;
+        parse_trailing_funptr_signature(ps, pty);
+        param_count++;
+
+        Token delim = lexer_peek(ps->lx);
+        if (delim.kind == TK_COMMA)
+        {
+            lexer_next(ps->lx);
+            continue;
+        }
+        break;
+    }
+
+    if (saw_varargs)
+    {
+        Token after = lexer_peek(ps->lx);
+        if (after.kind != TK_RPAREN)
+        {
+            diag_error_at(lexer_source(ps->lx), after.line, after.col,
+                          "varargs ('...') must be the final parameter");
+            exit(1);
+        }
+        if (param_count == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), lifecycle.line, lifecycle.col,
+                          "variadic lifecycle handlers must have at least one explicit parameter before '...'");
+            exit(1);
+        }
+    }
+
+    expect(ps, TK_RPAREN, ")");
+
+    Type *rtype = NULL;
+    Token arrow_peek = lexer_peek(ps->lx);
+    if (arrow_peek.kind == TK_ARROW)
+    {
+        lexer_next(ps->lx);
+        rtype = parse_type_spec(ps);
+        rtype = parser_decl_canonicalize_bundle_reference(rtype);
+    }
+    else
+    {
+        rtype = type_void();
+    }
+
+    if (is_noreturn && rtype && rtype->kind != TY_VOID)
+    {
+        diag_error_at(lexer_source(ps->lx), lifecycle.line, lifecycle.col,
+                      "noreturn on-handlers must return void");
+        exit(1);
+    }
+
+    Node *fn = new_node(ND_FUNC);
+    fn->name = on_method_name;
+    fn->ret_type = rtype;
+    fn->param_types = param_types;
+    fn->param_names = param_names;
+    fn->param_const_flags = param_const_flags;
+    fn->param_count = param_count;
+    fn->generic_param_count = 0;
+    fn->is_varargs = saw_varargs;
+    fn->line = on_tok.line;
+    fn->col = on_tok.col;
+    fn->src = lexer_source(ps->lx);
+    fn->is_noreturn = is_noreturn;
+    fn->is_exposed = is_exposed;
+    fn->is_managed = is_managed ? 1 : 0;
+    fn->metadata.declared_param_count = -1;
+    fn->metadata.declared_local_count = -1;
+    fn->metadata.ret_token = NULL;
+
+    const char *prev_fn = ps->current_function_name;
+    ps->current_function_name = fn->name;
+    fn->body = parse_block(ps);
+    ps->current_function_name = prev_fn;
+
     return fn;
 }
 
@@ -6628,6 +9206,42 @@ void parser_destroy(Parser *ps)
 {
     if (!ps)
         return;
+    if (ps->bundle_templates)
+    {
+        for (int i = 0; i < ps->bundle_template_count; ++i)
+        {
+            struct BundleTemplate *templ = &ps->bundle_templates[i];
+            free(templ->name);
+            if (templ->generic_param_names)
+            {
+                for (int j = 0; j < templ->generic_param_count; ++j)
+                    free((void *)templ->generic_param_names[j]);
+                free((void *)templ->generic_param_names);
+            }
+            free(templ->generic_param_types);
+            free(templ->method_templates);
+            if (templ->instances)
+            {
+                for (int j = 0; j < templ->instance_count; ++j)
+                {
+                    free(templ->instances[j].type_args);
+                }
+                free(templ->instances);
+            }
+        }
+        free(ps->bundle_templates);
+    }
+    if (ps->bundle_static_members)
+    {
+        for (int i = 0; i < ps->bundle_static_member_count; ++i)
+        {
+            free(ps->bundle_static_members[i].bundle_name);
+            free(ps->bundle_static_members[i].member_name);
+            free(ps->bundle_static_members[i].symbol_name);
+        }
+        free(ps->bundle_static_members);
+    }
+    free(ps->pending_instantiated_decls);
     lexer_destroy(ps->lx);
     free(ps);
 }
@@ -6917,6 +9531,36 @@ Node *parse_unit(Parser *ps)
             parse_enum_decl(ps, visibility);
             continue;
         }
+        if (t.kind == TK_KW_BUNDLE)
+        {
+            parser_require_h28(ps, t, "bundle declaration");
+            if (bring_seen)
+                bring_block_done = 1;
+            if (extend_seen)
+                extend_block_done = 1;
+            if (global_seen)
+                global_block_done = 1;
+            if (leading_noreturn)
+            {
+                diag_error_at(lexer_source(ps->lx), noreturn_tok.line, noreturn_tok.col,
+                              "'noreturn' is only valid before functions or extern declarations");
+                exit(1);
+            }
+            if (leading_packed)
+            {
+                diag_error_at(lexer_source(ps->lx), packed_tok.line, packed_tok.col,
+                              "'packed' is only valid before struct declarations");
+                exit(1);
+            }
+            if (attr_count > 0)
+            {
+                diag_error_at(lexer_source(ps->lx), attrs[0].line, attrs[0].col,
+                              "attributes are not supported on bundle declarations");
+                exit(1);
+            }
+            parse_bundle_decl(ps, visibility, &decls, &decl_count, &decl_cap, &fn_count);
+            continue;
+        }
         if (t.kind == TK_KW_STRUCT)
         {
             if (bring_seen)
@@ -7020,7 +9664,7 @@ Node *parse_unit(Parser *ps)
                 body_kind = FN_BODY_LITERAL;
             (void)0;
             int function_is_managed = managed_override_present ? managed_override_value : ps->module_is_managed;
-            Node *fn = parse_function(ps, leading_noreturn, visibility, function_is_managed, body_kind, attrs, attr_count);
+            Node *fn = parse_function(ps, leading_noreturn, visibility, function_is_managed, 1, body_kind, attrs, attr_count);
             apply_function_attributes(ps, fn, attrs, attr_count);
             clear_pending_attrs(attrs, attr_count);
             attr_count = 0;
@@ -7034,7 +9678,7 @@ Node *parse_unit(Parser *ps)
             continue;
         }
 
-        if (t.kind == TK_KW_STATIC || t.kind == TK_KW_CONSTANT || is_type_start(ps, t))
+        if (t.kind == TK_KW_STATIC || t.kind == TK_KW_CONSTANT || is_type_start(ps, t) || parser_is_implicit_ident_decl_start(ps, t))
         {
             if (bring_seen)
                 bring_block_done = 1;
@@ -7068,7 +9712,7 @@ Node *parse_unit(Parser *ps)
                 break;
             }
 
-            if (!is_type_start(ps, t))
+            if (!is_type_start(ps, t) && !parser_is_implicit_ident_decl_start(ps, t))
             {
                 diag_error_at(lexer_source(ps->lx), t.line, t.col,
                               "expected a type after storage qualifiers");
@@ -7076,6 +9720,7 @@ Node *parse_unit(Parser *ps)
             }
 
             Type *ty = parse_type_spec(ps);
+            ty = parser_decl_canonicalize_bundle_reference(ty);
             Token name = expect(ps, TK_IDENT, "identifier");
 
             Node *decl = new_node(ND_VAR_DECL);
@@ -7159,7 +9804,16 @@ Node *parse_unit(Parser *ps)
         exit(1);
     }
 
-    (void)fn_count;
+    if (ps->pending_instantiated_decl_count > 0 && ps->pending_instantiated_decls)
+    {
+        for (int i = 0; i < ps->pending_instantiated_decl_count; ++i)
+            parser_unit_append_decl(&decls, &decl_count, &decl_cap,
+                                    ps->pending_instantiated_decls[i], &fn_count);
+        free(ps->pending_instantiated_decls);
+        ps->pending_instantiated_decls = NULL;
+        ps->pending_instantiated_decl_count = 0;
+        ps->pending_instantiated_decl_cap = 0;
+    }
 
     Node *u = (Node *)xcalloc(1, sizeof(Node));
     u->kind = ND_UNIT;
@@ -7420,6 +10074,7 @@ static Type *parse_inline_union_type(Parser *ps)
     ut->strct.field_names = NULL;
     ut->strct.field_types = NULL;
     ut->strct.field_default_values = NULL;
+    ut->strct.field_exposed_flags = NULL;
     ut->strct.field_offsets = NULL;
     ut->strct.field_count = 0;
     ut->strct.size_bytes = 0;
@@ -7485,10 +10140,604 @@ static Type *parse_inline_union_type(Parser *ps)
     ut->strct.field_names = fnames;
     ut->strct.field_types = ftypes;
     ut->strct.field_default_values = NULL;
+    ut->strct.field_exposed_flags = NULL;
     ut->strct.field_offsets = foff;
     ut->strct.field_count = fcnt;
     ut->strct.size_bytes = align_up(max_size, max_align > 0 ? max_align : 1);
     return ut;
+}
+
+static void parse_bundle_decl(Parser *ps, int is_exposed, Node ***decls, int *decl_count, int *decl_cap, int *fn_count)
+{
+    Token kw = lexer_next(ps->lx);
+    if (kw.kind != TK_KW_BUNDLE)
+    {
+        diag_error_at(lexer_source(ps->lx), kw.line, kw.col,
+                      "expected bundle declaration");
+        exit(1);
+    }
+
+    Token name = expect(ps, TK_IDENT, "bundle name");
+    int generic_scope_start = ps->generic_param_count;
+    int local_generic_count = 0;
+    Token maybe_lt = lexer_peek(ps->lx);
+    if (maybe_lt.kind == TK_LT)
+    {
+        lexer_next(ps->lx);
+        while (1)
+        {
+            Token param_tok = expect(ps, TK_IDENT, "generic parameter name");
+            for (int i = ps->generic_param_count - 1; i >= generic_scope_start; --i)
+            {
+                struct GenericParam *existing = &ps->generic_params[i];
+                if (existing->name_len == param_tok.length &&
+                    strncmp(existing->name, param_tok.lexeme, (size_t)param_tok.length) == 0)
+                {
+                    diag_error_at(lexer_source(ps->lx), param_tok.line, param_tok.col,
+                                  "duplicate generic parameter '%.*s' on bundle '%.*s'",
+                                  param_tok.length, param_tok.lexeme, name.length, name.lexeme);
+                    exit(1);
+                }
+            }
+            TemplateConstraintKind constraint_kind = TEMPLATE_CONSTRAINT_NONE;
+            Type *default_type = NULL;
+            parser_parse_generic_param_options(ps, &constraint_kind, &default_type);
+            parser_push_generic_param(ps, param_tok, local_generic_count, constraint_kind, default_type);
+            local_generic_count++;
+
+            Token sep = lexer_peek(ps->lx);
+            if (sep.kind == TK_COMMA)
+            {
+                lexer_next(ps->lx);
+                continue;
+            }
+            if (sep.kind == TK_GT)
+            {
+                lexer_next(ps->lx);
+                break;
+            }
+            diag_error_at(lexer_source(ps->lx), sep.line, sep.col,
+                          "expected ',' or '>' in generic parameter list");
+            exit(1);
+        }
+        if (local_generic_count == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), maybe_lt.line, maybe_lt.col,
+                          "generic parameter list cannot be empty");
+            exit(1);
+        }
+    }
+    int is_template_bundle = (local_generic_count > 0);
+
+    Token after_name = lexer_peek(ps->lx);
+
+    if (after_name.kind == TK_SEMI)
+    {
+        if (is_template_bundle)
+        {
+            diag_error_at(lexer_source(ps->lx), after_name.line, after_name.col,
+                          "template bundle '%.*s' requires a full definition",
+                          name.length, name.lexeme);
+            exit(1);
+        }
+        lexer_next(ps->lx);
+        Type *existing = named_type_get(ps, name.lexeme, name.length);
+        if (existing)
+        {
+            if (existing->kind != TY_STRUCT)
+            {
+                diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                              "type '%.*s' already declared with non-aggregate kind",
+                              name.length, name.lexeme);
+                exit(1);
+            }
+            if (!existing->is_bundle)
+            {
+                diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                              "type '%.*s' is declared as struct, not bundle",
+                              name.length, name.lexeme);
+                exit(1);
+            }
+            if (is_exposed && !existing->is_exposed)
+                existing->is_exposed = 1;
+            return;
+        }
+        Type *forward = (Type *)xcalloc(1, sizeof(Type));
+        forward->kind = TY_STRUCT;
+        forward->is_bundle = 1;
+        forward->struct_name = (char *)xmalloc((size_t)name.length + 1);
+        memcpy((char *)forward->struct_name, name.lexeme, (size_t)name.length);
+        ((char *)forward->struct_name)[name.length] = '\0';
+        forward->is_exposed = is_exposed;
+        forward->strct.field_count = 0;
+        forward->strct.size_bytes = 0;
+        forward->strct.field_default_values = NULL;
+        forward->strct.field_exposed_flags = NULL;
+        named_type_add(ps, name.lexeme, name.length, forward, is_exposed);
+        parser_pop_generic_params(ps, local_generic_count);
+        return;
+    }
+
+    expect(ps, TK_LBRACE, "{");
+
+    struct BundleTemplate *existing_template = parser_find_bundle_template(ps, name.lexeme, name.length);
+    if (existing_template)
+    {
+        diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                      "redefinition of template bundle '%.*s'",
+                      name.length, name.lexeme);
+        exit(1);
+    }
+
+    Type *bundle_type = named_type_get(ps, name.lexeme, name.length);
+    int is_new_type = 0;
+    if (bundle_type)
+    {
+        if (bundle_type->kind != TY_STRUCT)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "type '%.*s' already declared with non-aggregate kind",
+                          name.length, name.lexeme);
+            exit(1);
+        }
+        if (!bundle_type->is_bundle)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "type '%.*s' is declared as struct, not bundle",
+                          name.length, name.lexeme);
+            exit(1);
+        }
+        if (bundle_type->strct.field_count > 0)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "redefinition of bundle '%.*s'", name.length, name.lexeme);
+            exit(1);
+        }
+    }
+    else
+    {
+        bundle_type = (Type *)xcalloc(1, sizeof(Type));
+        bundle_type->kind = TY_STRUCT;
+        bundle_type->is_bundle = 1;
+        bundle_type->struct_name = (char *)xmalloc((size_t)name.length + 1);
+        memcpy((char *)bundle_type->struct_name, name.lexeme, (size_t)name.length);
+        ((char *)bundle_type->struct_name)[name.length] = '\0';
+        is_new_type = 1;
+    }
+
+    bundle_type->is_bundle = 1;
+    bundle_type->is_exposed = bundle_type->is_exposed || is_exposed;
+    bundle_type->bundle_ctor_declared = 0;
+    bundle_type->bundle_ctor_declared_exposed = 0;
+    bundle_type->bundle_ctor_has_zero_arity = 0;
+    bundle_type->bundle_ctor_has_exposed_zero_arity = 0;
+    bundle_type->strct.field_names = NULL;
+    bundle_type->strct.field_types = NULL;
+    bundle_type->strct.field_default_values = NULL;
+    bundle_type->strct.field_exposed_flags = NULL;
+    bundle_type->strct.field_offsets = NULL;
+    bundle_type->strct.field_count = 0;
+    bundle_type->strct.size_bytes = 0;
+
+    if (is_new_type)
+        named_type_add(ps, name.lexeme, name.length, bundle_type, is_exposed);
+
+    const char **fnames = NULL;
+    Type **ftypes = NULL;
+    const char **fdefs = NULL;
+    unsigned char *fexposed = NULL;
+    int *foff = NULL;
+    int fcnt = 0;
+    int fcap = 0;
+    int offset = 0;
+    int max_align = 1;
+    Node **template_methods = NULL;
+    int template_method_count = 0;
+    int template_method_cap = 0;
+    struct BundleTemplate *template_record = NULL;
+
+    if (is_template_bundle)
+    {
+        if (ps->bundle_template_count == ps->bundle_template_cap)
+        {
+            int new_cap = ps->bundle_template_cap ? ps->bundle_template_cap * 2 : 4;
+            struct BundleTemplate *grown = (struct BundleTemplate *)realloc(
+                ps->bundle_templates, (size_t)new_cap * sizeof(struct BundleTemplate));
+            if (!grown)
+            {
+                diag_error("out of memory while registering template bundle");
+                exit(1);
+            }
+            ps->bundle_templates = grown;
+            ps->bundle_template_cap = new_cap;
+        }
+
+        template_record = &ps->bundle_templates[ps->bundle_template_count++];
+        memset(template_record, 0, sizeof(*template_record));
+        template_record->name = xstrdup(bundle_type->struct_name ? bundle_type->struct_name : "");
+        template_record->name_len = (int)strlen(template_record->name);
+        template_record->is_exposed = bundle_type->is_exposed ? 1 : 0;
+        template_record->bundle_type = bundle_type;
+        template_record->generic_param_count = local_generic_count;
+
+        if (local_generic_count > 0)
+        {
+            template_record->generic_param_names = (const char **)xcalloc((size_t)local_generic_count, sizeof(const char *));
+            template_record->generic_param_types = (Type **)xcalloc((size_t)local_generic_count, sizeof(Type *));
+            for (int i = 0; i < local_generic_count; ++i)
+            {
+                struct GenericParam *gp = &ps->generic_params[generic_scope_start + i];
+                template_record->generic_param_names[i] = gp->name ? xstrdup(gp->name) : xstrdup("T");
+                template_record->generic_param_types[i] = gp->placeholder;
+            }
+        }
+    }
+
+    while (1)
+    {
+        Token t = lexer_peek(ps->lx);
+        if (t.kind == TK_RBRACE)
+        {
+            lexer_next(ps->lx);
+            break;
+        }
+
+        int member_is_exposed = 0;
+        int member_is_static = 0;
+        int member_is_noreturn = 0;
+        int saw_visibility = 0;
+        int saw_static = 0;
+        int saw_noreturn = 0;
+
+        while (1)
+        {
+            int consumed = 0;
+            if (t.kind == TK_KW_HIDE || t.kind == TK_KW_EXPOSE)
+            {
+                if (saw_visibility)
+                {
+                    diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                                  "duplicate visibility modifier on bundle member");
+                    exit(1);
+                }
+                Token member_vis = lexer_next(ps->lx);
+                member_is_exposed = (member_vis.kind == TK_KW_EXPOSE);
+                saw_visibility = 1;
+                consumed = 1;
+            }
+            else if (t.kind == TK_KW_STATIC)
+            {
+                if (saw_static)
+                {
+                    diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                                  "duplicate 'static' modifier on bundle member");
+                    exit(1);
+                }
+                lexer_next(ps->lx);
+                member_is_static = 1;
+                saw_static = 1;
+                consumed = 1;
+            }
+            else if (t.kind == TK_KW_NORETURN)
+            {
+                if (saw_noreturn)
+                {
+                    diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                                  "duplicate 'noreturn' modifier on bundle member");
+                    exit(1);
+                }
+                lexer_next(ps->lx);
+                member_is_noreturn = 1;
+                saw_noreturn = 1;
+                consumed = 1;
+            }
+
+            if (!consumed)
+                break;
+            t = lexer_peek(ps->lx);
+        }
+
+        int is_on_lifecycle = (t.kind == TK_IDENT && t.length == 2 && strncmp(t.lexeme, "on", 2) == 0);
+        if (t.kind == TK_PLUS || t.kind == TK_MINUS || is_on_lifecycle)
+        {
+            if (member_is_static)
+            {
+                diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                              "'static' is not valid on bundle constructor/destructor declarations");
+                exit(1);
+            }
+
+            Node *method = NULL;
+            if (is_on_lifecycle)
+            {
+                Token on_tok = lexer_next(ps->lx);
+                method = parse_bundle_on_method(ps, on_tok, member_is_noreturn, member_is_exposed, ps->module_is_managed);
+            }
+            else
+            {
+                Token sign_tok = lexer_next(ps->lx);
+                method = parse_bundle_this_method(ps, sign_tok, member_is_noreturn, member_is_exposed, ps->module_is_managed);
+            }
+            if (!method || !method->name)
+            {
+                diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                              "invalid bundle constructor/destructor declaration");
+                exit(1);
+            }
+
+            method->is_exposed = member_is_exposed;
+            method->is_bundle_global_init = 0;
+            if (!member_is_static)
+                parser_prepend_bundle_this_param(ps, method, bundle_type);
+            method->var_is_static = member_is_static ? 1 : 0;
+
+            if (method->name && strcmp(method->name, "init") == 0)
+            {
+                int ctor_arg_count = method->param_count;
+                if (!member_is_static && ctor_arg_count > 0)
+                    ctor_arg_count -= 1;
+                if (ctor_arg_count < 0)
+                    ctor_arg_count = 0;
+                bundle_type->bundle_ctor_declared = 1;
+                if (member_is_exposed)
+                    bundle_type->bundle_ctor_declared_exposed = 1;
+                if (ctor_arg_count == 0)
+                {
+                    bundle_type->bundle_ctor_has_zero_arity = 1;
+                    if (member_is_exposed)
+                        bundle_type->bundle_ctor_has_exposed_zero_arity = 1;
+                }
+            }
+
+            if (is_template_bundle)
+            {
+                if (template_method_count == template_method_cap)
+                {
+                    int new_cap = template_method_cap ? template_method_cap * 2 : 4;
+                    Node **grown = (Node **)realloc(template_methods, (size_t)new_cap * sizeof(Node *));
+                    if (!grown)
+                    {
+                        diag_error("out of memory while storing template bundle methods");
+                        exit(1);
+                    }
+                    template_methods = grown;
+                    template_method_cap = new_cap;
+                }
+                template_methods[template_method_count++] = method;
+                continue;
+            }
+
+            char *user_name = xstrdup(method->name);
+            char *symbol_name = parser_make_bundle_instance_method_symbol(bundle_type->struct_name, user_name);
+            if (!symbol_name)
+            {
+                diag_error("failed to build bundle method symbol name");
+                exit(1);
+            }
+
+            free((void *)method->name);
+            method->name = symbol_name;
+
+            free(user_name);
+            parser_unit_append_decl(decls, decl_count, decl_cap, method, fn_count);
+            continue;
+        }
+
+        if (t.kind == TK_KW_FUN)
+        {
+            Node *method = parse_function(ps, member_is_noreturn, member_is_exposed, ps->module_is_managed, 0, FN_BODY_NORMAL, NULL, 0);
+            if (!method || !method->name)
+            {
+                diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                              "invalid bundle method declaration");
+                exit(1);
+            }
+
+            parser_validate_bundle_index_overrider_signature(ps, method, member_is_static);
+
+            method->is_exposed = member_is_exposed;
+            method->is_bundle_global_init = 0;
+            if (!member_is_static)
+                parser_prepend_bundle_this_param(ps, method, bundle_type);
+            method->var_is_static = member_is_static ? 1 : 0;
+
+            if (is_template_bundle)
+            {
+                if (template_method_count == template_method_cap)
+                {
+                    int new_cap = template_method_cap ? template_method_cap * 2 : 4;
+                    Node **grown = (Node **)realloc(template_methods, (size_t)new_cap * sizeof(Node *));
+                    if (!grown)
+                    {
+                        diag_error("out of memory while storing template bundle methods");
+                        exit(1);
+                    }
+                    template_methods = grown;
+                    template_method_cap = new_cap;
+                }
+                template_methods[template_method_count++] = method;
+                continue;
+            }
+
+            char *user_name = xstrdup(method->name);
+            char *symbol_name = member_is_static
+                                    ? parser_make_bundle_static_method_symbol(bundle_type->struct_name, user_name)
+                                    : parser_make_bundle_instance_method_symbol(bundle_type->struct_name, user_name);
+            if (!symbol_name)
+            {
+                diag_error("failed to build bundle method symbol name");
+                exit(1);
+            }
+
+            free((void *)method->name);
+            method->name = symbol_name;
+            if (member_is_static)
+                parser_record_bundle_static_member(ps, bundle_type->struct_name, user_name, symbol_name, 1, 1);
+
+            free(user_name);
+            parser_unit_append_decl(decls, decl_count, decl_cap, method, fn_count);
+            continue;
+        }
+
+        int field_is_const = 0;
+        if (t.kind == TK_KW_CONSTANT)
+        {
+            lexer_next(ps->lx);
+            field_is_const = 1;
+            t = lexer_peek(ps->lx);
+        }
+
+        if (!is_type_start(ps, t))
+        {
+            diag_error_at(lexer_source(ps->lx), t.line, t.col,
+                          "expected bundle member declaration or '}'");
+            exit(1);
+        }
+
+        Type *fty = parse_type_spec(ps);
+        Token fname = expect(ps, TK_IDENT, "member name");
+        parse_trailing_funptr_signature(ps, fty);
+
+        Node *init_expr = NULL;
+        char *field_default = NULL;
+        Token maybe_assign = lexer_peek(ps->lx);
+        if (maybe_assign.kind == TK_ASSIGN)
+        {
+            lexer_next(ps->lx);
+            if (member_is_static)
+            {
+                init_expr = parse_initializer(ps);
+            }
+            else
+            {
+                field_default = parser_serialize_struct_field_default(ps, fty, parse_expr(ps));
+            }
+        }
+        expect(ps, TK_SEMI, ";");
+
+        if (is_template_bundle && member_is_static)
+        {
+            diag_error_at(lexer_source(ps->lx), fname.line, fname.col,
+                          "template bundles currently do not support static fields");
+            exit(1);
+        }
+
+        if (member_is_static)
+        {
+            char *field_name = (char *)xmalloc((size_t)fname.length + 1);
+            memcpy(field_name, fname.lexeme, (size_t)fname.length);
+            field_name[fname.length] = '\0';
+            char *symbol_name = parser_make_bundle_static_field_symbol(bundle_type->struct_name, field_name);
+
+            Node *decl = new_node(ND_VAR_DECL);
+            decl->var_name = symbol_name;
+            decl->var_type = fty;
+            decl->var_is_const = field_is_const;
+            decl->var_is_static = 1;
+            decl->var_is_global = 1;
+            decl->var_is_array = (fty && fty->kind == TY_ARRAY) ? 1 : 0;
+            decl->var_is_function = (fty && fty->kind == TY_PTR && fty->pointee && fty->pointee->kind == TY_FUNC) ? 1 : 0;
+            decl->is_exposed = member_is_exposed;
+            decl->rhs = init_expr;
+            decl->line = fname.line;
+            decl->col = fname.col;
+            decl->src = lexer_source(ps->lx);
+
+            parser_record_bundle_static_member(ps, bundle_type->struct_name, field_name, symbol_name, 0, field_is_const);
+            free(field_name);
+
+            parser_unit_append_decl(decls, decl_count, decl_cap, decl, fn_count);
+            continue;
+        }
+
+        if (member_is_exposed && fty && fty->kind == TY_STRUCT && !fty->is_exposed)
+        {
+            const char *hidden_name = fty->struct_name ? fty->struct_name : "<anonymous>";
+            diag_error_at(lexer_source(ps->lx), fname.line, fname.col,
+                          "exposed field '%.*s' in bundle '%.*s' uses hidden struct '%s'",
+                          fname.length, fname.lexeme,
+                          name.length, name.lexeme, hidden_name);
+            exit(1);
+        }
+
+        if (fcnt == fcap)
+        {
+            fcap = fcap ? fcap * 2 : 8;
+            fnames = (const char **)realloc(fnames, sizeof(char *) * (size_t)fcap);
+            ftypes = (Type **)realloc(ftypes, sizeof(Type *) * (size_t)fcap);
+            fdefs = (const char **)realloc(fdefs, sizeof(char *) * (size_t)fcap);
+            fexposed = (unsigned char *)realloc(fexposed, sizeof(unsigned char) * (size_t)fcap);
+            foff = (int *)realloc(foff, sizeof(int) * (size_t)fcap);
+            if (!fnames || !ftypes || !fdefs || !fexposed || !foff)
+            {
+                diag_error("out of memory while parsing bundle fields");
+                exit(1);
+            }
+        }
+
+        char *field_name = (char *)xmalloc((size_t)fname.length + 1);
+        memcpy(field_name, fname.lexeme, (size_t)fname.length);
+        field_name[fname.length] = '\0';
+        fnames[fcnt] = field_name;
+        ftypes[fcnt] = fty;
+        fdefs[fcnt] = field_default;
+        fexposed[fcnt] = member_is_exposed ? 1 : 0;
+
+        int field_align = type_align_simple(fty);
+        if (field_align <= 0)
+            field_align = 1;
+        int field_size = type_sizeof_simple(fty);
+        if (fty && fty->kind == TY_STRUCT && field_size == 0)
+        {
+            diag_error_at(lexer_source(ps->lx), fname.line, fname.col,
+                          "bundle field '%.*s' has incomplete type",
+                          fname.length, fname.lexeme);
+            exit(1);
+        }
+
+        offset = align_up(offset, field_align);
+        foff[fcnt] = offset;
+        offset += field_size;
+        if (field_align > max_align)
+            max_align = field_align;
+        fcnt++;
+    }
+
+    bundle_type->strct.field_names = fnames;
+    bundle_type->strct.field_types = ftypes;
+    bundle_type->strct.field_default_values = fdefs;
+    bundle_type->strct.field_exposed_flags = fexposed;
+    bundle_type->strct.field_offsets = foff;
+    bundle_type->strct.field_count = fcnt;
+    offset = align_up(offset, max_align > 0 ? max_align : 1);
+    if (bundle_type->is_bundle && fcnt == 0 && offset <= 0)
+        offset = 1;
+    bundle_type->strct.size_bytes = offset;
+
+    if (is_template_bundle)
+    {
+        if (!template_record)
+        {
+            diag_error("internal error: missing template bundle record");
+            exit(1);
+        }
+        template_record->field_names = fnames;
+        template_record->field_types = ftypes;
+        template_record->field_default_values = fdefs;
+        template_record->field_exposed_flags = fexposed;
+        template_record->field_count = fcnt;
+        template_record->method_templates = template_methods;
+        template_record->method_template_count = template_method_count;
+        template_record->method_template_cap = template_method_cap;
+
+        parser_auto_seed_template_bundle(ps, template_record, name.line, name.col);
+    }
+
+    if (!is_template_bundle && is_exposed && ps->module_full_name)
+        module_registry_register_struct(ps->module_full_name, bundle_type);
+
+    expect(ps, TK_SEMI, ";");
+    parser_pop_generic_params(ps, local_generic_count);
 }
 
 static int parser_field_default_allows_null(const Type *ty)
@@ -7658,6 +10907,13 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
                               name.length, name.lexeme);
                 exit(1);
             }
+            if (existing->is_bundle)
+            {
+                diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                              "type '%.*s' is declared as bundle, not %s",
+                              name.length, name.lexeme, is_union ? "union" : "struct");
+                exit(1);
+            }
             if (!!existing->is_union != !!is_union)
             {
                 diag_error_at(lexer_source(ps->lx), name.line, name.col,
@@ -7674,6 +10930,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
         }
         Type *forward = (Type *)xcalloc(1, sizeof(Type));
         forward->kind = TY_STRUCT;
+        forward->is_bundle = 0;
         forward->is_union = !!is_union;
         forward->struct_name = (char *)xmalloc((size_t)name.length + 1);
         memcpy((char *)forward->struct_name, name.lexeme, (size_t)name.length);
@@ -7683,6 +10940,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
         forward->strct.size_bytes = 0;
         forward->strct.is_packed = (!is_union && is_packed) ? 1 : 0;
         forward->strct.field_default_values = NULL;
+        forward->strct.field_exposed_flags = NULL;
         named_type_add(ps, name.lexeme, name.length, forward, is_exposed);
         return;
     }
@@ -7698,6 +10956,13 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
             diag_error_at(lexer_source(ps->lx), name.line, name.col,
                           "type '%.*s' already declared with non-aggregate kind",
                           name.length, name.lexeme);
+            exit(1);
+        }
+        if (st->is_bundle)
+        {
+            diag_error_at(lexer_source(ps->lx), name.line, name.col,
+                          "type '%.*s' is declared as bundle, not %s",
+                          name.length, name.lexeme, is_union ? "union" : "struct");
             exit(1);
         }
         if (!!st->is_union != !!is_union)
@@ -7720,6 +10985,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     {
         st = (Type *)xcalloc(1, sizeof(Type));
         st->kind = TY_STRUCT;
+        st->is_bundle = 0;
         st->is_union = !!is_union;
         st->struct_name = (char *)xmalloc((size_t)name.length + 1);
         memcpy((char *)st->struct_name, name.lexeme, (size_t)name.length);
@@ -7727,6 +10993,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
         is_new_struct = 1;
     }
     st->is_union = !!is_union;
+    st->is_bundle = 0;
     st->is_exposed = st->is_exposed || is_exposed;
     st->strct.is_packed = (!is_union && (st->strct.is_packed || is_packed)) ? 1 : 0;
     
@@ -7737,6 +11004,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     st->strct.field_names = NULL;
     st->strct.field_types = NULL;
     st->strct.field_default_values = NULL;
+    st->strct.field_exposed_flags = NULL;
     st->strct.field_offsets = NULL;
     st->strct.field_count = 0;
     st->strct.size_bytes = 0;
@@ -7846,6 +11114,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
     st->strct.field_names = fnames;
     st->strct.field_types = ftypes;
     st->strct.field_default_values = fdefs;
+    st->strct.field_exposed_flags = NULL;
     st->strct.field_offsets = foff;
     st->strct.field_count = fcnt;
     int struct_align = max_align > 0 ? max_align : 1;

@@ -1,0 +1,437 @@
+managed module Std.String.Extensions;
+
+bring Std.Memory as Mem;
+bring Std.Exception as Exception;
+bring Std.String;
+
+managed expose fun Split(this string str) -> string[]
+{
+    if (str == null)
+        ret [];
+
+    i32 count = 0;
+    i32 i = 0;
+
+    while (str[i] != 0)
+    {
+        while (str[i] == ' ' || str[i] == '\t' || str[i] == '\n' || str[i] == '\r')
+            i++;
+
+        if (str[i] == 0)
+            break;
+
+        count++;
+
+        while (str[i] != 0 &&
+               str[i] != ' ' && str[i] != '\t' && str[i] != '\n' && str[i] != '\r')
+            i++;
+    }
+
+    if (count <= 0)
+        ret [];
+
+    string[] parts = new string[count];
+    if (parts == null)
+        throw Exception.OutOfMemory
+            -> "Failed to allocate string array in Split";
+
+    i32 part_idx = 0;
+    i = 0;
+
+    while (str[i] != 0)
+    {
+        while (str[i] == ' ' || str[i] == '\t' || str[i] == '\n' || str[i] == '\r')
+            i++;
+
+        if (str[i] == 0)
+            break;
+
+        i32 start_idx = i;
+        while (str[i] != 0 &&
+               str[i] != ' ' && str[i] != '\t' && str[i] != '\n' && str[i] != '\r')
+            i++;
+
+        i32 part_len = i - start_idx;
+
+        char* part = (char*)Mem.Alloc(part_len + 1);
+        if (part == null)
+            throw Exception.OutOfMemory
+                -> "Failed to allocate memory for split part in Split";
+
+        for (i32 j = 0; j < part_len; j++)
+            part[j] = str[start_idx + j];
+
+        part[part_len] = 0;
+        parts[part_idx++] = part;
+    }
+
+    ret parts;
+}
+
+managed expose fun Split(this string str, char delim) -> string[]
+{
+    if (str == null)
+        ret [];
+
+    i32 count = 1;
+    for (i32 i = 0; str[i] != 0; i++)
+    {
+        if (str[i] == delim)
+            count++;
+    }
+
+    string[] parts = new string[count];
+    if (parts == null)
+        throw Exception.OutOfMemory
+            -> "Failed to allocate string array in Split";
+
+    i32 part_idx = 0;
+    i32 start_idx = 0;
+
+    for (i32 i = 0; ; i++)
+    {
+        if (str[i] == delim || str[i] == 0)
+        {
+            i32 part_len = i - start_idx;
+
+            char* part = (char*)Mem.Alloc(part_len + 1);
+            if (part == null)
+                throw Exception.OutOfMemory
+                    -> "Failed to allocate memory for split part in Split";
+
+            for (i32 j = 0; j < part_len; j++)
+                part[j] = str[start_idx + j];
+
+            part[part_len] = 0;
+            parts[part_idx++] = part;
+
+            if (str[i] == 0)
+                break;
+
+            start_idx = i + 1;
+        }
+    }
+
+    ret parts;
+}
+
+managed expose fun Split(this string str, string delim) -> string[]
+{
+    if (str == null)
+        ret [];
+
+    if (delim == null || delim[0] == 0)
+    {
+        i32 len = StrLen(str);
+        char* copy = (char*)Mem.Alloc(len + 1);
+        if (copy == null)
+            throw Exception.OutOfMemory
+                -> "Failed to allocate memory for split part in Split";
+
+        for (i32 i = 0; i < len; i++)
+            copy[i] = str[i];
+        copy[len] = 0;
+
+        string[] single = new string[1];
+        if (single == null)
+            throw Exception.OutOfMemory
+                -> "Failed to allocate string array in Split";
+        single[0] = copy;
+        ret single;
+    }
+
+    i32 delim_len = StrLen(delim);
+    i32 count = 1;
+
+    for (i32 i = 0; str[i] != 0; )
+    {
+        i32 is_match = 1;
+        for (i32 j = 0; j < delim_len; j++)
+        {
+            if (str[i + j] == 0 || str[i + j] != delim[j])
+            {
+                is_match = 0;
+                break;
+            }
+        }
+
+        if (is_match)
+        {
+            count++;
+            i += delim_len;
+        }
+        else
+        {
+            i++;
+        }
+    }
+
+    string[] parts = new string[count];
+    if (parts == null)
+        throw Exception.OutOfMemory
+            -> "Failed to allocate string array in Split";
+
+    i32 part_idx = 0;
+    i32 start_idx = 0;
+
+    for (i32 i = 0; ; )
+    {
+        i32 at_end = 0;
+        if (str[i] == 0)
+            at_end = 1;
+        i32 is_match = 0;
+
+        if (!at_end)
+        {
+            is_match = 1;
+            for (i32 j = 0; j < delim_len; j++)
+            {
+                if (str[i + j] == 0 || str[i + j] != delim[j])
+                {
+                    is_match = 0;
+                    break;
+                }
+            }
+        }
+
+        if (at_end || is_match)
+        {
+            i32 part_len = i - start_idx;
+
+            char* part = (char*)Mem.Alloc(part_len + 1);
+            if (part == null)
+                throw Exception.OutOfMemory
+                    -> "Failed to allocate memory for split part in Split";
+
+            for (i32 j = 0; j < part_len; j++)
+                part[j] = str[start_idx + j];
+
+            part[part_len] = 0;
+            parts[part_idx++] = part;
+
+            if (at_end)
+                break;
+
+            i += delim_len;
+            start_idx = i;
+        }
+        else
+        {
+            i++;
+        }
+    }
+
+    ret parts;
+}
+
+expose fun Trim(this string str) -> string
+{
+    if (str == null)
+        ret "";
+
+    i32 start = 0;
+    i32 end   = StrLen(str) - 1;
+
+    while (start <= end &&
+          (str[start] == ' '  ||
+           str[start] == '\t' ||
+           str[start] == '\n' ||
+           str[start] == '\r'))
+    {
+        start++;
+    }
+
+    while (end >= start &&
+          (str[end] == ' '  ||
+           str[end] == '\t' ||
+           str[end] == '\n' ||
+           str[end] == '\r'))
+    {
+        end--;
+    }
+
+    i32 len = end - start + 1;
+    if (len <= 0)
+        ret "";
+
+    char* trimmed = (char*)Mem.Alloc(len + 1);
+    if (trimmed == null)
+        throw Exception.OutOfMemory
+			-> "Failed to allocate memory for trimmed string in Trim";
+
+    for (i32 i = 0; i < len; i++)
+        trimmed[i] = str[start + i];
+
+    trimmed[len] = 0;
+    ret trimmed;
+}
+
+expose fun Concat(this string str, string other) -> string
+{
+    if (str == null)
+        str = "";
+    if (other == null)
+        other = "";
+
+    i32 len1 = StrLen(str);
+    i32 len2 = StrLen(other);
+    i32 total_len = len1 + len2;
+
+    char* result = (char*)Mem.Alloc(total_len + 1);
+    if (result == null)
+        throw Exception.OutOfMemory
+            -> "Failed to allocate memory for concatenated string in Concat";
+
+    for (i32 i = 0; i < len1; i++)
+        result[i] = str[i];
+    for (i32 j = 0; j < len2; j++)
+        result[len1 + j] = other[j];
+
+    result[total_len] = 0;
+    ret result;
+}
+
+expose fun Slice(this string str, i32 start, i32 end) -> string
+{
+    if (str == null)
+        ret "";
+
+    i32 str_len = StrLen(str);
+
+    if (start < 0)
+        start = str_len + start;
+    if (end < 0)
+        end = str_len + end;
+
+    if (start < 0)
+        start = 0;
+    if (end > str_len)
+        end = str_len;
+
+    if (start >= end)
+        ret "";
+
+    i32 slice_len = end - start;
+
+    char* slice = (char*)Mem.Alloc(slice_len + 1);
+    if (slice == null)
+        throw Exception.OutOfMemory
+            -> "Failed to allocate memory for sliced string in Slice";
+
+    for (i32 i = 0; i < slice_len; i++)
+        slice[i] = str[start + i];
+
+    slice[slice_len] = 0;
+    ret slice;
+}
+
+expose fun Splice(this string str, i32 index, i32 delete_count, string insert) -> string
+{
+    if (str == null)
+        str = "";
+    if (insert == null)
+        insert = "";
+
+    i32 str_len = StrLen(str);
+    i32 insert_len = StrLen(insert);
+
+    if (index < 0)
+        index = str_len + index;
+    if (index < 0)
+        index = 0;
+    if (index > str_len)
+        index = str_len;
+
+    if (delete_count < 0)
+        delete_count = 0;
+    if (delete_count > str_len - index)
+        delete_count = str_len - index;
+
+    i32 new_len = str_len - delete_count + insert_len;
+
+    char* result = (char*)Mem.Alloc(new_len + 1);
+    if (result == null)
+        throw Exception.OutOfMemory
+            -> "Failed to allocate memory for spliced string in Splice";
+
+    for (i32 i = 0; i < index; i++)
+        result[i] = str[i];
+    for (i32 j = 0; j < insert_len; j++)
+        result[index + j] = insert[j];
+    for (i32 k = index + delete_count; k < str_len; k++)
+        result[index + insert_len + k - (index + delete_count)] = str[k];
+
+    result[new_len] = 0;
+    ret result;
+}
+
+//StartsWith
+expose fun StartsWith(this string str, string prefix) -> bool
+{
+    if (str == null)
+        str = "";
+    if (prefix == null)
+        prefix = "";
+
+    i32 str_len = (i32)str.length;
+    i32 prefix_len = (i32)prefix.length;
+    if (prefix_len > str_len)
+        ret false;
+    
+    for (i32 i = 0; i < prefix_len; i++)
+    {
+        if (str[i] != prefix[i])
+            ret false;
+    }
+
+    ret true;
+}
+
+expose fun EndsWith(this string str, string suffix) -> bool
+{
+    if (str == null)
+        str = "";
+    if (suffix == null)
+        suffix = "";
+
+    i32 str_len = (i32)str.length;
+    i32 suffix_len = (i32)suffix.length;
+    if (suffix_len > str_len)
+        ret false;
+    
+    for (i32 i = 0; i < suffix_len; i++)
+    {
+        if (str[str_len - suffix_len + i] != suffix[i])
+            ret false;
+    }
+
+    ret true;
+}
+
+expose fun IsBlank(this string str) -> bool
+{
+    if (str == null)
+        ret true;
+
+    for (i32 i = 0; str[i] != 0; i++)
+    {
+        if (str[i] != ' ' && str[i] != '\t' && str[i] != '\n' && str[i] != '\r')
+            ret false;
+    }
+
+    ret true;
+}
+
+expose fun FindChar(this string str, char c) -> i32
+{
+    if (str == null)
+        ret -1;
+
+    for (i32 i = 0; str[i] != 0; i++)
+    {
+        if (str[i] == c)
+            ret i;
+    }
+
+    ret -1;
+}

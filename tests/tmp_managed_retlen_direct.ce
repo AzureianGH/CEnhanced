@@ -1,0 +1,17 @@
+managed module Tmp.ManagedRetLenDirect;
+
+expose fun Make(i32 n) -> i32[]
+{
+    i32[] arr = new i32[n];
+    ret (managed[]: .length = n) arr;
+}
+
+entrypoint expose fun main() -> i32
+{
+    i32[] data = Make(3);
+    for (i32 i = 0; i < data.length; i++)
+    {
+        data[i] = i;
+    }
+    ret 0;
+}

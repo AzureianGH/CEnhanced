@@ -4,6 +4,7 @@
 #include "chance_version.h"
 #include "driver_cli.h"
 #include "driver_paths.h"
+#include "frontend.h"
 #include "includes.h"
 #include <ctype.h>
 #include <errno.h>
@@ -43,6 +44,7 @@ typedef struct
   int *implicit_void_function;
   int *implicit_sizeof;
   int *language_standard;
+  int *c_dialect;
   int *request_ast;
   int *diagnostics_only;
   int *toolchain_debug_mode;
@@ -54,6 +56,23 @@ typedef struct
   ProjectInputList symbol_ref_ce_list;
   ProjectInputList symbol_ref_cclib_list;
 } ProjectArgState;
+
+static int parse_c_dialect_value(const char *value, int *out)
+{
+  if (!value || !out)
+    return -1;
+  if (equals_icase(value, "c23"))
+  {
+    *out = CHANCE_C_DIALECT_C23;
+    return 0;
+  }
+  if (equals_icase(value, "gnu23"))
+  {
+    *out = CHANCE_C_DIALECT_GNU23;
+    return 0;
+  }
+  return -1;
+}
 
 int push_input_entry(const char *value, ProjectInputList list, int make_copy)
 {
@@ -475,6 +494,50 @@ static int project_args_apply(const char *proj_path, int lineno,
         *state->opt_level = level;
       continue;
     }
+    if (strncmp(arg, "-std=", 5) == 0)
+    {
+      if (!state->c_dialect ||
+          parse_c_dialect_value(arg + 5, state->c_dialect) != 0)
+      {
+        fprintf(stderr,
+                "error: unsupported C dialect '%s' in '%s' (line %d); use c23|gnu23\n",
+                arg + 5, proj_path, lineno);
+        return -1;
+      }
+      continue;
+    }
+    if (strcmp(arg, "--std") == 0)
+    {
+      if (i + 1 >= count)
+      {
+        fprintf(stderr,
+                "error: --std expects a dialect in '%s' (line %d)\n",
+                proj_path, lineno);
+        return -1;
+      }
+      if (!state->c_dialect ||
+          parse_c_dialect_value(args[i + 1], state->c_dialect) != 0)
+      {
+        fprintf(stderr,
+                "error: unsupported C dialect '%s' in '%s' (line %d); use c23|gnu23\n",
+                args[i + 1], proj_path, lineno);
+        return -1;
+      }
+      ++i;
+      continue;
+    }
+    if (strncmp(arg, "--std=", 6) == 0)
+    {
+      if (!state->c_dialect ||
+          parse_c_dialect_value(arg + 6, state->c_dialect) != 0)
+      {
+        fprintf(stderr,
+                "error: unsupported C dialect '%s' in '%s' (line %d); use c23|gnu23\n",
+                arg + 6, proj_path, lineno);
+        return -1;
+      }
+      continue;
+    }
     if (strcmp(arg, "--no-link") == 0)
     {
       if (state->no_link)
@@ -507,7 +570,7 @@ static int project_args_apply(const char *proj_path, int lineno,
         else if (is_ce_source_arg(cand))
         {
           fprintf(stderr,
-                  "error: -c in project args cannot list .ce/.cin inputs; use ce= instead (line %d)\n",
+                  "error: -c in project args cannot list source inputs; use ce= instead (line %d)\n",
                   lineno);
           return -1;
         }
@@ -858,6 +921,12 @@ static int project_args_apply(const char *proj_path, int lineno,
         *state->language_standard = CHANCE_STD_H27;
       continue;
     }
+    if (strcmp(arg, "-H28") == 0)
+    {
+      if (state->language_standard)
+        *state->language_standard = CHANCE_STD_H28;
+      continue;
+    }
     if (arg[0] == '-')
     {
       fprintf(stderr, "error: unknown project arg '%s' in '%s' (line %d)\n", arg,
@@ -908,6 +977,7 @@ int parse_ceproj_file(
     const char **entry_symbol,
     const char **obj_override, int *implicit_voidp, int *implicit_void_function,
     int *implicit_sizeof, int *request_ast, int *language_standard,
+    int *c_dialect,
     int *diagnostics_only, int *toolchain_debug_mode,
     int *toolchain_debug_deep, int *verbose_use_ansi,
     OverrideFile **override_files, int *override_file_count,
@@ -1166,6 +1236,7 @@ int parse_ceproj_file(
           .implicit_void_function = implicit_void_function,
           .implicit_sizeof = implicit_sizeof,
           .language_standard = language_standard,
+          .c_dialect = c_dialect,
           .request_ast = request_ast,
           .diagnostics_only = diagnostics_only,
           .toolchain_debug_mode = toolchain_debug_mode,

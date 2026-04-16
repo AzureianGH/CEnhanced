@@ -49,7 +49,7 @@ constant i32 ERR_EAGAIN = 11;
 #endif
 
 #if defined(__linux__)
-constant i32 SEND_FLAGS = 0x4000; // MSG_NOSIGNAL
+constant i32 SEND_FLAGS = 0x4000;
 #else
 constant i32 SEND_FLAGS = 0;
 #endif
@@ -77,12 +77,12 @@ struct SockAddrIn
 i32 wsa_ready = 0;
 #endif
 
-hide fun net_errno() -> i32
+hide fun NetErrno() -> i32
 {
 #if defined(_WIN32) || defined(__WIN32__)
     ret WSAGetLastError();
 #elif defined(__APPLE__) || defined(__MACH__)
-    ret -1; // errno accessor unavailable; best-effort
+    ret -1;
 #elif defined(__linux__)
     i32* p = __errno_location();
     ret p != 0 as i32* ? *p : -1;
@@ -91,9 +91,12 @@ hide fun net_errno() -> i32
 #endif
 }
 
-expose fun last_error() -> i32 { ret net_errno(); }
+expose fun LastError() -> i32
+{
+    ret NetErrno();
+}
 
-hide fun net_close(i32 s) -> i32
+hide fun NetClose(i32 s) -> i32
 {
 #if defined(_WIN32) || defined(__WIN32__)
     ret closesocket(s);
@@ -102,7 +105,7 @@ hide fun net_close(i32 s) -> i32
 #endif
 }
 
-expose fun init() -> i32
+expose fun Init() -> i32
 {
 #if defined(_WIN32) || defined(__WIN32__)
     if (wsa_ready != 0)
@@ -119,7 +122,7 @@ expose fun init() -> i32
 #endif
 }
 
-expose fun cleanup() -> void
+expose fun Cleanup() -> void
 {
 #if defined(_WIN32) || defined(__WIN32__)
     if (wsa_ready != 0)
@@ -130,7 +133,7 @@ expose fun cleanup() -> void
 #endif
 }
 
-hide fun apply_common_opts(i32 sock) -> void
+hide fun ApplyCommonOpts(i32 sock) -> void
 {
     i32 yes = 1;
     setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (&yes) as void*, 4);
@@ -141,16 +144,16 @@ hide fun apply_common_opts(i32 sock) -> void
 #endif
 }
 
-expose fun tcp_listen(i32 port, i32 backlog) -> i32
+expose fun TcpListen(i32 port, i32 backlog) -> i32
 {
-    if (init() != 0)
+    if (Init() != 0)
         ret -1;
 
     i32 s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s < 0)
         ret -1;
 
-    apply_common_opts(s);
+    ApplyCommonOpts(s);
 
     SockAddrIn sa = {};
 #if defined(__APPLE__) || defined(__MACH__)
@@ -159,39 +162,39 @@ expose fun tcp_listen(i32 port, i32 backlog) -> i32
 #else
     sa.sin_family = AF_INET as u16;
 #endif
-    sa.sin_port = htons(port as u16);
-    sa.sin_addr = htonl(INADDR_ANY);
+    sa.sin_port = HtonS(port as u16);
+    sa.sin_addr = HtonL(INADDR_ANY);
 
     if (bind(s, (&sa) as void*, sizeof(SockAddrIn)) != 0)
     {
-        i32 err = net_errno();
-        net_close(s);
+        i32 err = NetErrno();
+        NetClose(s);
         ret -err;
     }
 
     if (listen(s, backlog) != 0)
     {
-        i32 err = net_errno();
-        net_close(s);
+        i32 err = NetErrno();
+        NetClose(s);
         ret -err;
     }
 
     ret s;
 }
 
-expose fun tcp_accept(i32 listener) -> i32
+expose fun TcpAccept(i32 listener) -> i32
 {
     SockAddrIn sa = {};
     i32 len = sizeof(SockAddrIn);
     i32 c = accept(listener, (&sa) as void*, &len);
     if (c >= 0)
-        apply_common_opts(c);
+        ApplyCommonOpts(c);
     ret c;
 }
 
-expose fun tcp_connect(char* ip, i32 port) -> i32
+expose fun TcpConnect(char* ip, i32 port) -> i32
 {
-    if (init() != 0)
+    if (Init() != 0)
         ret -1;
 
     if (ip == 0 as char*)
@@ -201,7 +204,7 @@ expose fun tcp_connect(char* ip, i32 port) -> i32
     if (s < 0)
         ret -1;
 
-    apply_common_opts(s);
+    ApplyCommonOpts(s);
 
     SockAddrIn sa = {};
 #if defined(__APPLE__) || defined(__MACH__)
@@ -210,20 +213,20 @@ expose fun tcp_connect(char* ip, i32 port) -> i32
 #else
     sa.sin_family = AF_INET as u16;
 #endif
-    sa.sin_port = htons(port as u16);
+    sa.sin_port = HtonS(port as u16);
     sa.sin_addr = inet_addr(ip);
 
     if (connect(s, (&sa) as void*, sizeof(SockAddrIn)) != 0)
     {
-        i32 err = net_errno();
-        net_close(s);
+        i32 err = NetErrno();
+        NetClose(s);
         ret -err;
     }
 
     ret s;
 }
 
-expose fun tcp_send_all(i32 sock, void* data, i32 len) -> i32
+expose fun TcpSendAll(i32 sock, void* data, i32 len) -> i32
 {
     if (sock < 0 || data == 0 as void* || len < 0)
         ret -1;
@@ -244,7 +247,7 @@ expose fun tcp_send_all(i32 sock, void* data, i32 len) -> i32
         if (rc == 0)
             ret sent > 0 ? sent : -1;
 
-        i32 err = net_errno();
+        i32 err = NetErrno();
 
         if (err == ERR_EINTR)
             continue;
@@ -255,7 +258,7 @@ expose fun tcp_send_all(i32 sock, void* data, i32 len) -> i32
     ret sent;
 }
 
-expose fun tcp_recv(i32 sock, void* buf, i32 cap) -> i32
+expose fun TcpRecv(i32 sock, void* buf, i32 cap) -> i32
 {
     if (sock < 0 || buf == 0 as void* || cap <= 0)
         ret -1;
@@ -270,28 +273,28 @@ expose fun tcp_recv(i32 sock, void* buf, i32 cap) -> i32
             ret rc as i32;
         }
 
-        i32 err = net_errno();
+        i32 err = NetErrno();
         if (err == ERR_EINTR || err == ERR_EAGAIN)
             continue;
         ret -err;
     }
 }
 
-expose fun tcp_shutdown(i32 sock, i32 how) -> i32
+expose fun TcpShutdown(i32 sock, i32 how) -> i32
 {
     if (sock < 0)
         ret -1;
     ret shutdown(sock, how);
 }
 
-expose fun tcp_close(i32 sock) -> i32
+expose fun TcpClose(i32 sock) -> i32
 {
     if (sock < 0)
         ret -1;
-    ret net_close(sock);
+    ret NetClose(sock);
 }
 
-expose fun htonl(u32 hostlong) -> u32
+expose fun HtonL(u32 hostlong) -> u32
 {
     ret ((hostlong & 0x000000FF) << 24) |
         ((hostlong & 0x0000FF00) << 8)  |
@@ -299,13 +302,13 @@ expose fun htonl(u32 hostlong) -> u32
         ((hostlong & 0xFF000000) >> 24);
 }
 
-expose fun htons(u16 hostshort) -> u16
+expose fun HtonS(u16 hostshort) -> u16
 {
     ret ((hostshort & 0x00FF) << 8) |
         ((hostshort & 0xFF00) >> 8);
 }
 
-expose fun inetaddr(char* ip) -> u32
+expose fun InetAddr(char* ip) -> u32
 {
     ret inet_addr(ip);
 }

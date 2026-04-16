@@ -1,0 +1,41 @@
+bring Std.IO as IO;
+
+bundle Box<T>
+{
+    expose T value;
+
+    expose on new(T val) { this.value = val; }
+
+    hide on new() { this.value = 0; }
+
+    expose fun Add(T variable) -> Box<T> {
+        this.value += variable;
+        ret this;
+    }
+
+    expose fun New() -> Box<T> {
+        ret new Box<T>();
+    }
+
+    static expose fun New(T val) -> Box<T> {
+        ret new Box<T>(val);
+    }
+};
+
+Box<i16> global_ctor = new Box<i16>(12345);
+
+entrypoint expose fun main() -> i32
+{
+    Box<i32> boxed_add = Box<i32>.New(5)
+                                 .Add(1)
+                                 .Add(1)
+                                 .Add(1)
+                                 .Add(1)
+                                 .Add(1);
+
+    IO.PrintLine("boxed_add.value = %d", boxed_add.value);
+    IO.PrintLine("global_ctor.value = %d", global_ctor.value);
+
+
+    ret boxed_add.value - 10;
+}

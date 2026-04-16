@@ -81,7 +81,16 @@ expose struct AssertionFailed {
     string symbol;
 };
 
-expose fun runtime_error(string message) -> RuntimeError
+expose struct InvalidOperation {
+    i32 code;
+    string category = "InvalidOperation";
+    string message;
+    string file;
+    u64 line;
+    string symbol;
+};
+
+expose fun RuntimeErrorFromMessage(string message) -> RuntimeError
 {
     RuntimeError ex = {};
     ex.code = E_RUNTIME;
@@ -89,7 +98,7 @@ expose fun runtime_error(string message) -> RuntimeError
     ret ex;
 }
 
-expose fun io_error(string message) -> IOError
+expose fun IOErrorFromMessage(string message) -> IOError
 {
     IOError ex = {};
     ex.code = E_IO;
@@ -97,11 +106,10 @@ expose fun io_error(string message) -> IOError
     ret ex;
 }
 
-expose fun out_of_memory(string message) -> OutOfMemory
+expose fun OutOfMemoryFromMessage(string message) -> OutOfMemory
 {
     OutOfMemory ex = {};
     ex.code = E_OOM;
     ex.message = message;
     ret ex;
 }
-

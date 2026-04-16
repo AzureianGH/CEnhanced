@@ -1972,7 +1972,8 @@ static void process_inactive_line(const char *src, int len, int *index, StrBuild
 }
 
 char *chance_preprocess_source(const char *path, const char *src, int len,
-							   int *out_len, const char *target_arch_name)
+							   int *out_len, const char *target_arch_name,
+							   int freestanding)
 {
 	if (!src || len <= 0)
 	{
@@ -2012,6 +2013,8 @@ char *chance_preprocess_source(const char *path, const char *src, int len,
 	st.date_literal[sizeof(st.date_literal) - 1] = '\0';
 	st.time_literal[sizeof(st.time_literal) - 1] = '\0';
 	define_builtin_macro(&st, "__CHANCE__", "1");
+	define_builtin_macro(&st, "__CHANCE_FREESTANDING__", freestanding ? "1" : "0");
+	define_builtin_macro(&st, "__STDC_HOSTED__", freestanding ? "0" : "1");
 	char version_compact[16];
 	snprintf(version_compact, sizeof(version_compact), "%d",
 			 CHANCEC_VERSION_COMPACT);
@@ -2039,6 +2042,9 @@ char *chance_preprocess_source(const char *path, const char *src, int len,
 	snprintf(pointer_buf, sizeof(pointer_buf), "%d", st.pointer_width);
 	define_builtin_macro(&st, "__POINTER_WIDTH__", pointer_buf);
 	define_builtin_macro(&st, "__IS64BIT__", st.pointer_width >= 64 ? "1" : "0");
+	define_builtin_macro(&st, "__CHANCE_FREESTANDING__", freestanding ? "1" : "0");
+	define_builtin_macro(&st, "__CHANCE_HOSTED__", freestanding ? "0" : "1");
+	define_builtin_macro(&st, "__STDC_HOSTED__", freestanding ? "0" : "1");
 	char *arch_literal = make_string_literal(arch_name);
 	define_builtin_macro(&st, "__TARGET_ARCH__", arch_literal);
 	define_builtin_macro(&st, "__ARCH__", arch_literal);

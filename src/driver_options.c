@@ -2,11 +2,29 @@
 
 #include "chance_version.h"
 #include "driver_cli.h"
+#include "frontend.h"
 #include "includes.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static int parse_c_dialect_value(const char *value, int *out)
+{
+  if (!value || !out)
+    return -1;
+  if (equals_icase(value, "c23"))
+  {
+    *out = CHANCE_C_DIALECT_C23;
+    return 0;
+  }
+  if (equals_icase(value, "gnu23"))
+  {
+    *out = CHANCE_C_DIALECT_GNU23;
+    return 0;
+  }
+  return -1;
+}
 
 static int append_const_input(const char *value, const char ***items,
                               int *count, int *cap)
@@ -142,6 +160,45 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
         level = (int)parsed;
       }
       *state->opt_level = level;
+      continue;
+    }
+    if (strncmp(argv[i], "-std=", 5) == 0)
+    {
+      if (!state->c_dialect ||
+          parse_c_dialect_value(argv[i] + 5, state->c_dialect) != 0)
+      {
+        fprintf(stderr, "error: unsupported C dialect '%s' (use c23|gnu23)\n",
+                argv[i] + 5);
+        return 2;
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "--std") == 0)
+    {
+      if (i + 1 >= argc)
+      {
+        fprintf(stderr, "error: --std expects a dialect (c23|gnu23)\n");
+        return 2;
+      }
+      if (!state->c_dialect ||
+          parse_c_dialect_value(argv[i + 1], state->c_dialect) != 0)
+      {
+        fprintf(stderr, "error: unsupported C dialect '%s' (use c23|gnu23)\n",
+                argv[i + 1]);
+        return 2;
+      }
+      ++i;
+      continue;
+    }
+    if (strncmp(argv[i], "--std=", 6) == 0)
+    {
+      if (!state->c_dialect ||
+          parse_c_dialect_value(argv[i] + 6, state->c_dialect) != 0)
+      {
+        fprintf(stderr, "error: unsupported C dialect '%s' (use c23|gnu23)\n",
+                argv[i] + 6);
+        return 2;
+      }
       continue;
     }
     if (strcmp(argv[i], "--no-link") == 0)
@@ -410,6 +467,11 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
       *state->language_standard = CHANCE_STD_H27;
       continue;
     }
+    if (strcmp(argv[i], "-H28") == 0)
+    {
+      *state->language_standard = CHANCE_STD_H28;
+      continue;
+    }
     if (strncmp(argv[i], "-sr:", 4) == 0)
     {
       const char *sr_path = argv[i] + 4;
@@ -500,7 +562,8 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
           state->chancecodec_cmd_override, state->chs_cmd_override,
           state->entry_symbol, state->obj_override, state->implicit_voidp,
           state->implicit_void_function, state->implicit_sizeof,
-          state->request_ast, state->language_standard, state->diagnostics_only,
+          state->request_ast, state->language_standard, state->c_dialect,
+          state->diagnostics_only,
           state->toolchain_debug_mode, state->toolchain_debug_deep,
           state->verbose_use_ansi, state->override_files,
           state->override_file_count, state->override_file_cap,
@@ -523,7 +586,8 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
       continue;
     }
 
-    if (ends_with_icase(arg, ".ce") || ends_with_icase(arg, ".cin"))
+    if (ends_with_icase(arg, ".ce") || ends_with_icase(arg, ".cin") ||
+        ends_with_icase(arg, ".c") || ends_with_icase(arg, ".h"))
     {
       if (push_input_entry(arg, ce_cli_list, 0) != 0)
         return -1;
@@ -550,7 +614,7 @@ int parse_driver_options_argv(int argc, char **argv, DriverOptionsState *state)
     else
     {
       fprintf(stderr,
-              "error: unknown input type '%s' (expected .ce/.cin or .o/.obj)\n",
+              "error: unknown input type '%s' (expected .ce/.cin/.c/.h or .o/.obj)\n",
               arg);
       return 2;
     }

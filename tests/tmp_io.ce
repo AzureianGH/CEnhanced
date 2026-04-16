@@ -1,0 +1,6 @@
+module T;
+bring Std.IO as IO;
+entrypoint expose fun main() -> int {
+    IO.printnl("Hello, world!");
+    ret 0;
+}

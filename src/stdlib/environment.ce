@@ -1,14 +1,62 @@
 #hint implicit-void-function
 module Std.Environment;
 
-extend from "C" void exit(int);
+bring Std.String as Str;
 
-expose fun exit(i32 code)
+extend from "C" void exit(int);
+extend from "C" char* getenv(char* name);
+
+#if !defined(_WIN32) && !defined(__WIN32__)
+struct Passwd
+{
+	char* pw_name;
+};
+
+extend from "C" u32 getuid();
+extend from "C" Passwd* getpwuid(u32 uid);
+#endif
+
+expose fun Exit(i32 code)
 {
 	exit(code as int);
 }
 
-expose fun abort() -> void
+expose fun Abort() -> void
 {
-	exit(1 as int);
+	Exit(1);
+}
+
+expose fun GetCurrentUser() -> char*
+{
+	char* user = 0 as char*;
+
+#if defined(_WIN32) || defined(__WIN32__)
+	user = getenv("USERNAME");
+	if (user == 0 as char*)
+		user = getenv("USER");
+#else
+	user = getenv("USER");
+	if (user == 0 as char*)
+		user = getenv("LOGNAME");
+	if (user == 0 as char*)
+	{
+		Passwd* pw = getpwuid(getuid());
+		if (pw != 0 as Passwd*)
+			user = pw->pw_name;
+	}
+#endif
+
+	if (user == 0 as char*)
+		ret "unknown";
+
+	ret user;
+}
+
+managed expose fun GetCurrentUserString() -> string
+{
+	char* user = GetCurrentUser();
+	char* dup = Str.StrDup(user);
+	if (dup == 0 as char*)
+		ret "unknown";
+	ret dup as string;
 }

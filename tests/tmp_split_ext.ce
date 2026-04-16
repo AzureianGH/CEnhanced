@@ -1,0 +1,11 @@
+module Tmp.SplitExt;
+
+bring Std.String.Extensions;
+
+entrypoint expose fun main() -> i32
+{
+    string[] parts = "a,b".Split();
+    if (parts == null)
+        ret 1;
+    ret 0;
+}

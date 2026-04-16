@@ -21,6 +21,7 @@ typedef enum
     TK_KW_STATIC,
     TK_KW_REG,
     TK_KW_STRUCT,
+    TK_KW_BUNDLE,
     TK_KW_STRUC, 
     TK_KW_UNION,
     TK_KW_PACKED,
@@ -219,6 +220,7 @@ typedef struct Type
         const char **field_names;
         struct Type **field_types;
         const char **field_default_values;
+        unsigned char *field_exposed_flags;
         int *field_offsets;
         int field_count;
         int size_bytes;
@@ -240,6 +242,11 @@ typedef struct Type
     } func;
     int is_exposed; 
     int is_object;  
+    int is_bundle;
+    int bundle_ctor_declared;
+    int bundle_ctor_declared_exposed;
+    int bundle_ctor_has_zero_arity;
+    int bundle_ctor_has_exposed_zero_arity;
     const char *import_module;
     const char *import_type_name;
     struct Type *import_resolved;
@@ -414,6 +421,8 @@ struct Node
     int is_chancecode;
     int is_literal;
     int is_managed;
+    int is_extension_method;
+    int is_bundle_global_init;
     int force_inline_literal;
     struct
     {
@@ -541,6 +550,7 @@ typedef enum
 {
     CHANCE_STD_H26 = 26,
     CHANCE_STD_H27 = 27,
+    CHANCE_STD_H28 = 28,
 } ChanceLanguageStandard;
 
 Parser *parser_create(SourceBuffer src);
@@ -670,6 +680,7 @@ typedef struct Symbol
     FuncSig sig;
     struct Node *ast_node; 
     int is_noreturn;
+    int is_extension_method;
     Type *var_type; 
     int is_const;   
 } Symbol;
@@ -688,6 +699,7 @@ typedef struct
     SymTable *syms;
     struct Scope *scope;
     struct Node *unit;
+    struct Node *current_function;
     struct ImportedFunctionSet *imported_funcs;
     int imported_func_count;
     int imported_func_cap;
