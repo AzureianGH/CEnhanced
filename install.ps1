@@ -235,8 +235,8 @@ try {
     $stdlibDir = Join-Path $shareDir 'stdlib'
     $runtimeDir = Join-Path $shareDir 'runtime'
 
-    $defaultRuntime = Join-Path $runtimeDir 'runtime.cclib'
-    $defaultStdlib = Join-Path $stdlibDir 'stdlib.cclib'
+    $defaultRuntime = (Join-Path $runtimeDir 'runtime.cclib').Replace('\\', '/')
+    $defaultStdlib = (Join-Path $stdlibDir 'stdlib.cclib').Replace('\\', '/')
     $preferredCCompiler = Get-PreferredCCompiler
     if ($preferredCCompiler) {
         Write-Info "Using C compiler for make projects: $preferredCCompiler"
@@ -255,6 +255,26 @@ try {
         Write-Info 'Building ChanceCode'
         Invoke-External -FilePath $chanceCodeBuildBat -WorkingDirectory $chanceCodeDir | Out-Null
         Write-Info 'ChanceCode build complete'
+    }
+
+    $cldMakefile = Join-Path $cldDir 'Makefile'
+    if (Test-Path -LiteralPath $cldMakefile) {
+        $makeBin = Find-Make
+        if ($null -eq $makeBin) {
+            Fail 'no make tool found (need make or mingw32-make)'
+        }
+        else {
+            Write-Info 'Building CLD'
+            $makeArgs = @()
+            if ($null -ne $makeCores) {
+                $makeArgs += @('-j', [string]$makeCores)
+            }
+            if ($preferredCCompiler) {
+                $makeArgs += "CC=$preferredCCompiler"
+            }
+            Invoke-External -FilePath $makeBin -Arguments $makeArgs -WorkingDirectory $cldDir | Out-Null
+            Write-Info 'CLD build complete'
+        }
     }
 
     $chsMakefile = Join-Path $chsDir 'Makefile'
@@ -428,64 +448,32 @@ try {
         Copy-RequiredFile -Source $chancecodecBin -Destination (Join-Path $binDir 'chancecodec.exe')
     }
 
-    $cldMakefile = Join-Path $cldDir 'Makefile'
-    if (Test-Path -LiteralPath $cldMakefile) {
-        $makeBin = Find-Make
-        if ($null -eq $makeBin) {
-            Fail 'no make tool found (need make or mingw32-make)'
-        }
-
-        Write-Info 'Installing CLD'
-        $makeArgs = @()
-        if ($null -ne $makeCores) {
-            $makeArgs += @('-j', [string]$makeCores)
-        }
-        if ($preferredCCompiler) {
-            $makeArgs += "CC=$preferredCCompiler"
-        }
-        $makeArgs += @('install', "PREFIX=$prefix")
-        Invoke-External -FilePath $makeBin -Arguments $makeArgs -WorkingDirectory $cldDir | Out-Null
+    Write-Info 'Installing CLD'
+    $cldBin = Get-FirstExistingPath @(
+        (Join-Path $cldDir 'build\cld.exe'),
+        (Join-Path $cldDir 'build\mingw-release\cld.exe'),
+        (Join-Path $cldDir 'build\cld'),
+        (Join-Path $cldDir 'build\mingw-release\cld')
+    )
+    if ($cldBin) {
+        Copy-RequiredFile -Source $cldBin -Destination (Join-Path $binDir 'cld.exe')
     }
     else {
-        $cldBin = Get-FirstExistingPath @(
-            (Join-Path $cldDir 'build\cld.exe'),
-            (Join-Path $cldDir 'build\mingw-release\cld.exe'),
-            (Join-Path $cldDir 'build\cld'),
-            (Join-Path $cldDir 'build\mingw-release\cld')
-        )
-        if ($cldBin) {
-            Copy-RequiredFile -Source $cldBin -Destination (Join-Path $binDir 'cld.exe')
-        }
+        Fail "CLD binary not found under '$cldDir\build'"
     }
 
-    if (Test-Path -LiteralPath $chsMakefile) {
-        $makeBin = Find-Make
-        if ($null -eq $makeBin) {
-            Fail 'no make tool found (need make or mingw32-make)'
-        }
-        else {
-            Write-Info 'Installing CHS'
-            $makeArgs = @()
-            if ($null -ne $makeCores) {
-                $makeArgs += @('-j', [string]$makeCores)
-            }
-            if ($preferredCCompiler) {
-                $makeArgs += "CC=$preferredCCompiler"
-            }
-            $makeArgs += @('install', "PREFIX=$prefix")
-            Invoke-External -FilePath $makeBin -Arguments $makeArgs -WorkingDirectory $chsDir | Out-Null
-        }
+    Write-Info 'Installing CHS'
+    $chsInstallBin = Get-FirstExistingPath @(
+        (Join-Path $chsDir 'build\chs.exe'),
+        (Join-Path $chsDir 'build\mingw-release\chs.exe'),
+        (Join-Path $chsDir 'build\chs'),
+        (Join-Path $chsDir 'build\mingw-release\chs')
+    )
+    if ($chsInstallBin) {
+        Copy-RequiredFile -Source $chsInstallBin -Destination (Join-Path $binDir 'chs.exe')
     }
     else {
-        $chsInstallBin = Get-FirstExistingPath @(
-            (Join-Path $chsDir 'build\chs.exe'),
-            (Join-Path $chsDir 'build\mingw-release\chs.exe'),
-            (Join-Path $chsDir 'build\chs'),
-            (Join-Path $chsDir 'build\mingw-release\chs')
-        )
-        if ($chsInstallBin) {
-            Copy-RequiredFile -Source $chsInstallBin -Destination (Join-Path $binDir 'chs.exe')
-        }
+        Fail "CHS binary not found under '$chsDir\build'"
     }
 
     $cvmExe = Get-FirstExistingPath @(
