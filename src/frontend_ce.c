@@ -41,14 +41,14 @@ static int ce_supports_input_path(const char *input_path)
 
 static CEFrontendUnit *ce_unit_from_frontend_unit(FrontendUnit *unit)
 {
-  if (!unit || !unit->impl)
+  if (!unit || !unit->impl || unit->frontend != chance_frontend_ce())
     return NULL;
   return (CEFrontendUnit *)unit->impl;
 }
 
 static const CEFrontendUnit *ce_unit_from_frontend_unit_const(const FrontendUnit *unit)
 {
-  if (!unit || !unit->impl)
+  if (!unit || !unit->impl || unit->frontend != chance_frontend_ce())
     return NULL;
   return (const CEFrontendUnit *)unit->impl;
 }

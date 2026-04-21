@@ -570,7 +570,7 @@ static int project_args_apply(const char *proj_path, int lineno,
         else if (is_ce_source_arg(cand))
         {
           fprintf(stderr,
-                  "error: -c in project args cannot list source inputs; use ce= instead (line %d)\n",
+            "error: -c in project args cannot list source inputs; use ce= or c= instead (line %d)\n",
                   lineno);
           return -1;
         }
@@ -1034,7 +1034,7 @@ int parse_ceproj_file(
     char value_buf[2048];
     strip_wrapping_quotes(value, value_buf, sizeof(value_buf));
     trim_whitespace_inplace(value_buf);
-    if (strcmp(key, "ce") == 0 || strcmp(key, "source") == 0)
+    if (strcmp(key, "ce") == 0 || strcmp(key, "c") == 0 || strcmp(key, "source") == 0)
     {
       if (add_file_list_entries(value_buf, project_dir, ce_list) != 0)
       {
