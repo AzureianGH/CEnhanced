@@ -631,7 +631,11 @@ static bool ccb_symbol_is_c_abi_varargs_extern(const Symbol *sym)
 
 static bool ccb_symbol_needs_varargs_suffix(const Symbol *sym)
 {
-    return sym && sym->sig.is_varargs && !ccb_symbol_is_c_abi_varargs_extern(sym);
+    if (!sym || !sym->sig.is_varargs || ccb_symbol_is_c_abi_varargs_extern(sym))
+        return false;
+    if (sym->ast_node && sym->ast_node->kind == ND_FUNC && sym->ast_node->export_name)
+        return false;
+    return true;
 }
 
 static bool ccb_name_matches_symbol(const Symbol *sym, const char *name)
@@ -724,15 +728,32 @@ static bool ccb_should_suffix_varargs_call_name(const CcbFunctionBuilder *fb, co
     return true;
 }
 
-static const char *ccb_effective_function_name(const Node *fn)
+static bool ccb_function_uses_export_name(const Node *fn)
+{
+    return fn && fn->kind == ND_FUNC && fn->export_name;
+}
+
+static bool ccb_function_needs_varargs_suffix(const Node *fn)
+{
+    return fn && fn->is_varargs && !ccb_function_uses_export_name(fn);
+}
+
+static const char *ccb_effective_function_base_name(const Node *fn)
 {
     if (!fn || !fn->name)
         return NULL;
     const char *backend = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
-    if (fn->export_name && !fn->raw_export_name)
+    if (ccb_function_uses_export_name(fn) && !fn->raw_export_name)
         backend = fn->name;
+    return backend;
+}
+
+static const char *ccb_effective_function_name(const Node *fn)
+{
+    const char *backend = ccb_effective_function_base_name(fn);
     static char varargs_name[1024];
-    return ccb_label_with_varargs_suffix(backend, fn->is_varargs, varargs_name, sizeof(varargs_name));
+    return ccb_label_with_varargs_suffix(backend, ccb_function_needs_varargs_suffix(fn),
+                                         varargs_name, sizeof(varargs_name));
 }
 
 static bool ccb_name_has_varargs_suffix(const char *name)
@@ -13820,11 +13841,10 @@ static int ccb_function_emit_chancecode(CcbModule *mod, const Node *fn, const Co
     if (!mod || !fn || fn->kind != ND_FUNC || !fn->name)
         return 1;
 
-    const char *backend_name_base = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
-    if (fn->export_name && !fn->raw_export_name)
-        backend_name_base = fn->name;
+    const char *backend_name_base = ccb_effective_function_base_name(fn);
     char backend_name_buf[1024];
-    const char *backend_name = ccb_label_with_varargs_suffix(backend_name_base, fn->is_varargs,
+    const char *backend_name = ccb_label_with_varargs_suffix(backend_name_base,
+                                                              ccb_function_needs_varargs_suffix(fn),
                                                               backend_name_buf, sizeof(backend_name_buf));
     const char *ret_name = cc_type_name(map_type_to_cc(fn->ret_type));
     int declared_params = (fn->metadata.declared_param_count >= 0)
@@ -13941,11 +13961,10 @@ static int ccb_function_emit_literal(CcbModule *mod, const Node *fn, const Codeg
         return 1;
     }
 
-    const char *backend_name_base = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
-    if (fn->export_name && !fn->raw_export_name)
-        backend_name_base = fn->name;
+    const char *backend_name_base = ccb_effective_function_base_name(fn);
     char backend_name_buf[1024];
-    const char *backend_name = ccb_label_with_varargs_suffix(backend_name_base, fn->is_varargs,
+    const char *backend_name = ccb_label_with_varargs_suffix(backend_name_base,
+                                                              ccb_function_needs_varargs_suffix(fn),
                                                               backend_name_buf, sizeof(backend_name_buf));
     const char *ret_name = cc_type_name(map_type_to_cc(fn->ret_type));
     int declared_params = (fn->metadata.declared_param_count >= 0)
@@ -14080,11 +14099,10 @@ static int ccb_function_emit_basic(CcbModule *mod, const Node *fn, const Codegen
         ccb_function_optimize(&fb, opts);
     if (!rc)
     {
-        const char *backend_name_base = fn->metadata.backend_name ? fn->metadata.backend_name : fn->name;
-        if (fn->export_name && !fn->raw_export_name)
-            backend_name_base = fn->name;
+        const char *backend_name_base = ccb_effective_function_base_name(fn);
         char backend_name_buf[1024];
-        const char *backend_name = ccb_label_with_varargs_suffix(backend_name_base, fn->is_varargs,
+        const char *backend_name = ccb_label_with_varargs_suffix(backend_name_base,
+                                                                  ccb_function_needs_varargs_suffix(fn),
                                                                   backend_name_buf, sizeof(backend_name_buf));
 
         if (fn->metadata.func_line)

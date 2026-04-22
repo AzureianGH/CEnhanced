@@ -11,15 +11,15 @@ extend from "C" i32 close(i32 fd);
 constant i32 NET_WINDOWS = 0;
 #endif
 
-extend from "C" i32 socket(i32 domain, i32 type, i32 protocol);
+extend from "C" i32 socket(constant i32 domain, constant i32 type, constant i32 protocol);
 extend from "C" i32 connect(i32 sock, void* addr, i32 len);
 extend from "C" i32 bind(i32 sock, void* addr, i32 len);
 extend from "C" i32 listen(i32 sock, i32 backlog);
 extend from "C" i32 accept(i32 sock, void* addr, i32* len);
-extend from "C" i64 send(i32 sock, void* buf, i64 len, i32 flags);
+extend from "C" i64 send(i32 sock, void* buf, i64 len, constant i32 flags);
 extend from "C" i64 recv(i32 sock, void* buf, i64 len, i32 flags);
 extend from "C" i32 shutdown(i32 sock, i32 how);
-extend from "C" i32 setsockopt(i32 sock, i32 level, i32 opt, void* val, i32 len);
+extend from "C" i32 setsockopt(constant i32 sock, constant i32 level, constant i32 opt, void* val, i32 len);
 
 extend from "C" u32 inet_addr(char*);
 
@@ -294,7 +294,7 @@ expose fun TcpClose(i32 sock) -> i32
     ret NetClose(sock);
 }
 
-expose fun HtonL(u32 hostlong) -> u32
+expose fun HtonL(constant u32 hostlong) -> u32
 {
     ret ((hostlong & 0x000000FF) << 24) |
         ((hostlong & 0x0000FF00) << 8)  |

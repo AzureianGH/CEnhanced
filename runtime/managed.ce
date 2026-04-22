@@ -1,6 +1,6 @@
 extend from "C" int printf(constant char* format, ...);
 extend from "C" i32 strcmp(constant char* s1, constant char* s2);
-extend fun __cert__runtime_error_ex(i32 code, char* category, char* message, char* file, u64 line, char* symbol) -> void;
+extend fun __cert__runtime_error_ex(constant i32 code, char* category, char* message, char* file, u64 line, char* symbol) -> void;
 extend fun __cert__malloc(u64 size) -> void*;
 
 hide constant i32 __cert__OBJ_TAG_I64 = 1;
@@ -10,6 +10,7 @@ hide constant i32 __cert__ERR_INVALID_CAST_NULL = 1001;
 hide constant i32 __cert__ERR_INVALID_CAST_TYPE = 1002;
 hide constant i32 __cert__ERR_INVALID_CAST_KIND = 1003;
 hide constant i32 __cert__ERR_NULL_REFERENCE = 0x7EADC0DE;
+hide __cert__UnboxPtrFallback __cert__unbox_ptr_fallback;
 
 struct __cert__ObjectBox {
     i32 tag;
@@ -38,9 +39,8 @@ struct __cert__UnboxPtrFallback {
     i64 a15;
 };
 
-hide __cert__UnboxPtrFallback __cert__unbox_ptr_fallback;
 
-hide fun __cert__object_invalid_cast(i32 code, char* message, char* file, u64 line, char* symbol) -> void {
+hide fun __cert__object_invalid_cast(constant i32 code, char* message, char* file, u64 line, char* symbol) -> void {
     __cert__runtime_error_ex(
         code,
         "InvalidCast",

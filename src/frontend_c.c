@@ -2212,6 +2212,45 @@ static int c_parse_primary(CExprParser *p, CType *out_type)
 static int c_parse_unary(CExprParser *p, CType *out_type)
 {
   c_expr_skip_ws(p);
+
+  /* Support C-style sink casts used to suppress unused warnings: (void)expr */
+  if (p->s[p->pos] == '(')
+  {
+    size_t saved = p->pos;
+    int close = parse_balanced(p->s, (int)saved, '(', ')');
+    if (close > (int)saved + 1)
+    {
+      char *inside = trim_dup(p->s + saved + 1, (size_t)(close - (int)saved - 1));
+      if (!inside)
+        return 0;
+
+      CType cast_ty = C_TY_I32;
+      char *cast_name = NULL;
+      int is_decl = parse_param_decl(inside, &cast_ty, &cast_name);
+      if (cast_name)
+      {
+        free(cast_name);
+        cast_name = NULL;
+      }
+      free(inside);
+
+      if (is_decl && cast_ty == C_TY_VOID)
+      {
+        p->pos = (size_t)close + 1;
+        CType expr_ty = C_TY_VOID;
+        if (!c_parse_unary(p, &expr_ty))
+          return 0;
+        if (expr_ty != C_TY_VOID)
+        {
+          if (!c_line_buffer_appendf(&p->builder->body, "  drop %s", ctype_to_ccb(expr_ty)))
+            return 0;
+        }
+        *out_type = C_TY_VOID;
+        return 1;
+      }
+    }
+  }
+
   if (p->s[p->pos] == '+')
   {
     ++p->pos;
@@ -2666,6 +2705,9 @@ static int c_emit_function_body(CEmitBuilder *b)
           {
             if (!c_emit_statement_expr(b, stmt))
             {
+              fprintf(stderr,
+                      "c frontend: unsupported or invalid statement in function '%s': %s\n",
+                      (b->fn && b->fn->name) ? b->fn->name : "<unknown>", stmt);
               free(stmt);
               free(clean);
               return 0;
