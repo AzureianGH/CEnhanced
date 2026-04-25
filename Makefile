@@ -8,7 +8,7 @@ TARGET := $(BUILD_DIR)/chancec
 CORE_LIB := $(BUILD_DIR)/libchance_core.a
 
 CPPFLAGS += -Isrc -I../ChanceCode/include
-CFLAGS ?= -O2 -std=gnu11
+CFLAGS ?= -O2 -std=gnu23
 LDFLAGS ?=
 LDLIBS ?=
 

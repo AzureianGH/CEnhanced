@@ -4213,6 +4213,8 @@ static int is_type_start(Parser *ps, Token t)
             return 1;
         if (alias_find(ps, t.lexeme, t.length) >= 0 || named_type_find(ps, t.lexeme, t.length) >= 0)
             return 1;
+        if (parser_find_bundle_template(ps, t.lexeme, t.length))
+            return 1;
         if (parser_find_import_by_alias(ps, t.lexeme, t.length))
         {
             if (module_path_followed_by_call(ps))
@@ -6677,7 +6679,7 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
             Token op = lexer_next(ps->lx);
             Token field = expect(ps, TK_IDENT, "member name");
 
-            if (op.kind == TK_DOT && e && e->kind == ND_VAR && e->var_ref)
+            if ((op.kind == TK_DOT || op.kind == TK_ACCESS) && e && e->kind == ND_VAR && e->var_ref)
             {
                 int bundle_name_len = (int)strlen(e->var_ref);
                 const struct BundleStaticMember *static_member =
@@ -6734,7 +6736,7 @@ static Node *parse_postfix_suffixes(Parser *ps, Node *expr)
             memcpy(nm, field.lexeme, (size_t)field.length);
             nm[field.length] = '\0';
             m->field_name = nm;
-            m->is_pointer_deref = (op.kind == TK_ACCESS || op.kind == TK_ARROW);
+            m->is_pointer_deref = (op.kind == TK_ARROW);
             m->line = field.line;
             m->col = field.col;
             m->src = lexer_source(ps->lx);
@@ -8503,6 +8505,39 @@ static Node *parse_foreach(Parser *ps)
     return outer;
 }
 
+static Node *parse_function_body(Parser *ps, Type *ret_type, int *out_is_arrow_shorthand)
+{
+    if (out_is_arrow_shorthand)
+        *out_is_arrow_shorthand = 0;
+
+    Token next = lexer_peek(ps->lx);
+    if (next.kind != TK_ACCESS)
+        return parse_block(ps);
+
+    if (out_is_arrow_shorthand)
+        *out_is_arrow_shorthand = 1;
+
+    lexer_next(ps->lx);
+    Node *expr = parse_expr(ps);
+    expect(ps, TK_SEMI, ";");
+
+    int returns_value = !(ret_type && ret_type->kind == TY_VOID);
+    Node *stmt = new_node(returns_value ? ND_RET : ND_EXPR_STMT);
+    stmt->lhs = expr;
+    stmt->line = next.line;
+    stmt->col = next.col;
+    stmt->src = lexer_source(ps->lx);
+
+    Node *body = new_node(ND_BLOCK);
+    body->stmt_count = 1;
+    body->stmts = (Node **)xcalloc(1, sizeof(Node *));
+    body->stmts[0] = stmt;
+    body->line = stmt->line;
+    body->col = stmt->col;
+    body->src = stmt->src;
+    return body;
+}
+
 static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_managed, int allow_extension_receiver, FunctionBodyKind body_kind, struct PendingAttr *attrs, int attr_count)
 {
     expect(ps, TK_KW_FUN, "fun");
@@ -8758,9 +8793,11 @@ static Node *parse_function(Parser *ps, int is_noreturn, int is_exposed, int is_
     else
     {
         const char *prev_fn = ps->current_function_name;
+        int is_arrow_shorthand = 0;
         ps->current_function_name = fn->name;
-        fn->body = parse_block(ps);
+        fn->body = parse_function_body(ps, rtype, &is_arrow_shorthand);
         ps->current_function_name = prev_fn;
+        fn->is_arrow_shorthand = is_arrow_shorthand ? 1 : 0;
     }
     if (local_generic_count > 0)
     {
@@ -8911,9 +8948,11 @@ static Node *parse_bundle_this_method(Parser *ps, Token sign_tok, int is_noretur
     fn->metadata.ret_token = NULL;
 
     const char *prev_fn = ps->current_function_name;
+    int is_arrow_shorthand = 0;
     ps->current_function_name = fn->name;
-    fn->body = parse_block(ps);
+    fn->body = parse_function_body(ps, rtype, &is_arrow_shorthand);
     ps->current_function_name = prev_fn;
+    fn->is_arrow_shorthand = is_arrow_shorthand ? 1 : 0;
 
     return fn;
 }
@@ -9061,9 +9100,11 @@ static Node *parse_bundle_on_method(Parser *ps, Token on_tok, int is_noreturn, i
     fn->metadata.ret_token = NULL;
 
     const char *prev_fn = ps->current_function_name;
+    int is_arrow_shorthand = 0;
     ps->current_function_name = fn->name;
-    fn->body = parse_block(ps);
+    fn->body = parse_function_body(ps, rtype, &is_arrow_shorthand);
     ps->current_function_name = prev_fn;
+    fn->is_arrow_shorthand = is_arrow_shorthand ? 1 : 0;
 
     return fn;
 }
@@ -10334,7 +10375,7 @@ static Type *parse_inline_union_type(Parser *ps)
             lexer_next(ps->lx);
             break;
         }
-        if (!(t.kind == TK_KW_CONSTANT || is_type_start(ps, t)))
+        if (!(t.kind == TK_KW_CONSTANT || is_type_start(ps, t) || parser_is_implicit_ident_decl_start(ps, t)))
         {
             diag_error_at(lexer_source(ps->lx), t.line, t.col,
                           "expected union field declaration or '}'");
@@ -10826,7 +10867,7 @@ static void parse_bundle_decl(Parser *ps, int is_exposed, Node ***decls, int *de
             t = lexer_peek(ps->lx);
         }
 
-        if (!is_type_start(ps, t))
+        if (!is_type_start(ps, t) && !parser_is_implicit_ident_decl_start(ps, t))
         {
             diag_error_at(lexer_source(ps->lx), t.line, t.col,
                           "expected bundle member declaration or '}'");
@@ -11266,7 +11307,7 @@ static void parse_struct_decl(Parser *ps, int is_exposed, int is_union, int is_p
             lexer_next(ps->lx);
             break;
         }
-        if (!(t.kind == TK_KW_CONSTANT || is_type_start(ps, t)))
+        if (!(t.kind == TK_KW_CONSTANT || is_type_start(ps, t) || parser_is_implicit_ident_decl_start(ps, t)))
         {
             diag_error_at(lexer_source(ps->lx), t.line, t.col, "expected field declaration or '}'");
             exit(1);

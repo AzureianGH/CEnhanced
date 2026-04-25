@@ -424,6 +424,7 @@ struct Node
     int is_extension_method;
     int is_bundle_global_init;
     int force_inline_literal;
+    int is_arrow_shorthand;
     struct
     {
         char **lines;

@@ -71,6 +71,14 @@ expose bundle List<T>
         this.length = this.length + 1;
     }
 
+    expose fun Set(i32 index, T item) -> void
+    {
+        if (index < 0 || index >= this.length)
+            throw Exception.IndexOutOfBounds
+                -> "Index out of range in List Set";
+        this.items[index] = item;
+    }
+
     expose fun Get(i32 index) -> T
     {
         if (index < 0 || index >= this.length)
@@ -78,7 +86,7 @@ expose bundle List<T>
                 -> "Index out of range in List Get";
         ret this.items[index];
     }
-
+ 
     expose fun Length() -> i32
     {
         ret this.length;
@@ -118,10 +126,7 @@ expose bundle List<T>
 
     expose fun [](i32 index, T setter) -> void
     {
-        if (index < 0 || index >= this.length)
-            throw Exception.IndexOutOfBounds
-                -> "Index out of range in List setter";
-        this.items[index] = setter;
+        this.Set(index, setter);
     }
 };
 

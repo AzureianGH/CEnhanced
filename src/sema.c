@@ -86,6 +86,7 @@ static const Symbol *sema_resolve_bundle_indexer_method(SemaContext *sc,
                                                         Node *this_arg,
                                                         Node *index_arg,
                                                         Node *value_arg);
+static Type *sema_lookup_enum_type_by_name(SemaContext *sc, const char *name, const char **out_module_full);
 static int sema_function_is_bundle_method_owner(const Node *fn, const char *bundle_name);
 static int sema_bundle_member_access_allowed(SemaContext *sc, const Type *bundle_type);
 
@@ -1126,6 +1127,76 @@ static Type *sema_lookup_bundle_type_by_name(SemaContext *sc, const char *name)
 
     if (match_count == 1)
         return resolved;
+    return NULL;
+}
+
+static Type *sema_lookup_enum_type_by_name(SemaContext *sc, const char *name, const char **out_module_full)
+{
+    if (out_module_full)
+        *out_module_full = NULL;
+    if (!name || !*name)
+        return NULL;
+
+    Type *resolved = NULL;
+    const char *resolved_module = NULL;
+    int match_count = 0;
+
+    const Node *unit = sc ? sc->unit : NULL;
+    if (unit && unit->kind == ND_UNIT)
+    {
+        const char *module_full = unit->module_path.full_name;
+        if (module_full && *module_full)
+        {
+            Type *local = module_registry_lookup_enum(module_full, name);
+            if (local)
+            {
+                if (out_module_full)
+                    *out_module_full = module_full;
+                return local;
+            }
+        }
+
+        for (int i = 0; i < unit->import_count; ++i)
+        {
+            const ModulePath *imp = &unit->imports[i];
+            if (!imp || !imp->full_name)
+                continue;
+            Type *candidate = module_registry_lookup_enum(imp->full_name, name);
+            if (!candidate)
+                continue;
+            resolved = candidate;
+            resolved_module = imp->full_name;
+            match_count++;
+            if (match_count > 1)
+                break;
+        }
+    }
+
+    if (!resolved)
+    {
+        int total = module_registry_enum_entry_count();
+        for (int i = 0; i < total; ++i)
+        {
+            const char *entry_name = module_registry_enum_entry_name(i);
+            if (!entry_name || strcmp(entry_name, name) != 0)
+                continue;
+            Type *candidate = module_registry_enum_entry_type(i);
+            if (!candidate)
+                continue;
+            resolved = candidate;
+            resolved_module = module_registry_enum_entry_module(i);
+            match_count++;
+            if (match_count > 1)
+                break;
+        }
+    }
+
+    if (match_count == 1)
+    {
+        if (out_module_full)
+            *out_module_full = resolved_module;
+        return resolved;
+    }
     return NULL;
 }
 
@@ -4545,6 +4616,136 @@ static Type *resolve_variable(SemaContext *sc, const char *name, int *is_global,
     return NULL;
 }
 
+static int sema_try_rewrite_implicit_bundle_field_ref(SemaContext *sc, Node *e, const char *name)
+{
+    if (!sc || !e || !name || !*name)
+        return 0;
+
+    const struct VarBind *this_binding = scope_get_binding(sc, "this");
+    if (!this_binding || !this_binding->type)
+        return 0;
+
+    Type *this_ty = canonicalize_type_deep(this_binding->type);
+    Type *bundle_ty = NULL;
+    int use_pointer_deref = 0;
+
+    if (this_ty && this_ty->kind == TY_PTR && this_ty->pointee)
+    {
+        Type *pointee = canonicalize_type_deep(this_ty->pointee);
+        if (pointee && pointee->kind == TY_STRUCT && pointee->is_bundle)
+        {
+            bundle_ty = pointee;
+            use_pointer_deref = 1;
+        }
+    }
+    else if (this_ty && this_ty->kind == TY_REF && this_ty->pointee)
+    {
+        Type *pointee = canonicalize_type_deep(this_ty->pointee);
+        if (pointee && pointee->kind == TY_STRUCT && pointee->is_bundle)
+            bundle_ty = pointee;
+    }
+    else if (this_ty && this_ty->kind == TY_STRUCT && this_ty->is_bundle)
+    {
+        bundle_ty = this_ty;
+    }
+
+    if (!bundle_ty)
+        return 0;
+    if (struct_find_field(bundle_ty, name) < 0)
+        return 0;
+
+    Node *base = (Node *)xcalloc(1, sizeof(Node));
+    if (!base)
+    {
+        diag_error("out of memory while resolving implicit bundle field reference");
+        exit(1);
+    }
+    base->kind = ND_VAR;
+    base->var_ref = "this";
+    base->line = e->line;
+    base->col = e->col;
+    base->src = e->src;
+
+    e->kind = ND_MEMBER;
+    e->lhs = base;
+    e->rhs = NULL;
+    e->field_name = e->var_ref;
+    e->var_ref = NULL;
+    e->is_pointer_deref = use_pointer_deref;
+    e->module_ref = NULL;
+    e->module_ref_parts = 0;
+    e->module_type_name = NULL;
+    e->module_type_is_enum = 0;
+
+    return 1;
+}
+
+static int sema_try_rewrite_implicit_bundle_call_target(SemaContext *sc, Node **target_ptr)
+{
+    if (!sc || !target_ptr || !*target_ptr)
+        return 0;
+
+    Node *target = *target_ptr;
+    if (target->kind != ND_VAR || !target->var_ref || !*target->var_ref)
+        return 0;
+
+    const struct VarBind *this_binding = scope_get_binding(sc, "this");
+    if (!this_binding || !this_binding->type)
+        return 0;
+
+    Type *this_ty = canonicalize_type_deep(this_binding->type);
+    Type *bundle_ty = NULL;
+    int use_pointer_deref = 0;
+
+    if (this_ty && this_ty->kind == TY_PTR && this_ty->pointee)
+    {
+        Type *pointee = canonicalize_type_deep(this_ty->pointee);
+        if (pointee && pointee->kind == TY_STRUCT && pointee->is_bundle)
+        {
+            bundle_ty = pointee;
+            use_pointer_deref = 1;
+        }
+    }
+    else if (this_ty && this_ty->kind == TY_REF && this_ty->pointee)
+    {
+        Type *pointee = canonicalize_type_deep(this_ty->pointee);
+        if (pointee && pointee->kind == TY_STRUCT && pointee->is_bundle)
+            bundle_ty = pointee;
+    }
+    else if (this_ty && this_ty->kind == TY_STRUCT && this_ty->is_bundle)
+    {
+        bundle_ty = this_ty;
+    }
+
+    if (!bundle_ty)
+        return 0;
+
+    Node *base = (Node *)xcalloc(1, sizeof(Node));
+    if (!base)
+    {
+        diag_error("out of memory while resolving implicit bundle method reference");
+        exit(1);
+    }
+    base->kind = ND_VAR;
+    base->var_ref = "this";
+    base->line = target->line;
+    base->col = target->col;
+    base->src = target->src;
+
+    target->kind = ND_MEMBER;
+    target->lhs = base;
+    target->rhs = NULL;
+    target->field_name = target->var_ref;
+    target->var_ref = NULL;
+    target->is_pointer_deref = use_pointer_deref;
+    target->module_ref = NULL;
+    target->module_ref_parts = 0;
+    target->module_type_name = NULL;
+    target->module_type_is_enum = 0;
+
+    return 1;
+}
+
 static const char *nodekind_name(NodeKind k)
 {
     switch (k)
@@ -4926,6 +5127,14 @@ static void check_expr(SemaContext *sc, Node *e)
     }
     if (e->kind == ND_INT)
     {
+        if (e->module_type_is_enum && e->module_type_name)
+        {
+            const char *enum_module = NULL;
+            Type *enum_ty = sema_lookup_enum_type_by_name(sc, e->module_type_name, &enum_module);
+            if (enum_ty)
+                e->type = canonicalize_type_deep(enum_ty);
+        }
+
         if (!e->type)
         {
             int want_64 = e->int_width == 64;
@@ -4991,6 +5200,12 @@ static void check_expr(SemaContext *sc, Node *e)
         Type *t = resolve_variable(sc, orig_name, &is_global, &is_const, &is_function, &resolved_sym);
         if (!t)
         {
+            if (sema_try_rewrite_implicit_bundle_field_ref(sc, e, orig_name))
+            {
+                check_expr(sc, e);
+                return;
+            }
+
             ImportedFunctionSet *auto_set = sema_find_imported_function_set(sc, orig_name);
             if (auto_set)
             {
@@ -5493,6 +5708,35 @@ static void check_expr(SemaContext *sc, Node *e)
         {
             diag_error_at(e->src, e->line, e->col, "member access missing base expression");
             exit(1);
+        }
+
+        if (!e->is_pointer_deref && e->lhs->kind == ND_VAR && e->lhs->var_ref && e->field_name)
+        {
+            const char *enum_module = NULL;
+            Type *enum_ty = sema_lookup_enum_type_by_name(sc, e->lhs->var_ref, &enum_module);
+            if (enum_ty && enum_module)
+            {
+                int enum_value = 0;
+                if (module_registry_lookup_enum_value(enum_module, e->lhs->var_ref, e->field_name, &enum_value))
+                {
+                    Node *base = e->lhs;
+                    e->kind = ND_INT;
+                    e->lhs = NULL;
+                    e->rhs = NULL;
+                    e->body = NULL;
+                    e->int_val = enum_value;
+                    e->int_uval = (uint64_t)(unsigned int)enum_value;
+                    e->type = canonicalize_type_deep(enum_ty);
+                    e->field_name = NULL;
+                    e->is_pointer_deref = 0;
+                    e->module_ref = NULL;
+                    e->module_ref_parts = 0;
+                    e->module_type_name = NULL;
+                    e->module_type_is_enum = 0;
+                    ast_free(base);
+                    return;
+                }
+            }
         }
 
         if (!e->is_pointer_deref && e->lhs->kind == ND_VAR && e->lhs->var_ref && e->field_name)
@@ -7030,6 +7274,14 @@ static void check_expr(SemaContext *sc, Node *e)
         Node *target = e->lhs;
         int args_checked = 0;
         int resolved_via_extension_syntax = 0;
+
+        if (target && target->kind == ND_VAR && target->var_ref)
+        {
+            Type *existing = resolve_variable(sc, target->var_ref, NULL, NULL, NULL, NULL);
+            if (!existing)
+                sema_try_rewrite_implicit_bundle_call_target(sc, &target);
+            e->lhs = target;
+        }
 
         if (target && target->kind == ND_MEMBER && target->field_name)
         {
@@ -8991,6 +9243,15 @@ static Node *inline_stmt_to_expr(const Node *stmt, Node *tail_expr, Type *ret_ty
         if (tail_expr)
             return NULL;
         return stmt->lhs;
+    case ND_EXPR_STMT:
+        if (!stmt->lhs || tail_expr)
+            return NULL;
+        if (!ret_type)
+            return NULL;
+        ret_type = canonicalize_type_deep(ret_type);
+        if (!ret_type || ret_type->kind != TY_VOID)
+            return NULL;
+        return stmt->lhs;
     case ND_IF:
     {
         Node *cond = stmt->lhs ? (Node *)stmt->lhs : NULL;
@@ -9532,7 +9793,7 @@ static void analyze_inline_candidates(Node *root)
         Node *fn = functions[i];
         const char *fn_name = fn->name ? fn->name : "<anon>";
 
-        if (!fn->wants_inline)
+        if (!fn->wants_inline && !fn->is_arrow_shorthand)
         {
             compiler_verbose_logf("inline", "skip %s: function not marked inline", fn_name);
             continue;
@@ -9576,12 +9837,14 @@ static void analyze_inline_candidates(Node *root)
         }
         if (!params_ok)
             continue;
-        if (fn->ret_type && fn->ret_type->kind == TY_VOID)
+        Type *ret_type = canonicalize_type_deep(fn->ret_type);
+        int allow_arrow_void = (fn->is_arrow_shorthand && ret_type && ret_type->kind == TY_VOID);
+        if (ret_type && ret_type->kind == TY_VOID && !allow_arrow_void)
         {
             compiler_verbose_logf("inline", "skip %s: returns void", fn_name);
             continue;
         }
-        if (!inline_type_supported(fn->ret_type))
+        if (ret_type && ret_type->kind != TY_VOID && !inline_type_supported(ret_type))
         {
             compiler_verbose_logf("inline", "skip %s: return type unsupported for inlining", fn_name);
             continue;

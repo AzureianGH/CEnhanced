@@ -1843,6 +1843,8 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
 
     if (!target_fn->inline_candidate || !target_fn->inline_expr)
         INLINE_SKIP_WITH_REASON("no precomputed inline expression");
+    if (target_fn->is_arrow_shorthand && (!fb->opts || fb->opts->opt_level < 3))
+        INLINE_SKIP_WITH_REASON("=> shorthand inlining requires -O3");
     if (call_expr->call_is_indirect)
         INLINE_SKIP_WITH_REASON("call is indirect");
     if (target_fn->is_varargs || call_expr->call_is_varargs)
@@ -1974,6 +1976,16 @@ static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, c
 
     CCValueType produced_ty = ccb_type_for_expr(target_fn->inline_expr);
     CCValueType expected_ty = ccb_type_for_expr(call_expr);
+    if (expected_ty == CC_TYPE_VOID && produced_ty != CC_TYPE_VOID)
+    {
+        if (!ccb_emit_drop_for_type(&fb->body, produced_ty))
+        {
+            compiler_verbose_logf("inline", "abort inline of '%s': failed to drop void shorthand result", fn_name);
+            if (compiler_verbose_deep_enabled())
+                compiler_verbose_treef("inline", "|_", "failed dropping produced type %d for void call", produced_ty);
+            goto cleanup;
+        }
+    }
     if (expected_ty != CC_TYPE_VOID && produced_ty != expected_ty)
     {
         if (ccb_emit_convert_between(fb, produced_ty, expected_ty, call_expr))
@@ -12761,19 +12773,7 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
         {
             for (int i = 0; i < stmt->lhs->stmt_count; ++i)
             {
-                char step_continue_label[32];
-                ccb_make_label(fb, step_continue_label, sizeof(step_continue_label), "try_cont");
                 if (ccb_emit_stmt_basic(fb, stmt->lhs->stmts[i]))
-                    return 1;
-                if (!string_list_appendf(&fb->body, "  call __cert__exception_has_pending i32 ()"))
-                    return 1;
-                if (!ccb_emit_const_zero(&fb->body, CC_TYPE_I32))
-                    return 1;
-                if (!string_list_appendf(&fb->body, "  compare ne i32"))
-                    return 1;
-                if (!string_list_appendf(&fb->body, "  branch %s %s", try_error_label, step_continue_label))
-                    return 1;
-                if (!string_list_appendf(&fb->body, "label %s", step_continue_label))
                     return 1;
             }
         }
@@ -12965,8 +12965,16 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
 
             if (!string_list_appendf(&fb->body, "label %s", has_exception_label))
                 return 1;
-            if (!string_list_appendf(&fb->body, "  jump %s", done_label))
-                return 1;
+            if (fb->active_try_error_label && fb->active_try_error_label[0])
+            {
+                if (!string_list_appendf(&fb->body, "  jump %s", fb->active_try_error_label))
+                    return 1;
+            }
+            else
+            {
+                if (!string_list_appendf(&fb->body, "  jump %s", done_label))
+                    return 1;
+            }
 
             if (!string_list_appendf(&fb->body, "label %s", no_exception_label))
                 return 1;
@@ -13025,6 +13033,11 @@ static int ccb_emit_stmt_basic_impl(CcbFunctionBuilder *fb, const Node *stmt)
             return 1;
         if (!string_list_appendf(&fb->body, "  call __cert__runtime_error_ex void (i32,ptr,ptr,ptr,i64,ptr)"))
             return 1;
+        if (fb->active_try_error_label && fb->active_try_error_label[0])
+        {
+            if (!string_list_appendf(&fb->body, "  jump %s", fb->active_try_error_label))
+                return 1;
+        }
         return 0;
     }
     case ND_IF:
@@ -13632,15 +13645,9 @@ static bool ccb_format_global_initializer(const Node *expr, const Type *ty, char
         return true;
     }
     case ND_ADDR:
-    {
-        
-        snprintf(buffer, bufsz, "0");
-        return true;
-    }
+        return false;
     case ND_STRING:
-        
-        snprintf(buffer, bufsz, "0");
-        return true;
+        return false;
     case ND_NEG:
     {
         const Node *inner = expr->lhs;
@@ -13798,6 +13805,75 @@ static int ccb_module_append_global(CcbModule *mod, const Node *decl)
         }
         status = 0;
         goto cleanup;
+    }
+
+    if (decl->var_type && decl->var_type->kind == TY_PTR && decl->rhs)
+    {
+        const Node *ptr_init = decl->rhs;
+        while (ptr_init && ptr_init->kind == ND_CAST)
+            ptr_init = ptr_init->lhs;
+
+        const char *ptr_symbol = NULL;
+        if (ptr_init && ptr_init->kind == ND_STRING)
+        {
+            size_t str_len = (ptr_init->str_len >= 0) ? (size_t)ptr_init->str_len : 0;
+            size_t total_len = str_len + 1;
+            uint8_t *bytes = (uint8_t *)malloc(total_len);
+            if (!bytes)
+                goto cleanup;
+            if (str_len > 0)
+            {
+                if (!ptr_init->str_data)
+                {
+                    free(bytes);
+                    diag_error_at(ptr_init->src, ptr_init->line, ptr_init->col,
+                                  "string initializer is missing data for global '%s'", decl->var_name);
+                    goto cleanup;
+                }
+                memcpy(bytes, ptr_init->str_data, str_len);
+            }
+            bytes[str_len] = 0;
+            ptr_symbol = ccb_module_intern_hidden_byte_string(mod, name, bytes, total_len);
+            free(bytes);
+            if (!ptr_symbol)
+                goto cleanup;
+        }
+        else if (ptr_init && ptr_init->kind == ND_ADDR)
+        {
+            const Node *target = ptr_init->lhs;
+            while (target && target->kind == ND_CAST)
+                target = target->lhs;
+            if (!target || target->kind != ND_VAR || !target->var_ref || !target->var_ref[0])
+            {
+                diag_error_at(ptr_init->src, ptr_init->line, ptr_init->col,
+                              "unsupported address initializer for global '%s'", decl->var_name);
+                goto cleanup;
+            }
+            ptr_symbol = target->var_ref;
+        }
+        else if (ptr_init && ptr_init->kind == ND_NULL)
+        {
+            ptr_symbol = "null";
+        }
+        else if (ptr_init && ptr_init->kind == ND_INT && ptr_init->int_uval == 0)
+        {
+            ptr_symbol = "null";
+        }
+
+        if (ptr_symbol)
+        {
+            bool ok = section_literal
+                          ? ccb_module_appendf(mod, ".global %s type=%s size=8 align=8 ptrs=%s section=%s%s%s",
+                                               name, cc_type_name(CC_TYPE_PTR), ptr_symbol,
+                                               section_literal, const_attr, hidden_attr)
+                          : ccb_module_appendf(mod, ".global %s type=%s size=8 align=8 ptrs=%s%s%s",
+                                               name, cc_type_name(CC_TYPE_PTR), ptr_symbol,
+                                               const_attr, hidden_attr);
+            if (!ok)
+                goto cleanup;
+            status = 0;
+            goto cleanup;
+        }
     }
 
     CCValueType cc_ty = map_type_to_cc(decl->var_type);
