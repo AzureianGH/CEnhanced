@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <ctype.h>
 #include <limits.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -549,6 +550,7 @@ static void ccb_opt_fold_const_test_null(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_const_converts(CcbFunctionBuilder *fb);
 static void ccb_opt_strength_reduce_binops(CcbFunctionBuilder *fb);
 static void ccb_opt_simplify_noop_arith_and_bitcasts(CcbFunctionBuilder *fb);
+static void ccb_opt_introduce_addr_index_ptr(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_const_or_store_chains(CcbFunctionBuilder *fb);
 static void ccb_opt_fold_dup_rmw_or_chains(CcbFunctionBuilder *fb);
 static void ccb_opt_pack_byte_store_runs(CcbFunctionBuilder *fb);
@@ -557,8 +559,10 @@ static void ccb_opt_simplify_store_load_store(CcbFunctionBuilder *fb);
 static void ccb_opt_promote_local_values(CcbFunctionBuilder *fb);
 static void ccb_opt_propagate_local_values(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_dead_local_stores(CcbFunctionBuilder *fb);
+static void ccb_opt_remove_unread_local_stores(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_unused_local_slots(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_dead_local_copies(CcbFunctionBuilder *fb);
+static void ccb_opt_merge_identical_terminating_blocks(CcbFunctionBuilder *fb);
 static void ccb_opt_propagate_immutable_local_aliases(CcbFunctionBuilder *fb);
 static void ccb_opt_simplify_addr_local_temp(CcbFunctionBuilder *fb);
 static void ccb_opt_simplify_bool_normalization(CcbFunctionBuilder *fb);
@@ -569,6 +573,8 @@ static void ccb_opt_remove_redundant_jumps(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_unused_labels(CcbFunctionBuilder *fb);
 static void ccb_opt_inline_const_str_locals(CcbFunctionBuilder *fb);
 static void ccb_opt_remove_nops(CcbFunctionBuilder *fb);
+static void ccb_opt_introduce_ext_loads(CcbFunctionBuilder *fb);
+static void ccb_opt_introduce_br_test_zero(CcbFunctionBuilder *fb);
 static const char *ccb_trim_leading_ws(const char *line);
 static const char *ccb_binop_symbol(const char *op);
 static int ccb_emit_inline_call(CcbFunctionBuilder *fb, const Node *call_expr, const Node *target_fn);
@@ -1398,6 +1404,41 @@ static bool ccb_parse_symbol_after_prefix(const char *line, const char *prefix,
     return true;
 }
 
+static bool ccb_parse_memory_type_after_prefix(const char *line, const char *prefix,
+                                               char *out, size_t outsz)
+{
+    if (!line || !prefix || !out || outsz == 0)
+        return false;
+    out[0] = '\0';
+
+    const char *cursor = line;
+    while (*cursor == ' ' || *cursor == '\t')
+        ++cursor;
+
+    size_t prelen = strlen(prefix);
+    if (strncmp(cursor, prefix, prelen) != 0)
+        return false;
+
+    cursor += prelen;
+    while (*cursor == ' ' || *cursor == '\t')
+        ++cursor;
+    if (*cursor == '\0')
+        return false;
+
+    size_t n = 0;
+    while (*cursor && *cursor != ' ' && *cursor != '\t' && *cursor != '\r' && *cursor != '\n')
+    {
+        if (n + 1 >= outsz)
+            return false;
+        out[n++] = *cursor++;
+    }
+
+    if (n == 0)
+        return false;
+    out[n] = '\0';
+    return true;
+}
+
 static bool ccb_parse_symbol_reference(const char *line, char *out, size_t outsz)
 {
     if (!line || !out || outsz == 0)
@@ -2068,6 +2109,91 @@ static bool ccb_type_is_ptr_name(const char *type_name)
 static bool ccb_type_is_signed_name(const char *type_name)
 {
     return type_name && type_name[0] == 'i';
+}
+
+static bool ccb_type_is_float_name(const char *type_name)
+{
+    if (!type_name)
+        return false;
+    return strcmp(type_name, "f32") == 0 || strcmp(type_name, "f64") == 0;
+}
+
+typedef struct
+{
+    char type[16];
+    bool is_f32;
+    double value;
+} CcbFloatConstInfo;
+
+static bool ccb_parse_float_const_info(const char *line, CcbFloatConstInfo *out)
+{
+    if (!line || !out)
+        return false;
+
+    line = ccb_trim_leading_ws(line);
+    if (!line || strncmp(line, "const ", 6) != 0)
+        return false;
+    line += 6;
+
+    char type_name[16] = {0};
+    char value_text[128] = {0};
+    if (sscanf(line, "%15s %127s", type_name, value_text) != 2)
+        return false;
+    if (!ccb_type_is_float_name(type_name))
+        return false;
+
+    char *endptr = NULL;
+    errno = 0;
+    double value = strtod(value_text, &endptr);
+    if (endptr == value_text || *endptr != '\0' || errno == ERANGE)
+        return false;
+
+    strncpy(out->type, type_name, sizeof(out->type) - 1);
+    out->type[sizeof(out->type) - 1] = '\0';
+    out->is_f32 = strcmp(type_name, "f32") == 0;
+    out->value = value;
+    return true;
+}
+
+static void ccb_format_float_const_line(char *out, size_t out_sz,
+                                        const char *type_name, double value)
+{
+    if (!out || out_sz == 0 || !type_name)
+        return;
+
+    double normalized = value;
+    if (strcmp(type_name, "f32") == 0)
+    {
+        float narrowed = (float)value;
+        normalized = (double)narrowed;
+    }
+
+    char literal[64] = {0};
+    snprintf(literal, sizeof(literal),
+             strcmp(type_name, "f32") == 0 ? "%.9g" : "%.17g",
+             normalized);
+
+    bool has_exponent_or_dot = false;
+    bool has_alpha = false;
+    for (const char *p = literal; *p; ++p)
+    {
+        if (*p == '.' || *p == 'e' || *p == 'E')
+            has_exponent_or_dot = true;
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z'))
+            has_alpha = true;
+    }
+    if (!has_exponent_or_dot && !has_alpha)
+    {
+        size_t used = strlen(literal);
+        if (used + 2 < sizeof(literal))
+        {
+            literal[used++] = '.';
+            literal[used++] = '0';
+            literal[used] = '\0';
+        }
+    }
+
+    snprintf(out, out_sz, "  const %s %s", type_name, literal);
 }
 
 static bool ccb_instruction_is_drop(const char *line)
@@ -3299,6 +3425,59 @@ static void ccb_opt_fold_const_binops(CcbFunctionBuilder *fb)
         const char *line1 = body->items[i + 1];
         const char *line2 = body->items[i + 2];
 
+        char op[16];
+        char type_name[16];
+        bool unsigned_hint = false;
+        if (!ccb_parse_binop_info(line2, op, sizeof(op), type_name, sizeof(type_name), &unsigned_hint))
+        {
+            ++i;
+            continue;
+        }
+
+        CcbFloatConstInfo flhs;
+        CcbFloatConstInfo frhs;
+        if (ccb_type_is_float_name(type_name) &&
+            ccb_parse_float_const_info(line0, &flhs) &&
+            ccb_parse_float_const_info(line1, &frhs) &&
+            strcmp(flhs.type, frhs.type) == 0 && strcmp(type_name, flhs.type) == 0)
+        {
+            bool handled_float = true;
+            double result = 0.0;
+
+            if (strcmp(op, "add") == 0)
+                result = flhs.value + frhs.value;
+            else if (strcmp(op, "sub") == 0)
+                result = flhs.value - frhs.value;
+            else if (strcmp(op, "mul") == 0)
+                result = flhs.value * frhs.value;
+            else if (strcmp(op, "div") == 0)
+                result = flhs.value / frhs.value;
+            else
+                handled_float = false;
+
+            if (handled_float)
+            {
+                char new_line[128] = {0};
+                ccb_format_float_const_line(new_line, sizeof(new_line), type_name, result);
+
+                size_t new_len = strlen(new_line);
+                char *replacement = (char *)malloc(new_len + 1);
+                if (!replacement)
+                {
+                    ++i;
+                    continue;
+                }
+                memcpy(replacement, new_line, new_len + 1);
+
+                free(body->items[i]);
+                body->items[i] = replacement;
+                string_list_remove_range(body, i + 1, 2);
+                if (i > 0)
+                    --i;
+                continue;
+            }
+        }
+
         CcbConstInfo lhs;
         CcbConstInfo rhs;
         if (!ccb_parse_const_info(line0, &lhs) || !ccb_parse_const_info(line1, &rhs))
@@ -3312,14 +3491,6 @@ static void ccb_opt_fold_const_binops(CcbFunctionBuilder *fb)
             continue;
         }
 
-        char op[16];
-        char type_name[16];
-        bool unsigned_hint = false;
-        if (!ccb_parse_binop_info(line2, op, sizeof(op), type_name, sizeof(type_name), &unsigned_hint))
-        {
-            ++i;
-            continue;
-        }
         if (strcmp(type_name, lhs.type) != 0)
         {
             ++i;
@@ -3595,6 +3766,66 @@ static void ccb_opt_fold_const_compares(CcbFunctionBuilder *fb)
         const char *line1 = body->items[i + 1];
         const char *line2 = body->items[i + 2];
 
+        char op[16];
+        char type_name[16];
+        bool unsigned_hint = false;
+        if (!ccb_parse_compare_info(line2, op, sizeof(op), type_name,
+                                    sizeof(type_name), &unsigned_hint))
+        {
+            ++i;
+            continue;
+        }
+
+        CcbFloatConstInfo flhs;
+        CcbFloatConstInfo frhs;
+        if (ccb_type_is_float_name(type_name) &&
+            ccb_parse_float_const_info(line0, &flhs) &&
+            ccb_parse_float_const_info(line1, &frhs) &&
+            strcmp(flhs.type, frhs.type) == 0 && strcmp(type_name, flhs.type) == 0)
+        {
+            bool result = false;
+            bool handled_float = true;
+
+            if (strcmp(op, "eq") == 0)
+                result = (flhs.value == frhs.value);
+            else if (strcmp(op, "ne") == 0)
+                result = (flhs.value != frhs.value);
+            else if (strcmp(op, "lt") == 0)
+                result = (flhs.value < frhs.value);
+            else if (strcmp(op, "le") == 0)
+                result = (flhs.value <= frhs.value);
+            else if (strcmp(op, "gt") == 0)
+                result = (flhs.value > frhs.value);
+            else if (strcmp(op, "ge") == 0)
+                result = (flhs.value >= frhs.value);
+            else
+                handled_float = false;
+
+            if (handled_float)
+            {
+                char new_line[64];
+                ccb_format_const_line(new_line, sizeof(new_line), "i1",
+                                      result ? 1ULL : 0ULL,
+                                      result ? 1LL : 0LL);
+
+                size_t new_len = strlen(new_line);
+                char *replacement = (char *)malloc(new_len + 1);
+                if (!replacement)
+                {
+                    ++i;
+                    continue;
+                }
+                memcpy(replacement, new_line, new_len + 1);
+
+                free(body->items[i]);
+                body->items[i] = replacement;
+                string_list_remove_range(body, i + 1, 2);
+                if (i > 0)
+                    --i;
+                continue;
+            }
+        }
+
         CcbConstInfo lhs;
         CcbConstInfo rhs;
         if (!ccb_parse_const_info(line0, &lhs) || !ccb_parse_const_info(line1, &rhs))
@@ -3608,15 +3839,6 @@ static void ccb_opt_fold_const_compares(CcbFunctionBuilder *fb)
             continue;
         }
 
-        char op[16];
-        char type_name[16];
-        bool unsigned_hint = false;
-        if (!ccb_parse_compare_info(line2, op, sizeof(op), type_name,
-                                    sizeof(type_name), &unsigned_hint))
-        {
-            ++i;
-            continue;
-        }
         if (strcmp(type_name, lhs.type) != 0)
         {
             ++i;
@@ -3977,6 +4199,168 @@ static void ccb_opt_simplify_noop_arith_and_bitcasts(CcbFunctionBuilder *fb)
         }
 
         ++i;
+    }
+}
+
+static void ccb_opt_introduce_addr_index_ptr(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+
+    StringList *body = &fb->body;
+    size_t i = 0;
+    while (i < body->count)
+    {
+        char kind0[16] = {0};
+        char from0[16] = {0};
+        char to0[16] = {0};
+        if (!ccb_parse_convert_info(body->items[i], kind0, sizeof(kind0), from0, sizeof(from0), to0, sizeof(to0)) ||
+            strcmp(kind0, "bitcast") != 0 || strcmp(from0, "ptr") != 0 ||
+            (strcmp(to0, "i32") != 0 && strcmp(to0, "i64") != 0))
+        {
+            ++i;
+            continue;
+        }
+
+        bool found = false;
+        size_t add_pos = 0;
+        for (size_t k = i + 1; k + 1 < body->count && k <= i + 8; ++k)
+        {
+            char opk[16] = {0};
+            char tyk[16] = {0};
+            bool unsigned_hint = false;
+            if (!ccb_parse_binop_info(body->items[k], opk, sizeof(opk), tyk, sizeof(tyk), &unsigned_hint) ||
+                strcmp(opk, "add") != 0 || strcmp(tyk, to0) != 0)
+            {
+                (void)unsigned_hint;
+                continue;
+            }
+
+            char kind2[16] = {0};
+            char from2[16] = {0};
+            char to2[16] = {0};
+            if (!ccb_parse_convert_info(body->items[k + 1], kind2, sizeof(kind2), from2, sizeof(from2), to2, sizeof(to2)) ||
+                strcmp(kind2, "bitcast") != 0 || strcmp(from2, to0) != 0 || strcmp(to2, "ptr") != 0)
+                continue;
+
+            add_pos = k;
+            found = true;
+            break;
+        }
+        if (!found)
+        {
+            ++i;
+            continue;
+        }
+
+        if (!ccb_replace_linef(body, add_pos, "  addr_index_ptr %s", to0))
+        {
+            ++i;
+            continue;
+        }
+
+        string_list_remove_range(body, add_pos + 1, 1);
+        string_list_remove_range(body, i, 1);
+        if (i > 0)
+            --i;
+    }
+}
+
+static void ccb_opt_introduce_ext_loads(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+
+    StringList *body = &fb->body;
+    for (size_t i = 0; i + 1 < body->count;)
+    {
+        char from_ty[16] = {0};
+        if (!ccb_parse_memory_type_after_prefix(body->items[i], "load_indirect ", from_ty, sizeof(from_ty)))
+        {
+            ++i;
+            continue;
+        }
+
+        char kind[16] = {0};
+        char from_cv[16] = {0};
+        char to_cv[16] = {0};
+        if (!ccb_parse_convert_info(body->items[i + 1], kind, sizeof(kind), from_cv, sizeof(from_cv), to_cv, sizeof(to_cv)))
+        {
+            ++i;
+            continue;
+        }
+        if (strcmp(from_ty, from_cv) != 0)
+        {
+            ++i;
+            continue;
+        }
+        if (strcmp(kind, "sext") == 0)
+        {
+            if (!ccb_replace_linef(body, i, "  loadsx_indirect %s %s", from_cv, to_cv))
+            {
+                ++i;
+                continue;
+            }
+            string_list_remove_range(body, i + 1, 1);
+            continue;
+        }
+        if (strcmp(kind, "zext") == 0)
+        {
+            if (!ccb_replace_linef(body, i, "  loadzx_indirect %s %s", from_cv, to_cv))
+            {
+                ++i;
+                continue;
+            }
+            string_list_remove_range(body, i + 1, 1);
+            continue;
+        }
+        ++i;
+    }
+}
+
+static void ccb_opt_introduce_br_test_zero(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+
+    StringList *body = &fb->body;
+    for (size_t i = 0; i + 2 < body->count;)
+    {
+        CcbConstInfo cinfo;
+        if (!ccb_parse_const_info(body->items[i], &cinfo) || !ccb_const_is_integer_value(&cinfo, 0ULL))
+        {
+            ++i;
+            continue;
+        }
+
+        char cmp_op[16] = {0};
+        char cmp_ty[16] = {0};
+        bool unsigned_hint = false;
+        if (!ccb_parse_compare_info(body->items[i + 1], cmp_op, sizeof(cmp_op), cmp_ty, sizeof(cmp_ty), &unsigned_hint) ||
+            strcmp(cmp_op, "ne") != 0 || strcmp(cmp_ty, cinfo.type) != 0)
+        {
+            ++i;
+            continue;
+        }
+
+        char true_label[64] = {0};
+        char false_label[64] = {0};
+        if (!ccb_parse_branch_targets(body->items[i + 2], true_label, sizeof(true_label), false_label, sizeof(false_label)))
+        {
+            ++i;
+            continue;
+        }
+
+        if (!ccb_replace_linef(body, i + 1, "  br_test_zero %s %s %s%s", cmp_ty, true_label, false_label,
+                               unsigned_hint ? " unsigned" : ""))
+        {
+            ++i;
+            continue;
+        }
+        string_list_remove_range(body, i + 2, 1);
+        string_list_remove_range(body, i, 1);
+        if (i > 0)
+            --i;
     }
 }
 
@@ -5054,6 +5438,186 @@ static void ccb_opt_remove_dead_local_stores(CcbFunctionBuilder *fb)
     }
 }
 
+static void ccb_opt_remove_unread_local_stores(CcbFunctionBuilder *fb)
+{
+    if (!fb || fb->local_count == 0)
+        return;
+
+    StringList *body = &fb->body;
+    bool *local_is_read = (bool *)calloc(fb->local_count, sizeof(bool));
+    if (!local_is_read)
+        return;
+
+    for (size_t i = 0; i < body->count; ++i)
+    {
+        int idx = -1;
+        if ((ccb_parse_local_index(body->items[i], "load_local", &idx) ||
+             ccb_parse_local_index(body->items[i], "addr_local", &idx)) &&
+            idx >= 0 && (size_t)idx < fb->local_count)
+        {
+            local_is_read[idx] = true;
+        }
+    }
+
+    for (size_t i = 0; i < body->count;)
+    {
+        int store_idx = -1;
+        if (!ccb_parse_local_index(body->items[i], "store_local", &store_idx) ||
+            store_idx < 0 || (size_t)store_idx >= fb->local_count ||
+            local_is_read[store_idx])
+        {
+            ++i;
+            continue;
+        }
+
+        size_t remove_index = i;
+        size_t remove_count = 1;
+        if (i > 0 && ccb_instruction_is_pure(body->items[i - 1]))
+        {
+            remove_index = i - 1;
+            remove_count = 2;
+        }
+        string_list_remove_range(body, remove_index, remove_count);
+        if (remove_index > 0)
+            i = remove_index - 1;
+        else
+            i = 0;
+    }
+
+    free(local_is_read);
+}
+
+static bool ccb_block_ends_with_ret(const StringList *body, size_t block_start, size_t block_end)
+{
+    if (!body || block_start >= block_end)
+        return false;
+
+    size_t i = block_end;
+    while (i > block_start)
+    {
+        --i;
+        const char *line = ccb_trim_leading_ws(body->items[i]);
+        if (!line || *line == '\0' || ccb_is_loc_directive(line))
+            continue;
+        return strncmp(line, "ret", 3) == 0;
+    }
+    return false;
+}
+
+static bool ccb_blocks_equal_ignoring_loc(const StringList *body,
+                                          size_t a_start, size_t a_end,
+                                          size_t b_start, size_t b_end)
+{
+    if (!body)
+        return false;
+
+    size_t a = ccb_skip_loc_directives(body, a_start);
+    size_t b = ccb_skip_loc_directives(body, b_start);
+    while (a < a_end && b < b_end)
+    {
+        if (!ccb_trimmed_lines_equal(body->items[a], body->items[b]))
+            return false;
+        a = ccb_skip_loc_directives(body, a + 1);
+        b = ccb_skip_loc_directives(body, b + 1);
+    }
+    return a >= a_end && b >= b_end;
+}
+
+static void ccb_opt_merge_identical_terminating_blocks(CcbFunctionBuilder *fb)
+{
+    if (!fb)
+        return;
+
+    StringList *body = &fb->body;
+    if (body->count < 4)
+        return;
+
+    size_t label_count = 0;
+    for (size_t i = 0; i < body->count; ++i)
+    {
+        char label[64] = {0};
+        if (ccb_parse_label_name(body->items[i], label, sizeof(label)))
+            ++label_count;
+    }
+    if (label_count < 2)
+        return;
+
+    size_t *label_positions = (size_t *)malloc(label_count * sizeof(size_t));
+    if (!label_positions)
+        return;
+
+    size_t lp = 0;
+    for (size_t i = 0; i < body->count; ++i)
+    {
+        char label[64] = {0};
+        if (ccb_parse_label_name(body->items[i], label, sizeof(label)))
+            label_positions[lp++] = i;
+    }
+
+    for (size_t ai = 0; ai < label_count; ++ai)
+    {
+        if (ai >= label_count)
+            break;
+
+        size_t a_label_pos = label_positions[ai];
+        if (a_label_pos >= body->count)
+            continue;
+
+        char a_label[64] = {0};
+        if (!ccb_parse_label_name(body->items[a_label_pos], a_label, sizeof(a_label)))
+            continue;
+
+        size_t a_start = a_label_pos + 1;
+        size_t a_end = (ai + 1 < label_count) ? label_positions[ai + 1] : body->count;
+        if (!ccb_block_ends_with_ret(body, a_start, a_end))
+            continue;
+
+        for (size_t bi = ai + 1; bi < label_count; ++bi)
+        {
+            size_t b_label_pos = label_positions[bi];
+            if (b_label_pos >= body->count)
+                continue;
+
+            char b_label[64] = {0};
+            if (!ccb_parse_label_name(body->items[b_label_pos], b_label, sizeof(b_label)))
+                continue;
+            if (strcmp(a_label, b_label) == 0)
+                continue;
+
+            size_t b_start = b_label_pos + 1;
+            size_t b_end = (bi + 1 < label_count) ? label_positions[bi + 1] : body->count;
+            if (!ccb_block_ends_with_ret(body, b_start, b_end))
+                continue;
+
+            if (!ccb_blocks_equal_ignoring_loc(body, a_start, a_end, b_start, b_end))
+                continue;
+
+            if (a_start >= body->count)
+                break;
+
+            if (!ccb_replace_linef(body, a_start, "  jump %s", b_label))
+                continue;
+
+            size_t new_a_end = (ai + 1 < label_count) ? label_positions[ai + 1] : body->count;
+            if (new_a_end > a_start + 1)
+                string_list_remove_range(body, a_start + 1, new_a_end - (a_start + 1));
+
+            size_t removed = (new_a_end > a_start + 1) ? (new_a_end - (a_start + 1)) : 0;
+            if (removed > 0)
+            {
+                for (size_t k = ai + 1; k < label_count; ++k)
+                {
+                    if (label_positions[k] >= new_a_end)
+                        label_positions[k] -= removed;
+                }
+            }
+            break;
+        }
+    }
+
+    free(label_positions);
+}
+
 static void ccb_remap_local_indices(StringList *list, const size_t *map, size_t old_count)
 {
     if (!list || !map)
@@ -5800,10 +6364,20 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
             compiler_verbose_logf("optimizer", "pass propagate local values");
         ccb_opt_propagate_local_values(fb);
         if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass fold constant binops");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass fold constant binops");
+        ccb_opt_fold_const_binops(fb);
+        if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass remove dead local stores");
         if (compiler_verbose_enabled())
             compiler_verbose_logf("optimizer", "pass remove dead local stores");
         ccb_opt_remove_dead_local_stores(fb);
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass remove unread local stores");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass remove unread local stores");
+        ccb_opt_remove_unread_local_stores(fb);
         if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass remove unused local slots");
         if (compiler_verbose_enabled())
@@ -5834,6 +6408,11 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
         if (compiler_verbose_enabled())
             compiler_verbose_logf("optimizer", "pass remove unreachable fallthrough");
         ccb_opt_remove_unreachable_fallthrough(fb);
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass merge identical terminating blocks");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass merge identical terminating blocks");
+        ccb_opt_merge_identical_terminating_blocks(fb);
         if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass merge consecutive labels");
         if (compiler_verbose_enabled())
@@ -5869,6 +6448,11 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
         if (compiler_verbose_enabled())
             compiler_verbose_logf("optimizer", "pass remove dead local stores");
         ccb_opt_remove_dead_local_stores(fb);
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass remove unread local stores");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass remove unread local stores");
+        ccb_opt_remove_unread_local_stores(fb);
         if (compiler_verbose_deep_enabled())
             compiler_verbose_treef("optimizer", "+-", "pass remove unused local slots");
         if (compiler_verbose_enabled())
@@ -5963,6 +6547,27 @@ static void ccb_function_optimize(CcbFunctionBuilder *fb, const CodegenOptions *
                                   ccsim_stats.rewritten_load_locals,
                                   ccsim_stats.const_folds,
                                   ccsim_stats.simulation_barriers);
+    }
+
+    if (opts->opt_level >= 2)
+    {
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass introduce addr_index_ptr");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass introduce addr_index_ptr");
+        ccb_opt_introduce_addr_index_ptr(fb);
+
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass introduce ext-load pseudo ops");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass introduce ext-load pseudo ops");
+        ccb_opt_introduce_ext_loads(fb);
+
+        if (compiler_verbose_deep_enabled())
+            compiler_verbose_treef("optimizer", "+-", "pass introduce br_test_zero");
+        if (compiler_verbose_enabled())
+            compiler_verbose_logf("optimizer", "pass introduce br_test_zero");
+        ccb_opt_introduce_br_test_zero(fb);
     }
 
     if (compiler_verbose_enabled())
@@ -13896,11 +14501,15 @@ static int ccb_module_append_global(CcbModule *mod, const Node *decl)
         goto cleanup;
     }
 
+    size_t scalar_align_bytes = ccb_type_size_bytes(decl->var_type);
+    if (scalar_align_bytes < 8)
+        scalar_align_bytes = 8;
+
     bool ok = section_literal
-                  ? ccb_module_appendf(mod, ".global %s type=%s init=%s section=%s%s%s",
-                                       name, cc_type_name(cc_ty), init_buf, section_literal, const_attr, hidden_attr)
-                  : ccb_module_appendf(mod, ".global %s type=%s init=%s%s%s",
-                                       name, cc_type_name(cc_ty), init_buf, const_attr, hidden_attr);
+                  ? ccb_module_appendf(mod, ".global %s type=%s init=%s align=%zu section=%s%s%s",
+                                       name, cc_type_name(cc_ty), init_buf, scalar_align_bytes, section_literal, const_attr, hidden_attr)
+                  : ccb_module_appendf(mod, ".global %s type=%s init=%s align=%zu%s%s",
+                                       name, cc_type_name(cc_ty), init_buf, scalar_align_bytes, const_attr, hidden_attr);
     if (!ok)
         goto cleanup;
 

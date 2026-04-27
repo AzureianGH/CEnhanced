@@ -5,8 +5,6 @@ bring Std.Memory as Mem;
 bring Std.Exception as Exception;
 
 extend from "C" i32 write(i32, char*, int);
-extend from "C" i32 printf(char*, ...);
-extend from "C" i32 vprintf(char*, va_list);
 extend from "C" i32 vsnprintf(char* out, i32 cap, char* fmt, va_list);
 extend from "C" i32 read(i32, char*, int);
 extend from "C" i32 getchar();
