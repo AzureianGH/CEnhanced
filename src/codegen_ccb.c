@@ -631,17 +631,22 @@ static const char *ccb_label_with_varargs_suffix(const char *base, bool is_varar
 
 static bool ccb_symbol_is_c_abi_varargs_extern(const Symbol *sym)
 {
-    return sym && sym->kind == SYM_FUNC && sym->is_extern && sym->sig.is_varargs &&
-           sym->abi && strcmp(sym->abi, "C") == 0;
+    if (!sym || sym->kind != SYM_FUNC || !sym->is_extern || !sym->sig.is_varargs ||
+        !sym->abi || strcmp(sym->abi, "C") != 0)
+        return false;
+    /* For C ABI varargs externs we should treat symbols that do NOT
+       require a varargs suffix as true here (i.e. exposed/runtime
+       C functions). Previously this checked != 0 which inverted the
+       logic and caused correct C externs to be treated as needing
+       suffixing. */
+    return sym->needs_varargs_suffix == 0;
 }
 
 static bool ccb_symbol_needs_varargs_suffix(const Symbol *sym)
 {
     if (!sym || !sym->sig.is_varargs || ccb_symbol_is_c_abi_varargs_extern(sym))
         return false;
-    if (sym->ast_node && sym->ast_node->kind == ND_FUNC && sym->ast_node->export_name)
-        return false;
-    return true;
+    return sym->needs_varargs_suffix != 0;
 }
 
 static bool ccb_name_matches_symbol(const Symbol *sym, const char *name)
@@ -653,6 +658,19 @@ static bool ccb_name_matches_symbol(const Symbol *sym, const char *name)
     if (sym->backend_name && *sym->backend_name && strcmp(sym->backend_name, name) == 0)
         return true;
     return false;
+}
+
+static const Symbol *ccb_find_matching_symbol(const Symbol *symbols, int count, const char *name)
+{
+    if (!symbols || count <= 0 || !name || !*name)
+        return NULL;
+    for (int i = 0; i < count; ++i)
+    {
+        const Symbol *sym = &symbols[i];
+        if (ccb_name_matches_symbol(sym, name))
+            return sym;
+    }
+    return NULL;
 }
 
 static bool ccb_name_is_c_abi_varargs_extern(const Symbol *symbols, int count, const char *name)
@@ -700,8 +718,8 @@ static const char *ccb_resolve_available_varargs_call_name(const CcbFunctionBuil
                                                             size_t bufsz)
 {
     const char *varargs_name;
-    bool has_plain;
-    bool has_varargs;
+    const Symbol *plain_sym;
+    const Symbol *varargs_sym;
 
     if (!name || !*name || ccb_name_has_varargs_suffix(name))
         return name;
@@ -712,11 +730,23 @@ static const char *ccb_resolve_available_varargs_call_name(const CcbFunctionBuil
     if (!varargs_name || !*varargs_name || strcmp(varargs_name, name) == 0)
         return name;
 
-    has_plain = ccb_name_exists_in_call_tables(fb, name);
-    has_varargs = ccb_name_exists_in_call_tables(fb, varargs_name);
+    plain_sym = ccb_find_matching_symbol(fb->opts->externs, fb->opts->extern_count, name);
+    if (!plain_sym)
+        plain_sym = ccb_find_matching_symbol(fb->opts->imported_externs, fb->opts->imported_extern_count, name);
+    varargs_sym = ccb_find_matching_symbol(fb->opts->externs, fb->opts->extern_count, varargs_name);
+    if (!varargs_sym)
+        varargs_sym = ccb_find_matching_symbol(fb->opts->imported_externs, fb->opts->imported_extern_count, varargs_name);
 
-    if (!has_plain && has_varargs && ccb_should_suffix_varargs_call_name(fb, name))
+    if (plain_sym && !plain_sym->needs_varargs_suffix)
+    {
+        return name;
+    }
+
+    if (varargs_sym && (!plain_sym || plain_sym->needs_varargs_suffix || ccb_should_suffix_varargs_call_name(fb, name)))
+    {
         return varargs_name;
+    }
+    
     return name;
 }
 
@@ -731,6 +761,26 @@ static bool ccb_should_suffix_varargs_call_name(const CcbFunctionBuilder *fb, co
         return false;
     if (ccb_name_is_c_abi_varargs_extern(fb->opts->imported_externs, fb->opts->imported_extern_count, name))
         return false;
+
+    if (fb->module && fb->module->unit && fb->module->unit->kind == ND_UNIT)
+    {
+        for (int i = 0; i < fb->module->unit->stmt_count; ++i)
+        {
+            const Node *decl = fb->module->unit->stmts[i];
+            if (!decl || decl->kind != ND_FUNC || !decl->is_varargs)
+                continue;
+            const char *backend = (decl->metadata.backend_name && decl->metadata.backend_name[0])
+                                      ? decl->metadata.backend_name
+                                      : decl->name;
+            if (backend && strcmp(backend, name) == 0)
+            {
+                if (decl->export_name)
+                    return false;
+                return true;
+            }
+        }
+    }
+
     return true;
 }
 
@@ -758,7 +808,9 @@ static const char *ccb_effective_function_name(const Node *fn)
 {
     const char *backend = ccb_effective_function_base_name(fn);
     static char varargs_name[1024];
-    return ccb_label_with_varargs_suffix(backend, ccb_function_needs_varargs_suffix(fn),
+    bool needs_suffix = ccb_function_needs_varargs_suffix(fn);
+
+    return ccb_label_with_varargs_suffix(backend, needs_suffix,
                                          varargs_name, sizeof(varargs_name));
 }
 

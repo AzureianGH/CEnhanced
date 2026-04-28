@@ -681,6 +681,7 @@ typedef struct Symbol
     FuncSig sig;
     struct Node *ast_node; 
     int is_noreturn;
+    int needs_varargs_suffix;
     int is_extension_method;
     Type *var_type; 
     int is_const;   

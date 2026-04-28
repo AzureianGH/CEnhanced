@@ -3314,6 +3314,7 @@ static void symtab_add_library_functions(FrontendUnit *frontend_unit, Node *unit
     sym.backend_name = lf->backend_name ? lf->backend_name : lf->qualified_name;
     sym.is_extern = 1;
     sym.abi = "C";
+    sym.needs_varargs_suffix = lf->is_varargs ? 1 : 0;
     sym.sig.ret = lf->return_type ? lf->return_type : type_i32();
     sym.sig.params = lf->param_types;
     sym.sig.param_count = lf->param_count;
@@ -3414,6 +3415,7 @@ static int merge_stdlib_externs_into_imported(
     sym.backend_name = lf->backend_name ? lf->backend_name : lf->qualified_name;
     sym.is_extern = 1;
     sym.abi = "C";
+    sym.needs_varargs_suffix = lf->is_varargs ? 1 : 0;
     sym.sig.ret = lf->return_type ? lf->return_type : type_i32();
     sym.sig.params = lf->param_types;
     sym.sig.param_count = lf->param_count;

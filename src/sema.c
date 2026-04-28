@@ -312,7 +312,7 @@ int symtab_add(SymTable *st, Symbol sym)
 }
 const Symbol *symtab_get(SymTable *st, const char *name)
 {
-    for (int i = 0; i < st->count; i++)
+    for (int i = st->count - 1; i >= 0; --i)
     {
         if (strcmp(st->items[i].name, name) == 0)
             return &st->items[i];
@@ -3060,6 +3060,7 @@ static void populate_symbol_from_function(Symbol *s, Node *fn)
     s->is_extern = 0;
     s->abi = "C";
     s->sig.is_varargs = fn->is_varargs ? 1 : 0;
+    s->needs_varargs_suffix = fn->is_varargs && !fn->export_name;
     s->sig.param_const_flags = NULL;
     s->ast_node = fn;
     s->is_extension_method = fn->is_extension_method ? 1 : 0;
@@ -3292,6 +3293,7 @@ static void sema_register_function_foreign(SemaContext *sc, const Node *unit_nod
     Symbol s = {0};
     populate_symbol_from_function(&s, fn);
     s.is_extern = 1;
+    s.needs_varargs_suffix = fn->is_varargs && !fn->export_name;
 
     if (auto_import)
         sema_imported_function_insert(sc, fn->name, module_full, &s);
@@ -7864,7 +7866,9 @@ static void check_expr(SemaContext *sc, Node *e)
                 sema_track_imported_function(sc, import_name, NULL, direct_sym);
         }
 
-        Type *ret_type = func_sig->func.ret ? func_sig->func.ret : &ty_i32;
+        Type *ret_type = (e->call_target && e->call_target->is_noreturn)
+                     ? &ty_void
+                     : (func_sig->func.ret ? func_sig->func.ret : &ty_i32);
         e->type = ret_type;
         e->call_func_type = func_sig;
         e->call_is_indirect = call_is_indirect;
@@ -8199,6 +8203,11 @@ static void check_expr(SemaContext *sc, Node *e)
 
 static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *found_ret);
 
+static int sema_expr_is_noreturn_call(const Node *expr)
+{
+    return expr && expr->kind == ND_CALL && expr->call_target && expr->call_target->is_noreturn;
+}
+
 static int sema_check_block(SemaContext *sc, Node *block, Node *fn, int *found_ret, int push_scope)
 {
     if (!block)
@@ -8379,7 +8388,11 @@ static int sema_check_statement(SemaContext *sc, Node *stmt, Node *fn, int *foun
     }
     case ND_EXPR_STMT:
         if (stmt->lhs)
+        {
             check_expr(sc, stmt->lhs);
+            if (sema_expr_is_noreturn_call(stmt->lhs) && found_ret)
+                *found_ret = 1;
+        }
         return 0;
     case ND_DELETE:
     {

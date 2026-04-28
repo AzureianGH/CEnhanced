@@ -9241,6 +9241,7 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
         s.backend_name = s.name;
         s.is_extern = 1;
         s.abi = xstrdup("C");
+        s.needs_varargs_suffix = 0;
         
         
         static Type ti32_ext = {.kind = TY_I32};
@@ -9440,6 +9441,7 @@ static int parse_extend_decl(Parser *ps, int leading_noreturn)
     s.name = nm;
     s.backend_name = s.name;
     s.is_extern = 1;
+    s.needs_varargs_suffix = 0;
     if (abi.kind == TK_STRING)
     {
         char *ab = (char *)xmalloc((size_t)abi.length - 1);
