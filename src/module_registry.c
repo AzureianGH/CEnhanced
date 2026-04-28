@@ -270,7 +270,8 @@ Type *module_registry_canonical_type(Type *ty)
                 }
                 if (match_count == 1)
                     resolved = name_match;
-                else if (!resolved && ty->import_module)
+
+                if (!resolved && ty->import_module)
                 {
                     Type *qualified_match = NULL;
                     int qualified_count = 0;
@@ -288,7 +289,8 @@ Type *module_registry_canonical_type(Type *ty)
                     if (qualified_count == 1)
                         resolved = qualified_match;
                 }
-                else if (!resolved)
+
+                if (!resolved)
                 {
                     Type *enum_match = NULL;
                     int enum_matches = 0;
